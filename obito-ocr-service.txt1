@@ -1,0 +1,1 @@
+var OCR_API_URL = "https://obito-ocr-service.onrender.com/ocr";
