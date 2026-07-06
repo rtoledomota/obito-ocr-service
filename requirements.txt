@@ -1,0 +1,5 @@
+# FILE: requirements.txt
+fastapi
+uvicorn
+requests
+pytest
