@@ -512,7 +512,7 @@ def _looks_like_label(s: str) -> bool:
     return False
 
 
-_extract_causas(lines: List[str]) -> List[str]:
+def_extract_causas(lines: List[str]) -> List[str]:
     """Extrai causas da Parte I, parando em marcadores de seção posteriores.
     Ignora linhas auxiliares, tokens de duração, CID puro e palavras auxiliares isoladas.
     Remove CIDs colados ao final de descrições clínicas válidas."""
