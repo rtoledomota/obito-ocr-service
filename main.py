@@ -424,20 +424,21 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
                     break
 
     # Causas da morte (Parte I)
-    causas = _extract_causas(lines)
+     causas = _extract_causas(lines)
     for k, causa in enumerate(causas[:5]):
         key = "CAUSA_MORTE" if k == 0 else f"CAUSA_MORTE_{k + 1}"
         result[key] = causa
-    if causas:
-        result["CAUSA_BASICA"] = causas[-1]
 
-    # CID_BASICA: tenta da causa básica, depois do texto inteiro
-    cid_basica = _extract_cid_from_text(result.get("CAUSA_BASICA", ""))
+    # CAUSA_BASICA: última descrição clínica válida (nunca CID puro)
+    causa_basica = causas[-1] if causas else ""
+    result["CAUSA_BASICA"] = causa_basica
+
+    # CID_BASICA: procura primeiro em CAUSA_BASICA, depois no raw_text
+    cid_basica = _extract_cid_from_text(causa_basica) if causa_basica else ""
     if not cid_basica:
         cid_basica = _extract_cid_from_text(raw_text)
     result["CID_BASICA"] = cid_basica
     result["CODIGO_CAUSA_BASICA"] = cid_basica
-
     return result
 
 
@@ -451,8 +452,10 @@ def _looks_like_label(s: str) -> bool:
     return False
 
 
-def _extract_causas(lines: List[str]) -> List[str]:
-    """Extrai causas da Parte I, parando em marcadores de seção posteriores."""
+extract_causas(lines: List[str]) -> List[str]:
+    """Extrai causas da Parte I, parando em marcadores de seção posteriores.
+    Ignora linhas auxiliares, tokens de duração e linhas que sejam CID puro.
+    Remove CIDs colados ao final de descrições clínicas válidas."""
     start = -1
     for i, ln in enumerate(lines):
         if re.search(r"CAUSAS\s+DA\s+MORTE", ln, re.IGNORECASE):
@@ -472,6 +475,9 @@ def _extract_causas(lines: List[str]) -> List[str]:
         r"Meses\s+Dias\s+Horas\s+Minutos\s+Ignorado",
     ]
 
+    def _is_pure_cid(s: str) -> bool:
+        return bool(re.fullmatch(r"[A-TV-Z]\d{2}(?:\.\d{1,2})?", s.strip(), re.IGNORECASE))
+
     causas: List[str] = []
     for ln in lines[start:]:
         s = ln.strip()
@@ -485,10 +491,15 @@ def _extract_causas(lines: List[str]) -> List[str]:
             continue
         if _looks_like_label(s):
             continue
-        # Remove CIDs colados ao final da causa
+        # Linha que é apenas CID puro (ex.: N39.0) não é causa textual
+        if _is_pure_cid(s):
+            continue
+        # Remove CID colado ao final da causa (ex.: "Infecção do trato urinário N39.0")
         clean = re.sub(r"\s+\b[A-TV-Z]\d{2}(?:\.\d{1,2})?\b$", "", s, flags=re.IGNORECASE).strip()
-        if clean:
-            causas.append(clean)
+        # Após remover o CID, se sobar apenas CID puro ou vazio, descarta
+        if not clean or _is_pure_cid(clean):
+            continue
+        causas.append(clean)
     return causas
 
 
@@ -525,6 +536,22 @@ def validate_structured(structured: Dict[str, Any]) -> Dict[str, Any]:
         errors.append("DATA_OBITO ausente")
     if not structured.get("CAUSA_BASICA"):
         errors.append("CAUSA_BASICA ausente")
+
+    # Validação semântica de nomes
+    nome = (structured.get("NOME") or "").strip()
+    nome_pai = (structured.get("NOME_PAI") or "").strip()
+    nome_mae = (structured.get("NOME_MAE") or "").strip()
+    if nome and nome_pai and nome.upper() == nome_pai.upper():
+        errors.append("NOME igual a NOME_PAI")
+    if nome and nome_mae and nome.upper() == nome_mae.upper():
+        errors.append("NOME igual a NOME_MAE")
+
+    # Validação semântica de causa básica
+    causa_basica = (structured.get("CAUSA_BASICA") or "").strip()
+    if causa_basica and re.fullmatch(r"[A-TV-Z]\d{2}(?:\.\d{1,2})?", causa_basica, re.IGNORECASE):
+        errors.append("CAUSA_BASICA parece CID, não descrição")
+
+    # CID_BASICA
     if not structured.get("CID_BASICA"):
         warnings.append("CID_BASICA não localizado")
 
