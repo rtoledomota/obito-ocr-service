@@ -452,7 +452,48 @@ def _looks_like_label(s: str) -> bool:
     return False
 
 
-extract_causas(lines: List[str]) -> List[str]:
+# TRECHO CORRIGIDO PARA main.py
+
+    # Causas da morte (Parte I)
+    causas = _extract_causas(lines)
+    for k, causa in enumerate(causas[:5]):
+        key = "CAUSA_MORTE" if k == 0 else f"CAUSA_MORTE_{k + 1}"
+        result[key] = causa
+
+    # CAUSA_BASICA: última descrição clínica válida (nunca CID puro)
+    causa_basica = causas[-1] if causas else ""
+    result["CAUSA_BASICA"] = causa_basica
+
+    # CID_BASICA: procura primeiro em CAUSA_BASICA, depois no raw_text
+    cid_basica = _extract_cid_from_text(causa_basica) if causa_basica else ""
+    if not cid_basica:
+        cid_basica = _extract_cid_from_text(raw_text)
+    result["CID_BASICA"] = cid_basica
+    result["CODIGO_CAUSA_BASICA"] = cid_basica
+
+    return result
+
+
+def _looks_like_label(s: str) -> bool:
+    """Heurística para identificar rótulos de formulário em vez de conteúdo."""
+    if not s:
+        return False
+    s_stripped = s.strip()
+    # Rótulos terminados em ':' ou totalmente em MAIÚSCULAS com poucas palavras
+    if s_stripped.endswith(":"):
+        return True
+    if s_stripped.isupper() and len(s_stripped.split()) <= 6:
+        return True
+    # Rótulos conhecidos
+    labels = [
+        r"^NOME$", r"^NOME\s+DA\s+M[ÃA]E$", r"^NOME\s+DO\s+PAI$",
+        r"^CPF$", r"^RG$", r"^CID$", r"^CAUSA\s+MORTE$",
+        r"^CAUSA\s+B[ÁA]SICA$", r"^DATA$", r"^HORA$",
+    ]
+    return any(re.fullmatch(p, s_stripped, re.IGNORECASE) for p in labels)
+
+
+def _extract_causas(lines: List[str]) -> List[str]:
     """Extrai causas da Parte I, parando em marcadores de seção posteriores.
     Ignora linhas auxiliares, tokens de duração e linhas que sejam CID puro.
     Remove CIDs colados ao final de descrições clínicas válidas."""
