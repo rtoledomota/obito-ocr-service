@@ -595,13 +595,22 @@ def parse_obito(text: str) -> Dict[str, Any]:
         'obito atestado',
         'medico',
         'médico',
+        '>7d',
+        '<7d',
+        '>24h',
+        '<24h',
+        'intervalo',
     ]
 
     def _causa_valida(c: str) -> bool:
         if not c or not c.strip():
             return False
         cl = _norm_label(c)
-        if len(cl) < 3:
+        if re.fullmatch(r'[<>]?\s*\d+\s*[dhm]?', cl):
+            return False
+        if re.fullmatch(r'[<>]?\s*\d+\s*(dia|dias|hora|horas|min|minutos|d|h|m)', cl):
+            return False
+        if 'intervalo entre o inicio e a morte' in cl:
             return False
         for proibido in _CAUSA_BASICA_BLACKLIST:
             if proibido in cl:
@@ -763,7 +772,7 @@ def validate_obito(structured: Dict[str, Any]) -> Dict[str, Any]:
     score = max(0, score - len(errors) * 10)
     structured["QUALIDADE_SCORE"] = score
 
-   if errors:
+     if errors:
         status = 'REVISAR'
     elif score < 70:
         status = 'REVISAR'
