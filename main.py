@@ -582,15 +582,69 @@ def parse_obito(text: str) -> Dict[str, Any]:
     structured["PROFISSAO"] = _find_block_value(text, ["Profissão", "Profissao", "Ocupação", "Ocupacao"])
 
     # --- Causas ---
-    causes = _extract_causes(text)
+        causes = _extract_causes(text)
+
+    # Textos que NUNCA devem ser considerados como causa básica
+    _CAUSA_BASICA_BLACKLIST = [
+        'outras condições significativas',
+        'outras condicoes significativas',
+        'nome do médico',
+        'nome do medico',
+        'crm',
+        'óbito atestado',
+        'obito atestado',
+        'medico',
+        'médico',
+    ]
+
+    def _causa_valida(c: str) -> bool:
+        if not c or not c.strip():
+            return False
+        cl = _norm_label(c)
+        if len(cl) < 3:
+            return False
+        for proibido in _CAUSA_BASICA_BLACKLIST:
+            if proibido in cl:
+                return False
+        if _is_noise_line(c):
+            return False
+        return True
+
+    # Limpa causas residuais inválidas
+    causes = [c.strip() for c in causes if _causa_valida(c)]
+
+    # Mantém CAUSA_MORTE até CAUSA_MORTE_5
     if causes:
-        structured["CAUSA_MORTE"] = causes[0] if len(causes) >= 1 else ""
-        structured["CAUSA_MORTE_2"] = causes[1] if len(causes) >= 2 else ""
-        structured["CAUSA_MORTE_3"] = causes[2] if len(causes) >= 3 else ""
-        structured["CAUSA_MORTE_4"] = causes[3] if len(causes) >= 4 else ""
-        structured["CAUSA_MORTE_5"] = causes[4] if len(causes) >= 5 else ""
-        non_empty = [c for c in causes if c.strip()]
-        structured["CAUSA_BASICA"] = non_empty[-1] if non_empty else ""
+        structured['CAUSA_MORTE'] = causes[0] if len(causes) >= 1 else ''
+        structured['CAUSA_MORTE_2'] = causes[1] if len(causes) >= 2 else ''
+        structured['CAUSA_MORTE_3'] = causes[2] if len(causes) >= 3 else ''
+        structured['CAUSA_MORTE_4'] = causes[3] if len(causes) >= 4 else ''
+        structured['CAUSA_MORTE_5'] = causes[4] if len(causes) >= 5 else ''
+        # CAUSA_BASICA = última causa realmente válida
+        validas = [c for c in causes if _causa_valida(c)]
+        structured['CAUSA_BASICA'] = validas[-1] if validas else ''
+    else:
+        structured['CAUSA_BASICA'] = ''
+
+    # --- CID_BASICA: simples, sem inventar ---
+    _CID_RE = re.compile(r'\b([A-TV-Z]\d{2}(?:\.\d{1,4})?)\b', re.IGNORECASE)
+
+    cid_basica = ''
+    # 1) Procura CIDs dentro de CAUSA_BASICA primeiro
+    if structured.get('CAUSA_BASICA'):
+        cids = _CID_RE.findall(structured['CAUSA_BASICA'])
+        if cids:
+            cid_basica = cids[-1].upper()
+
+    # 2) Se não achar, procura no texto completo
+    if not cid_basica:
+        cids = _CID_RE.findall(text or '')
+        if cids:
+            cid_basica = cids[-1].upper()
+
+    # 3) Não inventa CID: só atribui se realmente encontrado
+    structured['CID_BASICA'] = cid_basica
+
 
     # --- Tipo de óbito / assistido ---
     structured["TIPO_OBITO"] = _find_block_value(text, ["Tipo de óbito", "Tipo de obito"])
@@ -709,20 +763,15 @@ def validate_obito(structured: Dict[str, Any]) -> Dict[str, Any]:
     score = max(0, score - len(errors) * 10)
     structured["QUALIDADE_SCORE"] = score
 
-    if errors or any(not structured.get(c) for c in campos_criticos):
-        status = "REVISAR"
+   if errors:
+        status = 'REVISAR'
+    elif score < 70:
+        status = 'REVISAR'
+    elif not structured.get('CAUSA_BASICA'):
+        status = 'REVISAR'
     else:
-        status = "OK"
-    structured["STATUS"] = status
-
-    structured["ERROS"] = " | ".join(errors)
-
-    validation = {
-        "ok": len(errors) == 0,
-        "errors": errors,
-        "warnings": warnings,
-        "computed": computed,
-    }
+        status = 'OK'
+    structured['STATUS'] = status
     return validation
 
 
