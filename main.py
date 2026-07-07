@@ -9,7 +9,7 @@ import datetime
 import unicodedata
 
 import requests
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 
 
@@ -66,6 +66,75 @@ GARBAGE_CID_SET = {
     'J96', 'J96.0', 'J96.9', 'P95', 'O80', 'A41', 'A41.9', 'U07.1', 'U07.2'
 }
 
+# -----------------------------------------------------------------------------
+# PADRÕES DE RECUSA DO PROVEDOR OCR
+# -----------------------------------------------------------------------------
+# Frases que indicam que o provedor recusou processar a imagem ou retornou uma
+# mensagem de bloqueio em vez do OCR real do documento. A detecção é feita em
+# texto normalizado (sem acentos, minúsculo, sem pontuação) para cobrir
+# variações de apostrofo (I'm / I'm) e codificação.
+# A verificação é case-insensitive e tolerante a acentos/aspas diferentes.
+REFUSAL_PATTERNS = [
+    "i'm sorry",
+    "i'm sorry",
+    "i cant assist with that",
+    "i cant assist with that",
+    "i cannot assist",
+    "cannot assist",
+    "unable to help",
+    "cannot help with that request",
+    "i cant help with that",
+    "i cant help with that",
+    "desculpe",
+    "nao posso ajudar",
+    "nao posso ajudar com isso",
+    "i am unable to",
+    "i am not able to",
+    "as an ai",
+    "as a language model",
+    "i cannot fulfill",
+    "i cant fulfill",
+    "i cannot complete",
+    "i cant complete",
+    "i cannot process",
+    "i cant process",
+    "i cannot provide",
+    "i cant provide",
+    "content policy",
+    "safety policy",
+    "i cannot analyze",
+    "i cant analyze",
+    "i cannot extract",
+    "i cant extract",
+    "i cannot read",
+    "i cant read",
+    "i cannot interpret",
+    "i cant interpret",
+    "this appears to be",
+    "i can however",
+    "i can help with",
+    "please provide",
+    "could you provide",
+    "if youd like",
+    "if you would like",
+    "let me know",
+    "feel free to",
+]
+
+
+# =============================================================================
+# EXCEÇÕES PERSONALIZADAS
+# =============================================================================
+
+class OcrServiceError(Exception):
+    """Exceção controlada do serviço de OCR."""
+    def __init__(self, code, message, request_id, status=500):
+        self.code = code
+        self.message = message
+        self.request_id = request_id
+        self.status = status
+        super().__init__(message)
+
 
 # =============================================================================
 # FUNÇÕES UTILITÁRIAS DE TEXTO
@@ -106,6 +175,58 @@ def _norm(s):
     # Remove tudo que não for alfanumérico
     s = re.sub(r"[^a-z0-9]", "", s)
     return s
+
+
+def _norm_for_refusal(s):
+    """Normaliza string para detecção de recusa: minúscula, sem acentos,
+    mantendo espaços e apóstrofos removidos. Retorna texto sem pontuação
+    mas com espaços preservados para casar frases completas."""
+    if not s:
+        return ""
+    s = s.lower()
+    # Remove acentos
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    # Remove apóstrofos e aspas (cobre I'm / I'm / I`m)
+    s = s.replace("'", "").replace("'", "").replace("`", "").replace("’", "")
+    s = s.replace("´", "")
+    # Remove pontuação exceto espaços
+    s = re.sub(r"[^a-z0-9\s]", "", s)
+    # Reduz espaços múltiplos
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def is_provider_refusal(text):
+    """Detecta explicitamente se o texto retornado pelo provedor OCR é uma
+    recusa, desculpa automática, mensagem de bloqueio ou qualquer resposta
+    que claramente não seja o OCR real do documento.
+
+    Retorna True se o texto for vazio OU contiver algum padrão de recusa.
+    A verificação é case-insensitive e tolerante a acentos e variações de
+    apóstrofo (I'm / I'm).
+
+    Esta função DEVE ser chamada logo após receber o texto do provedor,
+    ANTES de chamar parse_obito, para impedir falso sucesso com status 200.
+    """
+    if not text:
+        return True
+
+    texto_norm = _norm_for_refusal(text)
+    if not texto_norm:
+        return True
+
+    # Se o texto for muito curto (menos de 20 caracteres úteis), é suspeito.
+    # Um OCR real de declaração de óbito sempre produz texto extenso.
+    if len(texto_norm) < 20:
+        return True
+
+    for padrao in REFUSAL_PATTERNS:
+        padrao_norm = _norm_for_refusal(padrao)
+        if padrao_norm and padrao_norm in texto_norm:
+            return True
+
+    return False
 
 
 def _normalizar_data_bruta(valor):
@@ -878,44 +999,49 @@ def call_ocr_provider(file_bytes, mime_type, model, request_id):
 
     if not text:
         raise OcrServiceError(
-            code="OCR_EMPTY_RESULT",
-            message="Provedor OCR retornou texto vazio.",
+            code="OCR_PROVIDER_ERROR",
+            message="Provedor OCR retornou texto vazio ou não retornou OCR válido.",
+            request_id=request_id,
+            status=502
+        )
+
+    # -----------------------------------------------------------------------
+    # DETECÇÃO EXPLÍCITA DE RECUSA DO PROVEDOR
+    # -----------------------------------------------------------------------
+    # Verifica se o provedor recusou processar a imagem ou retornou uma
+    # mensagem de bloqueio (ex.: "I'm sorry, I can't assist with that.").
+    # Esta veração ocorre ANTES de qualquer parseamento, impedindo falso
+    # sucesso com status 200 e structured vazio.
+    if is_provider_refusal(text):
+        raise OcrServiceError(
+            code="OCR_PROVIDER_ERROR",
+            message=(
+                "O provedor OCR recusou processar a imagem ou não retornou OCR "
+                "válido do documento. Resposta recebida não corresponde ao "
+                "conteúdo de uma declaração de óbito."
+            ),
             request_id=request_id,
             status=502
         )
 
     # Confidence heurística: provedores OpenAI não retornam confidence direta,
-    # então usamos 0.85 como padrão quando há texto.
+    # então usamos 0.85 como padrão quando há texto válido.
     confidence = 0.85
 
     return {"text": text, "confidence": confidence}
 
 
 # =============================================================================
-# EXCEÇÕES PERSONALIZADAS
-# =============================================================================
-
-class OcrServiceError(Exception):
-    """Exceção controlada do serviço de OCR."""
-    def __init__(self, code, message, request_id, status=500):
-        self.code = code
-        self.message = message
-        self.request_id = request_id
-        self.status = status
-        super().__init__(message)
-
-
-# =============================================================================
 # FASTAPI APP
 # =============================================================================
 
-app = FastAPI(title="obito-ocr-service", version="3.0.0")
+app = FastAPI(title="obito-ocr-service", version="3.1.0")
 
 
 @app.get("/health")
 async def health():
     """Endpoint de saúde para monitoramento do Render."""
-    return {"status": "ok", "service": "obito-ocr-service", "version": "3.0.0"}
+    return {"status": "ok", "service": "obito-ocr-service", "version": "3.1.0"}
 
 
 @app.post("/ocr")
@@ -1051,6 +1177,10 @@ async def ocr(request: Request, authorization: str = Header(default="")):
         )
 
     # --- Chama provedor OCR ---
+    # O adaptador call_ocr_provider já inclui a detecção explícita de recusa
+    # do provedor (is_provider_refusal) ANTES de retornar o texto. Se o
+    # provedor recusar ou retornar texto vazio/bloqueio, uma OcrServiceError
+    # com code=OCR_PROVIDER_ERROR e status=502 é levantada aqui.
     try:
         ocr_result = call_ocr_provider(file_bytes, mime_type, model, request_id)
     except OcrServiceError as e:
@@ -1067,6 +1197,8 @@ async def ocr(request: Request, authorization: str = Header(default="")):
     confidence = ocr_result["confidence"]
 
     # --- Parser estruturado ---
+    # Neste ponto o texto já passou pela detecção de recusa e é considerado
+    # OCR válido do documento. O parser só é chamado quando há texto real.
     try:
         structured = parse_obito(raw_text, file_bytes)
     except Exception as e:
