@@ -328,7 +328,23 @@ def _extract_cid_from_text(text: str) -> str:
         return ""
     return matches[-1].upper()
 
-
+def _clean_causa_text(value: str) -> str:
+    if not value: return ""
+    text = value.strip()
+    while True:
+        prev = text
+        # Remove prefixos: 'd ', '(d) ', '- ', ': ' e variações repetidas
+        text = re.sub(r"^\(?[a-zA-Z]\)?[\s\-\:]+\s*", "", text)
+        text = re.sub(r"^[\-\:\s]+\s*", "", text)
+        if text == prev: break
+    # Se sobrar apenas CID puro
+    if bool(re.fullmatch(r"[A-TV-Z]\d{2}(?:\.\d{1,2})?", text, re.IGNORECASE)):
+        return ""
+    # Se for duração/intervalo (>7d, <24h, 3d, 12h, 30m)
+    if bool(re.fullmatch(r"[<>]?\s*\d+\s*[dhms]", text, re.IGNORECASE)):
+        return ""
+    return text.strip()
+    
 def parse_obito(raw_text: str) -> Dict[str, Any]:
     result: Dict[str, Any] = {k: "" for k in HEADER}
     raw_lines = raw_text.splitlines()
@@ -414,8 +430,10 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         key = "CAUSA_MORTE" if k == 0 else f"CAUSA_MORTE_{k + 1}"
         result[key] = causa
 
-    # CAUSA_BASICA: última descrição clínica válida (nunca CID puro)
-    causa_basica = causas[-1] if causas else ""
+     # CAUSA_BASICA: limpa e pega a última não vazia
+    cleaned_causas = [_clean_causa_text(c) for c in causas]
+    valid_causas = [c for c in cleaned_causas if c]
+    causa_basica = valid_causas[-1] if valid_causas else ""
     result["CAUSA_BASICA"] = causa_basica
 
     # CID_BASICA: procura primeiro em CAUSA_BASICA, depois no raw_text
@@ -424,7 +442,6 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         cid_basica = _extract_cid_from_text(raw_text)
     result["CID_BASICA"] = cid_basica
     result["CODIGO_CAUSA_BASICA"] = cid_basica
-    return result
 
 
 def _looks_like_label(s: str) -> bool:
@@ -563,11 +580,13 @@ def validate_structured(structured: Dict[str, Any]) -> Dict[str, Any]:
     score = _compute_score(structured, errors, warnings)
 
     # Status operacional
-    if errors:
+     if errors:
         status = "REVISAR"
-    elif score < 70:
+    elif score < 90 and warnings:
         status = "REVISAR"
     elif not structured.get("CAUSA_BASICA"):
+        status = "REVISAR"
+    elif not structured.get("CID_BASICA"):
         status = "REVISAR"
     else:
         status = "OK"
