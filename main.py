@@ -1,7 +1,6 @@
 # FILE: main.py
 import base64
 import hashlib
-import json
 import os
 import re
 import time
@@ -9,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 
 
@@ -27,7 +26,6 @@ PORT = int(os.environ.get("PORT", "8000"))
 ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp", "application/pdf"}
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
-# Ordem obrigatória do cabeçalho estruturado
 HEADER = [
     "NOME", "NOME_SOCIAL", "NASCIMENTO", "SEXO", "RACA_COR", "ESTADO_CIVIL",
     "NACIONALIDADE", "NOME_MAE", "NOME_PAI", "PROFISSAO", "LOGRADOURO",
@@ -56,17 +54,12 @@ MESES = {
     "09": "SETEMBRO", "10": "OUTUBRO", "11": "NOVEMBRO", "12": "DEZEMBRO",
 }
 
-# Frases que indicam recusa do provedor OCR
 REFUSAL_PHRASES = [
     "i'm sorry", "i can't assist with that", "i can't assist with that",
     "cannot assist", "unable to help", "cannot help with that request",
     "i can't help with that", "desculpe", "não posso ajudar", "nao posso ajudar",
 ]
 
-
-# ---------------------------------------------------------------------------
-# Aplicação FastAPI
-# ---------------------------------------------------------------------------
 
 app = FastAPI(title="obito-ocr-service", version="1.0.0")
 
@@ -166,9 +159,7 @@ async def ocr(
     )
 
 
-# ---------------------------------------------------------------------------
 # Erros auxiliares
-# ---------------------------------------------------------------------------
 
 def _error_response(code: str, message: str, request_id: Optional[str], status: int) -> JSONResponse:
     return JSONResponse(
@@ -189,17 +180,13 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-# ---------------------------------------------------------------------------
 # Exceção específica do provedor OCR
-# ---------------------------------------------------------------------------
 
 class OCRProviderError(Exception):
     pass
 
 
-# ---------------------------------------------------------------------------
 # Adaptador OCR (OpenAI-compatible)
-# ---------------------------------------------------------------------------
 
 def call_ocr_provider(file_bytes: bytes, mime_type: str, model: str) -> Tuple[str, float]:
     if not OPENAI_API_URL or not OPENAI_API_KEY:
@@ -278,9 +265,7 @@ def call_ocr_provider(file_bytes: bytes, mime_type: str, model: str) -> Tuple[st
     return content.strip(), confidence
 
 
-# ---------------------------------------------------------------------------
 # Parser de certidão de óbito
-# ---------------------------------------------------------------------------
 
 def _normalize_line(line: str) -> str:
     """Normaliza uma linha removendo prefixos numéricos de rótulos, sem afetar valores."""
@@ -288,7 +273,7 @@ def _normalize_line(line: str) -> str:
     if not s:
         return ""
     # Remove prefixos como '2 ', '2. ', '2) ', '2- ' apenas quando seguidos de texto
-    m = re.match(r"^(\d{1,2})[.\)\-:]?\s+([A-Za-zÀ-ú].*)$", s)
+    m = re.match(r"^(\d{1,2})[.)\-:]?\s+([A-Za-zÀ-ú].*)$", s)
     if m:
         return m.group(2).strip()
     return s
@@ -424,37 +409,6 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
                     break
 
     # Causas da morte (Parte I)
-     causas = _extract_causas(lines)
-    for k, causa in enumerate(causas[:5]):
-        key = "CAUSA_MORTE" if k == 0 else f"CAUSA_MORTE_{k + 1}"
-        result[key] = causa
-
-    # CAUSA_BASICA: última descrição clínica válida (nunca CID puro)
-    causa_basica = causas[-1] if causas else ""
-    result["CAUSA_BASICA"] = causa_basica
-
-    # CID_BASICA: procura primeiro em CAUSA_BASICA, depois no raw_text
-    cid_basica = _extract_cid_from_text(causa_basica) if causa_basica else ""
-    if not cid_basica:
-        cid_basica = _extract_cid_from_text(raw_text)
-    result["CID_BASICA"] = cid_basica
-    result["CODIGO_CAUSA_BASICA"] = cid_basica
-    return result
-
-
-def _looks_like_label(s: str) -> bool:
-    """Heurística simples para evitar capturar rótulos como valores."""
-    low = s.lower().strip()
-    if low in {"do médico", "do medico", "horas minutos", "meses dias horas minutos ignorado"}:
-        return True
-    if re.match(r"^(parte\s+i|parte\s+ii|cid|crm|uf)$", low):
-        return True
-    return False
-
-
-# TRECHO CORRIGIDO PARA main.py
-
-    # Causas da morte (Parte I)
     causas = _extract_causas(lines)
     for k, causa in enumerate(causas[:5]):
         key = "CAUSA_MORTE" if k == 0 else f"CAUSA_MORTE_{k + 1}"
@@ -470,7 +424,6 @@ def _looks_like_label(s: str) -> bool:
         cid_basica = _extract_cid_from_text(raw_text)
     result["CID_BASICA"] = cid_basica
     result["CODIGO_CAUSA_BASICA"] = cid_basica
-
     return result
 
 
@@ -479,18 +432,23 @@ def _looks_like_label(s: str) -> bool:
     if not s:
         return False
     s_stripped = s.strip()
-    # Rótulos terminados em ':' ou totalmente em MAIÚSCULAS com poucas palavras
+    # Rótulos terminados em ':'
     if s_stripped.endswith(":"):
         return True
-    if s_stripped.isupper() and len(s_stripped.split()) <= 6:
+    # Palavras específicas
+    low = s_stripped.lower()
+    if low in {"do médico", "do medico", "horas minutos", "meses dias horas minutos ignorado"}:
         return True
-    # Rótulos conhecidos
-    labels = [
-        r"^NOME$", r"^NOME\s+DA\s+M[ÃA]E$", r"^NOME\s+DO\s+PAI$",
-        r"^CPF$", r"^RG$", r"^CID$", r"^CAUSA\s+MORTE$",
-        r"^CAUSA\s+B[ÁA]SICA$", r"^DATA$", r"^HORA$",
+    # Padrões conhecidos
+    patterns = [
+        r"^(parte\s+i|parte\s+ii|cid|crm|uf)$",
+        r"^nome$", r"^nome\s+da\s+m[ãa]e$", r"^nome\s+do\s+pai$",
+        r"^cpf$", r"^rg$", r"^cid$", r"^causa\s+morte$",
+        r"^causa\s+b[áa]sica$", r"^data$", r"^hora$",
     ]
-    return any(re.fullmatch(p, s_stripped, re.IGNORECASE) for p in labels)
+    if any(re.fullmatch(p, s_stripped, re.IGNORECASE) for p in patterns):
+        return True
+    return False
 
 
 def _extract_causas(lines: List[str]) -> List[str]:
@@ -544,9 +502,7 @@ def _extract_causas(lines: List[str]) -> List[str]:
     return causas
 
 
-# ---------------------------------------------------------------------------
 # Validação
-# ---------------------------------------------------------------------------
 
 def validate_structured(structured: Dict[str, Any]) -> Dict[str, Any]:
     errors: List[str] = []
@@ -666,9 +622,7 @@ def _month_name_from_date(date_str: str) -> str:
     return MESES.get(m.group(1), "")
 
 
-# ---------------------------------------------------------------------------
 # Ponto de entrada
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn
