@@ -488,145 +488,175 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
     return result
 
 
+# TRECHO CORRIGIDO
+import re
+from typing import Any, Dict, List
+
+
 def _looks_like_label(s: str) -> bool:
-    """Heurística para identificar rótulos de formulário em vez de conteúdo."""
     if not s:
         return False
-    s_stripped = s.strip()
-    # Rótulos terminados em ':'
-    if s_stripped.endswith(":"):
+    text = str(s).strip()
+    if not text:
+        return False
+
+    if text.endswith(':'):
         return True
-    # Palavras específicas
-    low = s_stripped.lower()
-    if low in {"do médico", "do medico", "horas minutos", "meses dias horas minutos ignorado"}:
+
+    upper = text.upper()
+
+    specific_terms = {
+        'NOME', 'NOME DA MAE', 'NOME DA MÃE', 'NOME DO PAI',
+        'DATA DE NASCIMENTO', 'DATA DO NASCIMENTO',
+        'DATA DO OBITO', 'DATA DE OBITO',
+        'HORA DO OBITO', 'HORA DE OBITO',
+        'UF', 'UF DO OBITO', 'CEP', 'MUNICIPIO', 'MUNICÍPIO',
+        'CAUSAS DA MORTE', 'PARTE I', 'PARTE II',
+        'CID BASICA', 'CID BÁSICA', 'CID',
+        'CRM', 'NOME DO MEDICO', 'NOME DO MÉDICO',
+        'OUTRAS CONDICOES SIGNIFICATIVAS',
+        'OUTRAS CONDIÇÕES SIGNIFICATIVAS',
+        'PROVAVEIS CIRCUNSTANCIAS',
+        'PROVÁVEIS CIRCUNSTÂNCIAS',
+    }
+    if upper in specific_terms:
         return True
-    # Padrões conhecidos
-    patterns = [
-        r"^(parte\s+i|parte\s+ii|cid|crm|uf)$",
-        r"^nome$", r"^nome\s+da\s+m[ãa]e$", r"^nome\s+do\s+pai$",
-        r"^cpf$", r"^rg$", r"^cid$", r"^causa\s+morte$",
-        r"^causa\s+b[áa]sica$", r"^data$", r"^hora$",
-    ]
-    if any(re.fullmatch(p, s_stripped, re.IGNORECASE) for p in patterns):
+
+    if re.fullmatch(r'PARTE\s+[IV]+', upper):
         return True
+
+    if re.fullmatch(r'[A-Z](?:\s*[\.\)]\s*\d*)?', upper):
+        return True
+
     return False
 
 
-def_extract_causas(lines: List[str]) -> List[str]:
-    """Extrai causas da Parte I, parando em marcadores de seção posteriores.
-    Ignora linhas auxiliares, tokens de duração, CID puro e palavras auxiliares isoladas.
-    Remove CIDs colados ao final de descrições clínicas válidas."""
-    start = -1
-    for i, ln in enumerate(lines):
-        if re.search(r"CAUSAS\s+DA\s+MORTE", ln, re.IGNORECASE):
-            start = i + 1
-            break
-    if start < 0:
-        return []
-
-    stop_markers = [
-        r"Parte\s+II", r"Outras\s+condi[çc][õo]es\s+significativas",
-        r"Nome\s+do\s+M[ée]dico", r"CRM", r"[óo]bito\s+atestado\s+por\s+M[ée]dico",
-        r"PROV[ÁA]VEIS\s+CIRCUNST[ÂA]NCIAS",
-    ]
-    ignore_markers = [
-        r"Parte\s+I", r"Devido\s+ou\s+como\s+consequ[êe]ncia\s+de",
-        r"Intervalo\s+entre\s+o\s+in[íi]cio\s+e\s+a\s+morte", r"^CID$",
-        r"Meses\s+Dias\s+Horas\s+Minutos\s+Ignorado",
-    ]
-
-    aux_words = {"meses", "dias", "horas", "minutos", "ignorado"}
-
-    def _is_pure_cid(s: str) -> bool:
-        return bool(re.fullmatch(r"[A-TV-Z]\d{2}(?:\.\d{1,2})?", s.strip(), re.IGNORECASE))
-
-    def _is_aux_only(s: str) -> bool:
-        tokens = s.lower().split()
-        return bool(tokens) and all(t in aux_words for t in tokens)
-
+def _extract_causas(lines: List[str]) -> List[str]:
     causas: List[str] = []
-    for ln in lines[start:]:
-        s = ln.strip()
-        if not s:
+    collecting = False
+
+    stop_markers = (
+        'PARTE II',
+        'OUTRAS CONDICOES SIGNIFICATIVAS',
+        'OUTRAS CONDIÇÕES SIGNIFICATIVAS',
+        'NOME DO MEDICO',
+        'NOME DO MÉDICO',
+        'CRM',
+        'OBITO ATestado POR MEDICO',
+        'ÓBITO ATestado POR MÉDICO',
+        'OBITO ATestado POR MEDICO LEGISTA',
+        'ÓBITO ATestado POR MÉDICO LEGISTA',
+        'PROVAVEIS CIRCUNSTANCIAS',
+        'PROVÁVEIS CIRCUNSTÂNCIAS',
+    )
+
+    aux_words = {
+        'MESES', 'MES', 'MÊS',
+        'DIAS', 'DIA',
+        'HORAS', 'HORA',
+        'MINUTOS', 'MINUTO',
+        'IGNORADO', 'IGNORADA',
+    }
+
+    cid_pattern = r'[A-TV-Z]\d{2}(?:\.\d{1,2})?'
+
+    for raw in lines:
+        line = str(raw).strip()
+        if not line:
             continue
-        if any(re.search(p, s, re.IGNORECASE) for p in stop_markers):
+
+        upper = line.upper()
+
+        if not collecting:
+            if 'CAUSAS DA MORTE' in upper:
+                collecting = True
+            continue
+
+        if any(marker in upper for marker in stop_markers):
             break
-        if any(re.search(p, s, re.IGNORECASE) for p in ignore_markers):
+
+        if _looks_like_label(line):
             continue
-        if _is_duration_token(s):
+
+        if _is_duration_token(line):
             continue
-        if _looks_like_label(s):
+
+        if re.fullmatch(cid_pattern, line, re.IGNORECASE):
             continue
-        if _is_pure_cid(s):
+
+        if upper in aux_words:
             continue
-        if _is_aux_only(s):
-            continue
-        # Remove CID colado ao final da causa (ex.: "Infecção do trato urinário N39.0")
-        clean = re.sub(r"\s+\b[A-TV-Z]\d{2}(?:\.\d{1,2})?\b$", "", s, flags=re.IGNORECASE).strip()
-        if not clean or _is_pure_cid(clean) or _is_aux_only(clean):
-            continue
-        # Aplica _clean_causa_text antes de adicionar
-        clean = _clean_causa_text(clean)
-        if not clean:
-            continue
-        causas.append(clean)
+
+        cleaned = re.sub(
+            r'\s*' + cid_pattern + r'\s*$',
+            '',
+            line,
+            flags=re.IGNORECASE,
+        ).strip()
+
+        cleaned = _clean_causa_text(cleaned)
+
+        if cleaned:
+            causas.append(cleaned)
+
     return causas
 
-# Validação
 
 def validate_structured(structured: Dict[str, Any]) -> Dict[str, Any]:
     errors: List[str] = []
     warnings: List[str] = []
 
+    nome = structured.get('NOME')
+    nome_pai = structured.get('NOME_PAI')
+    nome_mae = structured.get('NOME_MAE')
+    causa_basica = structured.get('CAUSA_BASICA')
+    cid_basica = structured.get('CID_BASICA')
+
+    if not nome:
+        errors.append('NOME ausente')
+    if not structured.get('DATA_OBITO'):
+        errors.append('DATA_OBITO ausente')
+    if not causa_basica:
+        errors.append('CAUSA_BASICA ausente')
+
+    if nome and nome_pai and str(nome).strip() == str(nome_pai).strip():
+        errors.append('NOME igual a NOME_PAI')
+    if nome and nome_mae and str(nome).strip() == str(nome_mae).strip():
+        errors.append('NOME igual a NOME_MAE')
+
+    if causa_basica and re.fullmatch(
+        r'[A-TV-Z]\d{2}(?:\.\d{1,2})?',
+        str(causa_basica),
+        re.IGNORECASE,
+    ):
+        errors.append('CAUSA_BASICA parece ser CID puro')
+
+    if not cid_basica:
+        warnings.append('CID_BASICA não localizado')
+
     nascimento = structured.get('NASCIMENTO')
-    if nascimento and not _valid_date(nascimento):
-        errors.append('NASCIMENTO inválido')
+    if nascimento and not re.fullmatch(r'\d{2}/\d{2}/\d{4}', str(nascimento)):
+        warnings.append('NASCIMENTO com formato inválido')
 
     data_obito = structured.get('DATA_OBITO')
-    if data_obito and not _valid_date(data_obito):
-        errors.append('DATA_OBITO inválida')
+    if data_obito and not re.fullmatch(r'\d{2}/\d{2}/\d{4}', str(data_obito)):
+        warnings.append('DATA_OBITO com formato inválido')
 
     hora_obito = structured.get('HORA_OBITO')
-    if hora_obito and not _valid_time(hora_obito):
-        errors.append('HORA_OBITO inválida')
+    if hora_obito and not re.fullmatch(r'\d{2}:\d{2}', str(hora_obito)):
+        warnings.append('HORA_OBITO com formato inválido')
 
     uf_obito = structured.get('UF_OBITO')
-    if uf_obito and uf_obito not in UF_VALIDAS:
-        errors.append('UF_OBITO inválida')
+    if uf_obito and not re.fullmatch(r'[A-Z]{2}', str(uf_obito).upper()):
+        warnings.append('UF_OBITO com formato inválido')
 
     cep = structured.get('CEP')
     if cep and not re.fullmatch(r'\d{5}-?\d{3}', str(cep)):
-        errors.append('CEP inválido')
+        warnings.append('CEP com formato inválido')
 
-    nome = structured.get('NOME')
-    if not nome:
-        errors.append('NOME ausente')
-
-    if not structured.get('DATA_OBITO'):
-        errors.append('DATA_OBITO ausente')
-
-    causa_basica = structured.get('CAUSA_BASICA')
-    if not causa_basica:
-        errors.append('CAUSA_BASICA ausente')
-    else:
-        if re.fullmatch(r'[A-TV-Z]\d{2}(?:\.\d{1,2})?', str(causa_basica), re.IGNORECASE):
-            errors.append('CAUSA_BASICA parece ser um CID puro')
-
-    nome_pai = structured.get('NOME_PAI')
-    nome_mae = structured.get('NOME_MAE')
-
-    if nome and nome_pai and nome == nome_pai:
-        errors.append('NOME igual a NOME_PAI')
-
-    if nome and nome_mae and nome == nome_mae:
-        errors.append('NOME igual a NOME_MAE')
-
-    if not structured.get('CID_BASICA'):
-        warnings.append('CID_BASICA não localizado')
-
-    nome_ok = bool(nome) and not _looks_like_label(nome)
+    nome_ok = bool(nome) and not _looks_like_label(str(nome))
     names_ok = all(
-        bool(structured.get(campo)) and not _looks_like_label(structured.get(campo))
+        bool(structured.get(campo)) and not _looks_like_label(str(structured.get(campo)))
         for campo in ('NOME', 'NOME_MAE', 'NOME_PAI')
     )
 
@@ -644,15 +674,10 @@ def validate_structured(structured: Dict[str, Any]) -> Dict[str, Any]:
         status = 'OK'
 
     return {
-        'ok': len(errors) == 0 and status == 'OK',
+        'ok': status == 'OK',
         'errors': errors,
         'warnings': warnings,
-        'computed': {
-            'score': score,
-            'status': status,
-            'names_ok': names_ok,
-            'nome_ok': nome_ok,
-        },
+        'computed': structured,
         'score': score,
         'status': status,
         'names_ok': names_ok,
