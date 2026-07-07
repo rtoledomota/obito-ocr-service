@@ -336,34 +336,69 @@ def _clean_causa_text(value: str) -> str:
     if not value:
         return ""
     text = value.strip()
+    # Limpa espaços extras
+    text = re.sub(r"\s+", " ", text).strip()
+    # Remove prefixos residuais no início: 'd ', '(d) ', '- ', ': ' e variações
     while True:
         prev = text
-        # Remove prefixos: 'd ', '(d) ', '- ', ': ' e variações repetidas
-        text = re.sub(r"^\(?[a-zA-Z]\)?[\s\-\:]+\s*", "", text)
-        text = re.sub(r"^[\-\:\s]+\s*", "", text)
+        text = re.sub(r"^\(?[a-zA-Z]\)?[\s\-\:]+", "", text)
+        text = re.sub(r"^[\-\:\.\s]+", "", text)
+        text = text.strip()
         if text == prev:
             break
-    # Se sobrar apenas CID puro
-    if bool(re.fullmatch(r"[A-TV-Z]\d{2}(?:\.\d{1,2})?", text, re.IGNORECASE)):
+    if not text:
         return ""
-    # Se for duração/intervalo (>7d, <24h, 3d, 12h, 30m)
-    if bool(re.fullmatch(r"[<>]?\s*\d+\s*[dhms]", text, re.IGNORECASE)):
+    low = text.lower()
+    aux_words = {"meses", "dias", "horas", "minutos", "ignorado"}
+    tokens = low.split()
+    # Bloqueia palavras auxiliares isoladas ou combinações auxiliares
+    if tokens and all(t in aux_words for t in tokens):
+        return ""
+    # Bloqueia combinações auxiliares conhecidas
+    if low in {"meses dias", "dias horas", "horas minutos", "meses dias horas minutos ignorado"}:
+        return ""
+    # Bloqueia CID puro
+    if re.fullmatch(r"[A-TV-Z]\d{2}(?:\.\d{1,2})?", text, re.IGNORECASE):
+        return ""
+    # Bloqueia duração/intervalo: >7d, <24h, 3d, 12h, 30m
+    if re.fullmatch(r"[<>]?\s*\d+\s*[dhms]", text, re.IGNORECASE):
         return ""
     return text.strip()
 
 
-def parse_obito(raw_text: str) -> Dict[str, Any]:
-    result: Dict[str, Any] = {k: "" for k in HEADER}
-    raw_lines = raw_text.splitlines()
-    lines = [_normalize_line(ln) for ln in raw_lines]
 
-    # NOME: apenas rótulo 'Nome do Falecido' (variantes)
+def parse_obito(raw_text: str) -> Dict[str, Any]:
+      # NOME: apenas rótulo 'Nome do Falecido' (variantes)
     for i, ln in enumerate(lines):
         if re.fullmatch(r"Nome\s+do\s+Falecido", ln, re.IGNORECASE):
-            _, val = _find_next_useful(lines, i)
-            if val and not _looks_like_label(val):
-                result["NOME"] = val.strip()
+            nome_parts: List[str] = []
+            for j in range(i + 1, min(i + 7, len(lines))):
+                cand = _normalize_line(lines[j]).strip()
+                if not cand:
+                    continue
+                # Ignora linhas que são só número, como '6'
+                if re.fullmatch(r"\d{1,2}", cand):
+                    continue
+                # Ignora rótulos
+                if _looks_like_label(cand):
+                    continue
+                # Precisa conter letras
+                if not re.search(r"[A-Za-zÀ-ú]", cand):
+                    continue
+                nome_parts.append(cand)
+                # Tenta concatenar próxima linha se parecer continuação de nome
+                if j + 1 < len(lines):
+                    nxt = _normalize_line(lines[j + 1]).strip()
+                    if (nxt
+                            and not re.fullmatch(r"\d{1,2}", nxt)
+                            and not _looks_like_label(nxt)
+                            and re.search(r"[A-Za-zÀ-ú]", nxt)
+                            and not re.search(r"(Nome|M[ãa]e|Pai|Data|Hora|Munic[íi]pio|UF|CPF|RG|Parte|CID|CRM|M[ée]dico)", nxt, re.IGNORECASE)):
+                        nome_parts.append(nxt)
                 break
+            if nome_parts:
+                result["NOME"] = " ".join(nome_parts).strip()
+            break
 
     # NOME_MAE
     for i, ln in enumerate(lines):
@@ -477,9 +512,9 @@ def _looks_like_label(s: str) -> bool:
     return False
 
 
-def _extract_causas(lines: List[str]) -> List[str]:
+_extract_causas(lines: List[str]) -> List[str]:
     """Extrai causas da Parte I, parando em marcadores de seção posteriores.
-    Ignora linhas auxiliares, tokens de duração e linhas que sejam CID puro.
+    Ignora linhas auxiliares, tokens de duração, CID puro e palavras auxiliares isoladas.
     Remove CIDs colados ao final de descrições clínicas válidas."""
     start = -1
     for i, ln in enumerate(lines):
@@ -500,8 +535,14 @@ def _extract_causas(lines: List[str]) -> List[str]:
         r"Meses\s+Dias\s+Horas\s+Minutos\s+Ignorado",
     ]
 
+    aux_words = {"meses", "dias", "horas", "minutos", "ignorado"}
+
     def _is_pure_cid(s: str) -> bool:
         return bool(re.fullmatch(r"[A-TV-Z]\d{2}(?:\.\d{1,2})?", s.strip(), re.IGNORECASE))
+
+    def _is_aux_only(s: str) -> bool:
+        tokens = s.lower().split()
+        return bool(tokens) and all(t in aux_words for t in tokens)
 
     causas: List[str] = []
     for ln in lines[start:]:
@@ -516,17 +557,20 @@ def _extract_causas(lines: List[str]) -> List[str]:
             continue
         if _looks_like_label(s):
             continue
-        # Linha que é apenas CID puro (ex.: N39.0) não é causa textual
         if _is_pure_cid(s):
+            continue
+        if _is_aux_only(s):
             continue
         # Remove CID colado ao final da causa (ex.: "Infecção do trato urinário N39.0")
         clean = re.sub(r"\s+\b[A-TV-Z]\d{2}(?:\.\d{1,2})?\b$", "", s, flags=re.IGNORECASE).strip()
-        # Após remover o CID, se sobar apenas CID puro ou vazio, descarta
-        if not clean or _is_pure_cid(clean):
+        if not clean or _is_pure_cid(clean) or _is_aux_only(clean):
+            continue
+        # Aplica _clean_causa_text antes de adicionar
+        clean = _clean_causa_text(clean)
+        if not clean:
             continue
         causas.append(clean)
     return causas
-
 
 # Validação
 
