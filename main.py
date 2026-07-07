@@ -576,8 +576,38 @@ def validate_structured(structured: Dict[str, Any]) -> Dict[str, Any]:
         for k in ("NOME", "NOME_MAE", "NOME_PAI")
     )
 
-    # Score
+   # Score
     score = _compute_score(structured, errors, warnings)
+
+    if errors:
+        status = "REVISAR"
+    elif score < 90 and warnings:
+        status = "REVISAR"
+    elif not structured.get("CAUSA_BASICA"):
+        status = "REVISAR"
+    elif not structured.get("CID_BASICA"):
+        status = "REVISAR"
+    else:
+        status = "OK"
+
+    names_ok = bool(structured.get("NOMES"))
+    nome_ok = bool(structured.get("NOME"))
+
+    return {
+        "ok": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "computed": {
+            "score": score,
+            "status": status,
+            "names_ok": names_ok,
+            "nome_ok": nome_ok,
+        },
+        "score": score,
+        "status": status,
+        "names_ok": names_ok,
+        "nome_ok": nome_ok,
+    }
 
     # Status operacional
      if errors:
