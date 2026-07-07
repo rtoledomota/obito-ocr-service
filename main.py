@@ -525,119 +525,86 @@ def validate_structured(structured: Dict[str, Any]) -> Dict[str, Any]:
     errors: List[str] = []
     warnings: List[str] = []
 
-    # Datas
-    if structured.get("NASCIMENTO") and not _valid_date(structured["NASCIMENTO"]):
-        errors.append("NASCIMENTO inválido")
-    if structured.get("DATA_OBITO") and not _valid_date(structured["DATA_OBITO"]):
-        errors.append("DATA_OBITO inválida")
+    nascimento = structured.get('NASCIMENTO')
+    if nascimento and not _valid_date(nascimento):
+        errors.append('NASCIMENTO inválido')
 
-    # Hora
-    if structured.get("HORA_OBITO") and not _valid_time(structured["HORA_OBITO"]):
-        errors.append("HORA_OBITO inválida")
+    data_obito = structured.get('DATA_OBITO')
+    if data_obito and not _valid_date(data_obito):
+        errors.append('DATA_OBITO inválida')
 
-    # UF
-    if structured.get("UF_OBITO") and structured["UF_OBITO"].upper() not in UF_VALIDAS:
-        errors.append("UF_OBITO inválida")
+    hora_obito = structured.get('HORA_OBITO')
+    if hora_obito and not _valid_time(hora_obito):
+        errors.append('HORA_OBITO inválida')
 
-    # CEP
-    if structured.get("CEP") and not re.fullmatch(r"\d{5}-?\d{3}", structured["CEP"]):
-        errors.append("CEP inválido")
+    uf_obito = structured.get('UF_OBITO')
+    if uf_obito and uf_obito not in UF_VALIDAS:
+        errors.append('UF_OBITO inválida')
 
-    # Campos críticos
-    if not structured.get("NOME"):
-        errors.append("NOME ausente")
-    if not structured.get("DATA_OBITO"):
-        errors.append("DATA_OBITO ausente")
-    if not structured.get("CAUSA_BASICA"):
-        errors.append("CAUSA_BASICA ausente")
+    cep = structured.get('CEP')
+    if cep and not re.fullmatch(r'\d{5}-?\d{3}', str(cep)):
+        errors.append('CEP inválido')
 
-    # Validação semântica de nomes
-    nome = (structured.get("NOME") or "").strip()
-    nome_pai = (structured.get("NOME_PAI") or "").strip()
-    nome_mae = (structured.get("NOME_MAE") or "").strip()
-    if nome and nome_pai and nome.upper() == nome_pai.upper():
-        errors.append("NOME igual a NOME_PAI")
-    if nome and nome_mae and nome.upper() == nome_mae.upper():
-        errors.append("NOME igual a NOME_MAE")
+    nome = structured.get('NOME')
+    if not nome:
+        errors.append('NOME ausente')
 
-    # Validação semântica de causa básica
-    causa_basica = (structured.get("CAUSA_BASICA") or "").strip()
-    if causa_basica and re.fullmatch(r"[A-TV-Z]\d{2}(?:\.\d{1,2})?", causa_basica, re.IGNORECASE):
-        errors.append("CAUSA_BASICA parece CID, não descrição")
+    if not structured.get('DATA_OBITO'):
+        errors.append('DATA_OBITO ausente')
 
-    # CID_BASICA
-    if not structured.get("CID_BASICA"):
-        warnings.append("CID_BASICA não localizado")
+    causa_basica = structured.get('CAUSA_BASICA')
+    if not causa_basica:
+        errors.append('CAUSA_BASICA ausente')
+    else:
+        if re.fullmatch(r'[A-TV-Z]\d{2}(?:\.\d{1,2})?', str(causa_basica), re.IGNORECASE):
+            errors.append('CAUSA_BASICA parece ser um CID puro')
 
-    # NOMES_OK / NOME_OK
-    nome_ok = bool(structured.get("NOME")) and not _looks_like_label(structured.get("NOME", ""))
+    nome_pai = structured.get('NOME_PAI')
+    nome_mae = structured.get('NOME_MAE')
+
+    if nome and nome_pai and nome == nome_pai:
+        errors.append('NOME igual a NOME_PAI')
+
+    if nome and nome_mae and nome == nome_mae:
+        errors.append('NOME igual a NOME_MAE')
+
+    if not structured.get('CID_BASICA'):
+        warnings.append('CID_BASICA não localizado')
+
+    nome_ok = bool(nome) and not _looks_like_label(nome)
     names_ok = all(
-        bool(structured.get(k)) and not _looks_like_label(structured.get(k, ""))
-        for k in ("NOME", "NOME_MAE", "NOME_PAI")
+        bool(structured.get(campo)) and not _looks_like_label(structured.get(campo))
+        for campo in ('NOME', 'NOME_MAE', 'NOME_PAI')
     )
 
-   # Score
     score = _compute_score(structured, errors, warnings)
 
     if errors:
-        status = "REVISAR"
+        status = 'REVISAR'
     elif score < 90 and warnings:
-        status = "REVISAR"
-    elif not structured.get("CAUSA_BASICA"):
-        status = "REVISAR"
-    elif not structured.get("CID_BASICA"):
-        status = "REVISAR"
+        status = 'REVISAR'
+    elif not structured.get('CAUSA_BASICA'):
+        status = 'REVISAR'
+    elif not structured.get('CID_BASICA'):
+        status = 'REVISAR'
     else:
-        status = "OK"
-
-    names_ok = bool(structured.get("NOMES"))
-    nome_ok = bool(structured.get("NOME"))
+        status = 'OK'
 
     return {
-        "ok": not errors,
-        "errors": errors,
-        "warnings": warnings,
-        "computed": {
-            "score": score,
-            "status": status,
-            "names_ok": names_ok,
-            "nome_ok": nome_ok,
+        'ok': len(errors) == 0 and status == 'OK',
+        'errors': errors,
+        'warnings': warnings,
+        'computed': {
+            'score': score,
+            'status': status,
+            'names_ok': names_ok,
+            'nome_ok': nome_ok,
         },
-        "score": score,
-        "status": status,
-        "names_ok": names_ok,
-        "nome_ok": nome_ok,
+        'score': score,
+        'status': status,
+        'names_ok': names_ok,
+        'nome_ok': nome_ok,
     }
-
-    # Status operacional
-     if errors:
-        status = "REVISAR"
-    elif score < 90 and warnings:
-        status = "REVISAR"
-    elif not structured.get("CAUSA_BASICA"):
-        status = "REVISAR"
-    elif not structured.get("CID_BASICA"):
-        status = "REVISAR"
-    else:
-        status = "OK"
-
-    return {
-        "ok": len(errors) == 0 and status == "OK",
-        "errors": errors,
-        "warnings": warnings,
-        "computed": {
-            "score": score,
-            "status": status,
-            "names_ok": names_ok,
-            "nome_ok": nome_ok,
-        },
-        "score": score,
-        "status": status,
-        "names_ok": names_ok,
-        "nome_ok": nome_ok,
-    }
-
-
 def _valid_date(value: str) -> bool:
     return bool(re.fullmatch(r"\d{2}/\d{2}/\d{4}", value))
 
