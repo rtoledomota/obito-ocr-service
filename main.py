@@ -18,6 +18,7 @@ import io
 import json
 import base64
 import hashlib
+import unicodedata
 import datetime as dt
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -83,12 +84,34 @@ REFUSAL_PHRASES = [
     "nao posso ajudar",
 ]
 
-# Marcadores auxiliares conhecidos que não são valores
-LABEL_NOISE = {
-    'uf', 'município', 'municipio', 'nome', 'mãe', 'mae', 'pai',
-    'data', 'hora', 'local', 'causas', 'causa', 'médico', 'medico',
-    'crm', 'assinatura', 'carimbo', 'endereço', 'endereco'
+# Linhas de ruído de formulário que nunca devem ser usadas como valor
+NOISE_LINES = {
+    'parte i', 'parte ii', 'devido ou como consequência de', 'devido a',
+    'intervalo entre o início e a morte', 'cid', 'meses dias horas minutos ignorado',
+    'meses', 'dias', 'horas', 'minutos', 'ignorado', 'nome', 'nome do médico',
+    'nome do medico', 'crm', 'assinatura', 'carimbo', 'uf', 'município',
+    'municipio', 'data', 'hora', 'local', 'causas da morte', 'causa da morte',
+    'causas', 'causa', 'outras condições significativas',
+    'outras condicoes significativas', 'prováveis circunstâncias',
+    'provaveis circunstancias', 'óbito atestado por médico',
+    'obito atestado por medico', 'endereço', 'endereco', 'logradouro',
+    'número', 'numero', 'complemento', 'bairro', 'cep', 'cpf', 'rg',
+    'sexo', 'raça', 'raca', 'estado civil', 'nacionalidade', 'profissão',
+    'profissao', 'ocupação', 'ocupacao', 'naturalidade',
 }
+
+# Palavras-chave que indicam que a linha é um rótulo (não um valor)
+LABEL_KEYWORDS = [
+    'nome', 'nome do', 'nome da', 'data', 'hora', 'local', 'município',
+    'municipio', 'uf', 'cep', 'cpf', 'rg', 'sexo', 'raça', 'raca',
+    'estado civil', 'nacionalidade', 'profissão', 'profissao', 'ocupação',
+    'ocupacao', 'naturalidade', 'logradouro', 'endereço', 'endereco',
+    'número', 'numero', 'complemento', 'bairro', 'cidade', 'parte',
+    'devido', 'intervalo', 'cid', 'crm', 'médico', 'medico', 'assinatura',
+    'carimbo', 'meses', 'dias', 'horas', 'minutos', 'causas', 'causa',
+    'óbito atestado', 'obito atestado', 'outras condições', 'outras condicoes',
+    'prováveis', 'provaveis',
+]
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +163,7 @@ def _check_auth(authorization: Optional[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Utilidades
+# Utilidades de texto
 # ---------------------------------------------------------------------------
 
 def _sha256_bytes(data: bytes) -> str:
@@ -151,9 +174,63 @@ def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
 
 
+def _unaccent(s: str) -> str:
+    """Remove acentos para comparação insensível a acentuação."""
+    return ''.join(c for c in unicodedata.normalize('NFKD', s) if not unicodedata.combining(c))
+
+
+def _norm_label(s: str) -> str:
+    """Normaliza rótulo/linha para comparação: sem acento, minúsculo, sem espaços extras."""
+    return _unaccent(s).lower().strip()
+
+
 def _normalize_lines(text: str) -> List[str]:
     """Quebra o texto em linhas já sem espaços nas bordas e sem linhas vazias."""
     return [line.strip() for line in text.split("\n") if line.strip()]
+
+
+def _strip_numeric_prefix(line: str) -> str:
+    """
+    Remove prefixos numéricos no começo da linha (ruído de formulário).
+    Exemplos:
+      '2 Data do óbito'   -> 'Data do óbito'
+      '5 Nome do Falecido'-> 'Nome do Falecido'
+      '2. Data'           -> 'Data'
+      '2) Data'           -> 'Data'
+    Só remove quando o restante contém letras (evita corromper valores como '20:24' ou '03 03 1952').
+    """
+    s = line.strip()
+    m = re.match(r'^(\d+\s*[\.\):\-]?\s*)(.*)$', s)
+    if m and re.search(r'[A-Za-zÀ-ú]', m.group(2)):
+        return m.group(2).strip()
+    return s
+
+
+def _build_pairs(text: str) -> List[Tuple[str, str]]:
+    """Retorna lista de (linha_normalizada, linha_original) para busca estrita."""
+    return [(_strip_numeric_prefix(l), l) for l in _normalize_lines(text)]
+
+
+def _is_noise_line(norm_line: str) -> bool:
+    """Verifica se a linha normalizada é ruído de formulário (rótulo/auxiliar)."""
+    nl = _norm_label(norm_line)
+    if not nl:
+        return True
+    if nl in NOISE_LINES:
+        return True
+    if nl.endswith(":") and len(nl) < 40:
+        return True
+    if re.fullmatch(r'[\d\s\.\-:/]+', norm_line) and len(norm_line) < 3:
+        return True
+    for kw in LABEL_KEYWORDS:
+        if nl == kw or nl.startswith(kw):
+            return True
+    return False
+
+
+def _looks_like_label(norm_line: str) -> bool:
+    """True se a linha parece ser um rótulo de campo, não um valor."""
+    return _is_noise_line(norm_line)
 
 
 def _normalize_date(value: str) -> str:
@@ -161,10 +238,9 @@ def _normalize_date(value: str) -> str:
     if not value:
         return ""
     v = value.strip()
-    # Remove texto extra após a data
+    # Remove texto extra após a data, mantendo dígitos e separadores
     v = re.sub(r"[^0-9/\-\s]", " ", v)
     v = re.sub(r"\s+", " ", v).strip()
-    # Tenta padrões com / - ou espaço
     m = re.match(r"^(\d{1,2})[\s/\-]+(\d{1,2})[\s/\-]+(\d{2,4})$", v)
     if not m:
         return value.strip()
@@ -192,6 +268,10 @@ def _normalize_hour(value: str) -> str:
     return v
 
 
+def _is_valid_hour(value: str) -> bool:
+    return bool(re.fullmatch(r"\d{2}:\d{2}", value or "")) and _normalize_hour(value) == value
+
+
 def _normalize_uf(value: str) -> str:
     """Normaliza UF: só aceita 2 letras válidas, nunca o rótulo 'UF'."""
     if not value:
@@ -199,7 +279,6 @@ def _normalize_uf(value: str) -> str:
     v = value.strip().upper()
     if v == "UF":
         return ""
-    # Extrai duas letras maiúsculas
     m = re.search(r"\b([A-Z]{2})\b", v)
     if m and m.group(1) in UF_VALIDAS:
         return m.group(1)
@@ -219,62 +298,66 @@ def _normalize_cep(value: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Parser: busca estrita por linha
+# Parser: busca estrita por próxima linha
 # ---------------------------------------------------------------------------
 
-def _find_strict_next_line_value(
+def _find_label_index(
+    pairs: List[Tuple[str, str]],
+    labels: List[str],
+    start_at: int = 0,
+) -> int:
+    """Retorna índice da primeira linha cuja versão normalizada termina com algum rótulo."""
+    labels_norm = [_norm_label(l) for l in labels]
+    for i in range(start_at, len(pairs)):
+        norm, _ = pairs[i]
+        nl = _norm_label(norm)
+        for lab in labels_norm:
+            if nl == lab or nl == lab + ":" or nl.endswith(lab) or nl.endswith(lab + ":"):
+                return i
+    return -1
+
+
+def _find_next_value_after_label(
     text: str,
     labels: List[str],
     stop_labels: Optional[List[str]] = None,
-    max_distance: int = 4,
-) -> str:
+    max_distance: int = 5,
+    start_at: int = 0,
+) -> Tuple[str, int]:
     """
-    Procura rótulo por igualdade de linha inteira (ou linha iniciando com rótulo + ':')
-    e retorna a próxima linha útil que não seja outro rótulo nem marcador de parada.
+    Busca estrita por próxima linha útil após rótulo.
+    Aceita linha normalizada que TERMINE com o rótulo (devido à remoção de prefixos numéricos).
+    Retorna (valor, índice_do_rotulo) ou ("", -1).
     """
-    lines = _normalize_lines(text)
-    labels_norm = [l.lower().strip() for l in labels]
-    stop_norm = [s.lower().strip() for s in (stop_labels or [])]
+    pairs = _build_pairs(text)
+    stop_norm = [_norm_label(s) for s in (stop_labels or [])]
 
-    for i, line in enumerate(lines):
-        line_lower = line.lower()
-        matched = False
-        for lab in labels_norm:
-            if line_lower == lab or line_lower == lab + ":" or line_lower.startswith(lab + ":"):
-                matched = True
+    idx = _find_label_index(pairs, labels, start_at=start_at)
+    while idx != -1:
+        for j in range(idx + 1, min(idx + 1 + max_distance, len(pairs))):
+            cnorm, corig = pairs[j]
+            cl = _norm_label(cnorm)
+            if any(cl == s or cl.startswith(s) for s in stop_norm):
                 break
-        if not matched:
-            continue
-
-        # Percorre as próximas linhas procurando o valor real
-        for j in range(i + 1, min(i + 1 + max_distance, len(lines))):
-            candidate = lines[j]
-            cand_lower = candidate.lower()
-            # Parada explícita
-            if any(cand_lower == s or cand_lower.startswith(s) for s in stop_norm):
-                break
-            # Ignora rótulos conhecidos e ruído
-            if cand_lower in LABEL_NOISE:
+            if _is_noise_line(cnorm):
                 continue
-            if cand_lower.endswith(":") and len(cand_lower) < 30:
+            if len(corig.strip()) < 2:
                 continue
-            # Ignora linhas que são apenas rótulos curtos
-            if len(candidate) <= 2:
-                continue
-            return candidate
-    return ""
+            return corig.strip(), idx
+        idx = _find_label_index(pairs, labels, start_at=idx + 1)
+    return "", -1
 
 
 def _find_inline_value(text: str, labels: List[str]) -> str:
-    """Busca valor na mesma linha após ':' ou ' - '."""
-    lines = _normalize_lines(text)
-    labels_norm = [l.lower().strip() for l in labels]
-    for line in lines:
-        line_lower = line.lower()
+    """Busca valor na mesma linha após ':' ou ' - ' (rótulo completo no início)."""
+    pairs = _build_pairs(text)
+    labels_norm = [_norm_label(l) for l in labels]
+    for norm, orig in pairs:
+        nl = _norm_label(norm)
         for lab in labels_norm:
-            if line_lower.startswith(lab):
-                rest = line[len(lab):].lstrip(": -\t").strip()
-                if rest and rest.upper() != "UF" and len(rest) > 1:
+            if nl == lab or nl.startswith(lab):
+                rest = norm[len(lab):].lstrip(": -\t").strip()
+                if rest and _norm_label(rest) != "uf" and len(rest) > 1 and not _is_noise_line(rest):
                     return rest
     return ""
 
@@ -283,63 +366,119 @@ def _find_block_value(
     text: str,
     labels: List[str],
     stop_labels: Optional[List[str]] = None,
+    max_distance: int = 5,
 ) -> str:
-    """Versão conservadora: tenta inline primeiro, depois próxima linha estrita."""
+    """Tenta valor inline primeiro, depois próxima linha estrita."""
     inline = _find_inline_value(text, labels)
     if inline:
         return inline
-    return _find_strict_next_line_value(text, labels, stop_labels=stop_labels)
+    value, _ = _find_next_value_after_label(text, labels, stop_labels=stop_labels, max_distance=max_distance)
+    return value
+
+
+def _find_hora_obito(text: str) -> str:
+    """
+    Localiza o rótulo 'Hora' como linha isolada/normalizada e pega a próxima linha útil.
+    Valida HH:MM e nunca captura 'Horas Minutos'.
+    """
+    pairs = _build_pairs(text)
+    for i, (norm, _) in enumerate(pairs):
+        nl = _norm_label(norm)
+        # Rótulo isolado 'Hora' (nunca 'Horas Minutos' nem 'Hora do óbito')
+        if nl == "hora":
+            for j in range(i + 1, min(i + 1 + 5, len(pairs))):
+                cnorm, corig = pairs[j]
+                cl = _norm_label(cnorm)
+                if cl == "hora" or cl.startswith("horas"):
+                    break
+                if _is_noise_line(cnorm):
+                    continue
+                candidate = corig.strip()
+                hour = _normalize_hour(candidate)
+                if _is_valid_hour(hour):
+                    return hour
+                # Se a linha claramente não é hora, para
+                if _looks_like_label(cnorm):
+                    break
+    return ""
+
+
+def _find_uf_after(
+    text: str,
+    after_labels: List[str],
+    max_distance: int = 10,
+) -> str:
+    """
+    Busca próximo valor válido de UF após um rótulo de referência.
+    Aceita apenas duas letras válidas em UF brasileira; nunca o rótulo 'UF'.
+    """
+    pairs = _build_pairs(text)
+    start = _find_label_index(pairs, after_labels)
+    if start == -1:
+        start = 0
+    for i in range(start, len(pairs)):
+        norm, _ = pairs[i]
+        if _norm_label(norm) == "uf":
+            for j in range(i + 1, min(i + 1 + max_distance, len(pairs))):
+                cnorm, corig = pairs[j]
+                cl = _norm_label(cnorm)
+                if cl == "uf":
+                    continue
+                if _is_noise_line(cnorm):
+                    continue
+                uf = _normalize_uf(corig)
+                if uf:
+                    return uf
+                if _looks_like_label(cnorm):
+                    break
+    return ""
 
 
 def _extract_causes(text: str) -> List[str]:
     """
-    Extrai causas da morte em ordem, ignorando rodapés e campos do médico.
+    Extrai causas da morte em ordem.
     - Inicia em 'CAUSAS DA MORTE'
-    - Para antes de 'Nome do Médico', 'CRM', 'Óbito atestado por Médico',
-      'PROVÁVEIS CIRCUNSTÂNCIAS'
-    - Ignora títulos e linhas auxiliares
+    - Para imediatamente em: 'Parte II', 'Outras condições significativas',
+      'Nome do Médico', 'CRM', 'Óbito atestado por Médico', 'PROVÁVEIS CIRCUNSTÂNCIAS'
+    - Ignora linhas auxiliares: 'Parte I', 'Devido ou como consequência de',
+      'Intervalo entre o início e a morte', 'CID', 'Meses Dias Horas Minutos Ignorado'
     """
-    lines = _normalize_lines(text)
-    start_markers = ["causas da morte", "causa da morte", "devido a"]
+    pairs = _build_pairs(text)
+    start_markers = ["causas da morte", "causa da morte"]
     stop_markers = [
-        "nome do médico", "nome do medico", "crm", "óbito atestado por",
-        "obito atestado por", "prováveis circunstâncias", "provaveis circunstancias",
-        "médico", "medico",
+        "parte ii", "outras condições significativas", "outras condicoes significativas",
+        "nome do médico", "nome do medico", "crm", "óbito atestado por médico",
+        "obito atestado por medico", "prováveis circunstâncias", "provaveis circunstancias",
+    ]
+    ignore_markers = [
+        "parte i", "devido ou como consequência de", "devido a",
+        "intervalo entre o início e a morte", "intervalo entre o inicio e a morte",
+        "cid", "meses dias horas minutos ignorado", "causas da morte", "causa da morte",
     ]
 
     start_idx = -1
-    for i, line in enumerate(lines):
-        if any(line.lower().startswith(m) or line.lower() == m for m in start_markers):
+    for i, (norm, _) in enumerate(pairs):
+        nl = _norm_label(norm)
+        if any(m in nl for m in start_markers):
             start_idx = i
             break
     if start_idx == -1:
         return []
 
     causes: List[str] = []
-    noise_tokens = {
-        "causas da morte", "causa da morte", "devido a", "(a)", "(b)",
-        "(c)", "(d)", "causas", "causa", "médico", "medico", "crm",
-        "assinatura", "carimbo", "linha a", "linha b", "linha c",
-        "parte i", "parte ii",
-    }
-
-    for line in lines[start_idx + 1:]:
-        low = line.lower()
-        if any(low.startswith(s) or low == s for s in stop_markers):
+    for norm, orig in pairs[start_idx + 1:]:
+        nl = _norm_label(norm)
+        if any(nl == s or nl.startswith(s) for s in stop_markers):
             break
-        if not low:
+        if any(nl == s or nl.startswith(s) for s in ignore_markers):
             continue
-        if low in noise_tokens:
+        if re.fullmatch(r"\([a-eA-E]\)", norm):
             continue
-        if any(low.startswith(n) for n in ["nome do", "assinatura", "carimbo", "crm"]):
-            break
-        # Ignora marcadores de seção tipo (A) (B) quando isolados
-        if re.fullmatch(r"\([a-eA-E]\)", line):
+        if _is_noise_line(norm):
             continue
-        # Ignora linhas muito curtas
-        if len(line) < 3:
+        if len(orig.strip()) < 3:
             continue
-        causes.append(line)
+        causes.append(orig.strip())
 
     return causes
 
@@ -352,81 +491,92 @@ def parse_obito(text: str) -> Dict[str, Any]:
     """Constrói o dicionário estruturado a partir do texto OCR."""
     structured: Dict[str, Any] = {k: "" for k in HEADER}
 
-    # --- Nome ---
+    # --- Nome: apenas rótulos completos, nunca fallback curto 'Nome' ---
     structured["NOME"] = _find_block_value(
         text,
-        ["Nome", "Nome do falecido", "Nome do(a) falecido(a)"],
-        stop_labels=["Nome da mãe", "Nome do pai", "Nome social", "Data"],
+        ["Nome do Falecido", "Nome do falecido", "Nome do(a) Falecido(a)", "Nome do(a) falecido(a)"],
+        stop_labels=["Nome da mãe", "Nome da mae", "Nome do pai", "Nome social", "Data"],
     )
     structured["NOME_SOCIAL"] = _find_block_value(
-        text, ["Nome social"],
-        stop_labels=["Nome", "Nome da mãe", "Nome do pai"],
+        text, ["Nome social", "Nome Social"],
+        stop_labels=["Nome do falecido", "Nome da mãe", "Nome da mae", "Nome do pai"],
     )
 
-    # --- Pai / Mãe: apenas rótulos longos, sem fallback curto que capture 'País' ---
-    structured["NOME_MAE"] = _find_strict_next_line_value(
+    # --- Pai / Mãe: apenas rótulos longos e completos ---
+    structured["NOME_MAE"] = _find_block_value(
         text,
-        ["Nome da mãe", "Nome da Mãe", "Nome da mae"],
-        stop_labels=["Nome do pai", "Profissão", "Profissao", "Endereço", "Endereco"],
+        ["Nome da Mãe", "Nome da mãe", "Nome da mae", "Nome da Mae"],
+        stop_labels=["Nome do pai", "Profissão", "Profissao", "Endereço", "Endereco", "Nacionalidade"],
     )
-    structured["NOME_PAI"] = _find_strict_next_line_value(
+    structured["NOME_PAI"] = _find_block_value(
         text,
-        ["Nome do pai", "Nome do Pai"],
-        stop_labels=["Profissão", "Profissao", "Endereço", "Endereco", "Nacionalidade"],
+        ["Nome do Pai", "Nome do pai"],
+        stop_labels=["Profissão", "Profissao", "Endereço", "Endereco", "Nacionalidade", "Nome da mãe", "Nome da mae"],
     )
 
-    # --- Datas e hora ---
+    # --- Datas ---
     structured["NASCIMENTO"] = _normalize_date(
-        _find_block_value(text, ["Data de nascimento", "Nascimento", "Nasceu em"])
+        _find_block_value(
+            text,
+            ["Data de nascimento", "Data de Nascimento", "Nascimento", "Data de Nascimento"],
+            stop_labels=["Data do óbito", "Data do obito", "Sexo", "Raça", "Raca"],
+        )
     )
     structured["DATA_OBITO"] = _normalize_date(
-        _find_block_value(text, ["Data do óbito", "Data de óbito", "Data do obito", "Data de obito"])
+        _find_block_value(
+            text,
+            ["Data do óbito", "Data de óbito", "Data do obito", "Data de obito"],
+            stop_labels=["Hora", "Local do óbito", "Local do obito", "Município de ocorrência", "Municipio de ocorrencia"],
+        )
     )
-    structured["HORA_OBITO"] = _normalize_hour(
-        _find_block_value(text, ["Hora do óbito", "Hora de óbito", "Hora do obito", "Hora"])
-    )
+
+    # --- Hora do óbito: busca estrita dedicada ---
+    structured["HORA_OBITO"] = _find_hora_obito(text)
+
     structured["DATA_ATESTADO"] = _normalize_date(
         _find_block_value(text, ["Data do atestado", "Data de emissão", "Data da emissão"])
     )
 
     # --- Local do óbito ---
     structured["LOCAL_OBITO"] = _find_block_value(
-        text, ["Local do óbito", "Local de óbito", "Local do obito"]
+        text, ["Local do óbito", "Local de óbito", "Local do obito", "Local de obito"],
+        stop_labels=["Município de ocorrência", "Municipio de ocorrencia", "UF"],
     )
-    structured["CIDADE_OBITO"] = _find_strict_next_line_value(
+
+    # --- Cidade do óbito: apenas rótulo completo 'Município de ocorrência' ---
+    structured["CIDADE_OBITO"] = _find_block_value(
         text,
         ["Município de ocorrência", "Municipio de ocorrência", "Município de ocorrencia", "Municipio de ocorrencia"],
-        stop_labels=["UF", "Estado", "Data"],
+        stop_labels=["UF", "Estado", "Data", "CEP", "Cep"],
     )
-    # UF do óbito: só 2 letras válidas, nunca o rótulo 'UF'
-    uf_obito_raw = _find_block_value(text, ["UF"], stop_labels=["CEP", "Cep"])
-    structured["UF_OBITO"] = _normalize_uf(uf_obito_raw)
+
+    # --- UF do óbito: próxima UF válida após município de ocorrência ---
+    structured["UF_OBITO"] = _find_uf_after(text, ["Município de ocorrência", "Municipio de ocorrencia"])
 
     # --- Endereço ---
-    structured["LOGRADOURO"] = _find_block_value(text, ["Logradouro", "Endereço", "Endereco"])
-    structured["NUMERO"] = _find_block_value(text, ["Número", "Numero"])
-    structured["COMPLEMENTO"] = _find_block_value(text, ["Complemento"])
-    structured["BAIRRO"] = _find_block_value(text, ["Bairro"])
-    structured["CIDADE"] = _find_block_value(text, ["Município", "Municipio", "Cidade"])
-    uf_end = _find_block_value(text, ["UF"], stop_labels=["CEP", "Cep"])
-    structured["UF"] = _normalize_uf(uf_end)
+    structured["LOGRADOURO"] = _find_block_value(text, ["Logradouro", "Endereço", "Endereco"], stop_labels=["Número", "Numero", "Complemento", "Bairro"])
+    structured["NUMERO"] = _find_block_value(text, ["Número", "Numero"], stop_labels=["Complemento", "Bairro"])
+    structured["COMPLEMENTO"] = _find_block_value(text, ["Complemento"], stop_labels=["Bairro", "Município", "Municipio"])
+    structured["BAIRRO"] = _find_block_value(text, ["Bairro"], stop_labels=["Município", "Municipio", "Cidade", "UF"])
+    structured["CIDADE"] = _find_block_value(text, ["Município", "Municipio", "Cidade"], stop_labels=["UF", "CEP", "Cep"])
+    structured["UF"] = _find_uf_after(text, ["Endereço", "Endereco", "Logradouro", "Bairro", "Município", "Municipio", "Cidade"])
     structured["CEP"] = _normalize_cep(_find_block_value(text, ["CEP", "Cep"]))
 
     # --- Naturalidade ---
     structured["CIDADE_NASCIMENTO"] = _find_block_value(
-        text, ["Naturalidade", "Município de nascimento", "Municipio de nascimento", "Cidade de nascimento"]
+        text, ["Naturalidade", "Município de nascimento", "Municipio de nascimento", "Cidade de nascimento"],
+        stop_labels=["UF de nascimento", "Nacionalidade"],
     )
-    uf_nasc = _find_block_value(text, ["UF de nascimento", "UF/Nascimento"])
-    structured["UF_NASCIMENTO"] = _normalize_uf(uf_nasc)
+    structured["UF_NASCIMENTO"] = _find_uf_after(text, ["Naturalidade", "Município de nascimento", "Municipio de nascimento"])
 
     # --- Documentos ---
     structured["CPF"] = _find_block_value(text, ["CPF"])
     structured["RG"] = _find_block_value(text, ["RG", "Registro Geral"])
-    structured["ORGAO_EMISSOR_RG"] = _find_block_value(text, ["Órgão emissor", "Orgao emissor", "Órgão expedidor"])
+    structured["ORGAO_EMISSOR_RG"] = _find_block_value(text, ["Órgão emissor", "Orgao emissor", "Órgão expedidor", "Orgao expedidor"])
 
     # --- Demográficos ---
-    structured["SEXO"] = _find_block_value(text, ["Sexo"])
-    structured["RACA_COR"] = _find_block_value(text, ["Raça/Cor", "Raça", "Raca/Cor", "Raca"])
+    structured["SEXO"] = _find_block_value(text, ["Sexo"], stop_labels=["Raça", "Raca", "Cor"])
+    structured["RACA_COR"] = _find_block_value(text, ["Raça/Cor", "Raça", "Raca/Cor", "Raca", "Cor"])
     structured["ESTADO_CIVIL"] = _find_block_value(text, ["Estado civil"])
     structured["NACIONALIDADE"] = _find_block_value(text, ["Nacionalidade"])
     structured["PROFISSAO"] = _find_block_value(text, ["Profissão", "Profissao", "Ocupação", "Ocupacao"])
@@ -439,7 +589,6 @@ def parse_obito(text: str) -> Dict[str, Any]:
         structured["CAUSA_MORTE_3"] = causes[2] if len(causes) >= 3 else ""
         structured["CAUSA_MORTE_4"] = causes[3] if len(causes) >= 4 else ""
         structured["CAUSA_MORTE_5"] = causes[4] if len(causes) >= 5 else ""
-        # CAUSA_BASICA = última causa não vazia
         non_empty = [c for c in causes if c.strip()]
         structured["CAUSA_BASICA"] = non_empty[-1] if non_empty else ""
 
@@ -497,21 +646,21 @@ def _valid_cep(value: str) -> bool:
     return bool(re.fullmatch(r"\d{5}-\d{3}", value or ""))
 
 
-def _age_coherence(nasc: str, obito: str) -> Optional[str]:
-    """Retorna mensagem de erro se idade for incoerente, senão None."""
+def _age_coherence(nasc: str, obito: str) -> Tuple[Optional[str], Optional[int]]:
+    """Retorna (mensagem_erro, idade_anos) quando aplicável."""
     if not (_valid_date(nasc) and _valid_date(obito)):
-        return None
+        return None, None
     try:
         dn = dt.datetime.strptime(nasc, "%d/%m/%Y")
         do = dt.datetime.strptime(obito, "%d/%m/%Y")
         if do < dn:
-            return "Data de óbito anterior à data de nascimento"
-        idade = (do - dn).days / 365.25
+            return "Data de óbito anterior à data de nascimento", None
+        idade = int((do - dn).days / 365.25)
         if idade < 0 or idade > 130:
-            return f"Idade incoerente: {idade:.0f} anos"
+            return f"Idade incoerente: {idade} anos", None
+        return None, idade
     except Exception:
-        return None
-    return None
+        return None, None
 
 
 def validate_obito(structured: Dict[str, Any]) -> Dict[str, Any]:
@@ -540,18 +689,12 @@ def validate_obito(structured: Dict[str, Any]) -> Dict[str, Any]:
         warnings.append("CEP com formato inválido")
 
     # Coerência de idade
-    age_err = _age_coherence(structured.get("NASCIMENTO", ""), structured.get("DATA_OBITO", ""))
+    age_err, idade = _age_coherence(structured.get("NASCIMENTO", ""), structured.get("DATA_OBITO", ""))
     if age_err:
         errors.append(age_err)
         computed["idade_anos"] = None
     else:
-        try:
-            if _valid_date(structured.get("NASCIMENTO", "")) and _valid_date(structured.get("DATA_OBITO", "")):
-                dn = dt.datetime.strptime(structured["NASCIMENTO"], "%d/%m/%Y")
-                do = dt.datetime.strptime(structured["DATA_OBITO"], "%d/%m/%Y")
-                computed["idade_anos"] = int((do - dn).days / 365.25)
-        except Exception:
-            computed["idade_anos"] = None
+        computed["idade_anos"] = idade
 
     # Nomes
     nome_ok = "SIM" if structured.get("NOME") else "NAO"
@@ -563,7 +706,6 @@ def validate_obito(structured: Dict[str, Any]) -> Dict[str, Any]:
     total_campos = len(HEADER)
     preenchidos = sum(1 for k in HEADER if structured.get(k))
     score = int((preenchidos / total_campos) * 100)
-    # Penaliza por erros
     score = max(0, score - len(errors) * 10)
     structured["QUALIDADE_SCORE"] = score
 
@@ -596,7 +738,6 @@ def _detect_refusal(text: str) -> bool:
     for phrase in REFUSAL_PHRASES:
         if phrase in low:
             return True
-    # Se o texto for muito curto e não contiver letras/dígitos suficientes
     alnum = sum(1 for c in text if c.isalnum())
     if alnum < 10:
         return True
@@ -675,7 +816,6 @@ def ocr_openai_compatible(
     if _detect_refusal(content):
         raise OCRProviderError("Provedor OCR recusou processar a imagem ou retornou texto inválido.", 502)
 
-    # Confiança: se o provedor retornar logprobs usamos; senão heurística simples
     confidence = 0.9
     try:
         usage = data.get("usage", {})
