@@ -122,9 +122,12 @@ async def ocr(
     except Exception as exc:
         return _error_response("OCR_PROVIDER_ERROR", f"Falha no provedor OCR: {exc}", request_id, 502)
 
-    # Parsing estruturado
-    structured = parse_obito(ocr_text)
-    validation = validate_structured(structured)
+    # Parsing estruturado com proteção interna
+    try:
+        structured = parse_obito(ocr_text)
+        validation = validate_structured(structured)
+    except Exception as exc:
+        return _error_response("INTERNAL_ERROR", f"Erro interno no parser/servidor: {exc}", request_id, 500)
 
     # Pós-processamento: hashes, datas, status
     structured["HASH_ARQUIVO"] = hashlib.sha256(file_bytes).hexdigest()
@@ -328,15 +331,18 @@ def _extract_cid_from_text(text: str) -> str:
         return ""
     return matches[-1].upper()
 
+
 def _clean_causa_text(value: str) -> str:
-    if not value: return ""
+    if not value:
+        return ""
     text = value.strip()
     while True:
         prev = text
         # Remove prefixos: 'd ', '(d) ', '- ', ': ' e variações repetidas
         text = re.sub(r"^\(?[a-zA-Z]\)?[\s\-\:]+\s*", "", text)
         text = re.sub(r"^[\-\:\s]+\s*", "", text)
-        if text == prev: break
+        if text == prev:
+            break
     # Se sobrar apenas CID puro
     if bool(re.fullmatch(r"[A-TV-Z]\d{2}(?:\.\d{1,2})?", text, re.IGNORECASE)):
         return ""
@@ -344,7 +350,8 @@ def _clean_causa_text(value: str) -> str:
     if bool(re.fullmatch(r"[<>]?\s*\d+\s*[dhms]", text, re.IGNORECASE)):
         return ""
     return text.strip()
-    
+
+
 def parse_obito(raw_text: str) -> Dict[str, Any]:
     result: Dict[str, Any] = {k: "" for k in HEADER}
     raw_lines = raw_text.splitlines()
@@ -430,7 +437,7 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         key = "CAUSA_MORTE" if k == 0 else f"CAUSA_MORTE_{k + 1}"
         result[key] = causa
 
-     # CAUSA_BASICA: limpa e pega a última não vazia
+    # CAUSA_BASICA: limpa e pega a última não vazia
     cleaned_causas = [_clean_causa_text(c) for c in causas]
     valid_causas = [c for c in cleaned_causas if c]
     causa_basica = valid_causas[-1] if valid_causas else ""
@@ -442,6 +449,8 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         cid_basica = _extract_cid_from_text(raw_text)
     result["CID_BASICA"] = cid_basica
     result["CODIGO_CAUSA_BASICA"] = cid_basica
+
+    return result
 
 
 def _looks_like_label(s: str) -> bool:
@@ -605,6 +614,8 @@ def validate_structured(structured: Dict[str, Any]) -> Dict[str, Any]:
         'names_ok': names_ok,
         'nome_ok': nome_ok,
     }
+
+
 def _valid_date(value: str) -> bool:
     return bool(re.fullmatch(r"\d{2}/\d{2}/\d{4}", value))
 
