@@ -1,12 +1,11 @@
 # FILE: main.py
 import base64
 import hashlib
-import json
 import os
 import re
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import requests
 import uvicorn
@@ -81,9 +80,12 @@ MESES_EXTENSO = {
 
 CID_RE = re.compile(r"\b[A-TV-Z]\d{2}(?:\.\d{1,3})?\b", re.IGNORECASE)
 CEP_RE = re.compile(r"\d{5}-?\d{3}")
-DATE_RE = re.compile(r"\b(\d{2})[\/.-](\d{2})[\/.-](\d{4})\b")
+DATE_RE = re.compile(r"\b(\d{2})[/\s.-](\d{2})[/\s.-](\d{4})\b")
 TIME_RE = re.compile(r"\b(\d{1,2}):(\d{2})(?::(\d{2}))?\b")
-DURATION_RE = re.compile(r"^(?:[<>]?\d+(?:[dhms]|min|dias?|horas?|minutos?)|\d+\s*(?:d|h|min|dias?|horas?|minutos?))$", re.IGNORECASE)
+DURATION_RE = re.compile(
+    r"^(?:[<>]?\d+(?:[dhms]|min|dias?|horas?|minutos?)|\d+\s*(?:d|h|min|dias?|horas?|minutos?))$",
+    re.IGNORECASE,
+)
 
 AUX_WORDS = {
     "ignorado", "ignorada", "dias", "dia", "horas", "hora",
@@ -112,6 +114,13 @@ STOP_CAUSAS = {
     "prováveis circunstâncias",
 }
 
+LABEL_MARKERS = [
+    "nome", "data", "hora", "municipio", "uf", "cep", "cpf", "rg",
+    "causa", "parte", "medico", "crm", "sexo", "raca", "cor",
+    "estado civil", "nacionalidade", "profissao", "logradouro",
+    "numero", "complemento", "bairro", "cidade", "obito", "idade",
+]
+
 
 # ---------------------------------------------------------------------------
 # App
@@ -124,19 +133,10 @@ app = FastAPI(title="OCR Declaração de Óbito", version="1.0.0")
 # Helpers de erro
 # ---------------------------------------------------------------------------
 
-def _error_response(
-    status_code: int,
-    code: str,
-    message: str,
-    request_id: str,
-) -> JSONResponse:
+def _error_response(status_code: int, code: str, message: str, request_id: str) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
-        content={
-            "code": code,
-            "message": message,
-            "requestId": request_id,
-        },
+        content={"code": code, "message": message, "requestId": request_id},
     )
 
 
@@ -180,7 +180,6 @@ def _normalize_line(line: str) -> str:
     line = (line or "").strip()
     if not line:
         return ""
-    # Remove prefixos numéricos de rótulos: "2 ", "2. ", "2) ", "2- "
     line = re.sub(r"^\d{1,3}(?:\.|\)|-)?\s+(?=[A-Za-zÀ-ú])", "", line)
     return _normalize_text(line)
 
@@ -193,21 +192,15 @@ def _looks_like_label(line: str) -> bool:
         return True
     if len(low) < 3:
         return True
-    if re.fullmatch(r"[\d\s/\/.\-:]+", line):
+    if re.fullmatch(r"[\d\s/.\-:]+", line):
         return True
-    label_markers = [
-        "nome", "data", "hora", "municipio", "uf", "cep", "cpf", "rg",
-        "causa", "parte", "medico", "crm", "sexo", "raca", "cor",
-        "estado civil", "nacionalidade", "profissao", "logradouro",
-        "numero", "complemento", "bairro", "cidade", "obito",
-    ]
-    return any(low.startswith(m) for m in label_markers)
+    return any(low.startswith(m) for m in LABEL_MARKERS)
 
 
 def _is_numeric_line(line: str) -> bool:
     if not line:
         return True
-    return bool(re.fullmatch(r"[\d\s/\/.\-:]+", line))
+    return bool(re.fullmatch(r"[\d\s/.\-:]+", line))
 
 
 def _is_duration_token(line: str) -> bool:
@@ -247,8 +240,7 @@ def _clean_causa_text(value: str) -> str:
     if not value:
         return ""
     value = _normalize_text(value)
-    # remove prefixos residuais
-    value = re.sub(r"^(?:[a-z]\)|\(d\)|d|\-|:)\s+", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"^(?:d\s+|\(d\)\s+|-\s+|:\s+)", "", value, flags=re.IGNORECASE)
     value = _normalize_text(value)
     if not value:
         return ""
@@ -268,9 +260,7 @@ def _valid_date(value: str) -> bool:
     if not m:
         return False
     d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
-    if not (1 <= d <= 31 and 1 <= mo <= 12 and 1900 <= y <= 2100):
-        return False
-    return True
+    return 1 <= d <= 31 and 1 <= mo <= 12 and 1900 <= y <= 2100
 
 
 def _valid_time(value: str) -> bool:
@@ -281,24 +271,6 @@ def _valid_time(value: str) -> bool:
         return False
     h, mi = int(m.group(1)), int(m.group(2))
     return 0 <= h <= 23 and 0 <= mi <= 59
-
-
-def _extract_date(value: str) -> str:
-    if not value:
-        return ""
-    m = DATE_RE.search(value)
-    return f"{m.group(1)}/{m.group(2)}/{m.group(3)}" if m else _normalize_text(value)
-
-
-def _extract_time(value: str) -> str:
-    if not value:
-        return ""
-    m = TIME_RE.search(value)
-    if not m:
-        return ""
-    if m.group(3):
-        return f"{int(m.group(1)):02d}:{m.group(2)}:{m.group(3)}"
-    return f"{int(m.group(1)):02d}:{m.group(2)}"
 
 
 def _extract_cid(text: str) -> str:
@@ -317,68 +289,70 @@ def _find_label_index(lines: List[str], label: str) -> int:
     return -1
 
 
-def _extract_value_after_label(lines: List[str], label: str, window: int = 6) -> str:
-    idx = _find_label_index(lines, label)
-    if idx < 0:
-        return ""
-    # valor na mesma linha após ':'
-    same = lines[idx]
-    if ":" in same:
-        candidate = same.split(":", 1)[1].strip()
-        if candidate and not _looks_like_label(candidate) and not _is_numeric_line(candidate):
-            return candidate
-    for j in range(idx + 1, min(idx + 1 + window, len(lines))):
-        candidate = lines[j].strip()
-        if not candidate:
+# ---------------------------------------------------------------------------
+# Helpers tipados de extração
+# ---------------------------------------------------------------------------
+
+def _extract_text_after_label(lines: List[str], labels: List[str], window: int = 6) -> str:
+    for label in labels:
+        idx = _find_label_index(lines, label)
+        if idx < 0:
             continue
-        if _is_numeric_line(candidate):
-            continue
-        if _looks_like_label(candidate):
-            continue
-        # primeira linha plausível com letras
-        if re.search(r"[A-Za-zÀ-ú]", candidate):
-            value = candidate
-            # continuação de nome na próxima linha
-            if j + 1 < len(lines):
-                nxt = lines[j + 1].strip()
-                if (
-                    nxt
-                    and not _looks_like_label(nxt)
-                    and not _is_numeric_line(nxt)
-                    and re.search(r"[A-Za-zÀ-ú]", nxt)
-                    and not re.search(r"\d{2}/\d{2}/\d{4}", nxt)
-                    and len(nxt.split()) <= 4
-                ):
-                    value = f"{value} {nxt}".strip()
-            return _normalize_text(value)
+        same = lines[idx]
+        if ":" in same:
+            candidate = same.split(":", 1)[1].strip()
+            if (
+                candidate
+                and not _looks_like_label(candidate)
+                and not _is_numeric_line(candidate)
+                and re.search(r"[A-Za-zÀ-ú]", candidate)
+            ):
+                return _normalize_text(candidate)
+        for j in range(idx + 1, min(idx + 1 + window, len(lines))):
+            candidate = lines[j].strip()
+            if not candidate or _is_numeric_line(candidate) or _looks_like_label(candidate):
+                continue
+            if re.search(r"[A-Za-zÀ-ú]", candidate):
+                value = candidate
+                if j + 1 < len(lines):
+                    nxt = lines[j + 1].strip()
+                    if (
+                        nxt
+                        and not _looks_like_label(nxt)
+                        and not _is_numeric_line(nxt)
+                        and re.search(r"[A-Za-zÀ-ú]", nxt)
+                        and not DATE_RE.search(nxt)
+                        and len(nxt.split()) <= 4
+                    ):
+                        value = f"{value} {nxt}".strip()
+                return _normalize_text(value)
     return ""
 
 
-def _extract_causas(lines: List[str]) -> List[str]:
-    causas: List[str] = []
-    start = -1
-    for i, ln in enumerate(lines):
-        if "causas da morte" in ln.lower():
-            start = i
-            break
-    if start < 0:
-        return causas
-    for ln in lines[start + 1:]:
-        low = ln.lower().strip()
-        if not low:
+def _extract_date_after_label(lines: List[str], labels: List[str], window: int = 6) -> str:
+    for label in labels:
+        idx = _find_label_index(lines, label)
+        if idx < 0:
             continue
-        if any(low.startswith(stop) or stop in low for stop in STOP_CAUSAS):
-            break
-        if _is_duration_token(ln):
+        for j in range(idx, min(idx + 1 + window, len(lines))):
+            m = DATE_RE.search(lines[j])
+            if m:
+                return f"{m.group(1)}/{m.group(2)}/{m.group(3)}"
+    return ""
+
+
+def _extract_time_after_label(lines: List[str], labels: List[str], window: int = 4) -> str:
+    for label in labels:
+        idx = _find_label_index(lines, label)
+        if idx < 0:
             continue
-        if _is_cid_only(ln):
-            continue
-        if _is_aux_only(ln):
-            continue
-        cleaned = _clean_causa_text(_strip_trailing_cid(ln))
-        if cleaned:
-            causas.append(cleaned)
-    return causas
+        for j in range(idx, min(idx + 1 + window, len(lines))):
+            m = TIME_RE.search(lines[j])
+            if m:
+                if m.group(3):
+                    return f"{int(m.group(1)):02d}:{m.group(2)}:{m.group(3)}"
+                return f"{int(m.group(1)):02d}:{m.group(2)}"
+    return ""
 
 
 def _extract_uf_near(lines: List[str], idx: int) -> str:
@@ -391,6 +365,39 @@ def _extract_uf_near(lines: List[str], idx: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Causas
+# ---------------------------------------------------------------------------
+
+def _extract_causas(lines: List[str]) -> List[Dict[str, str]]:
+    result: List[Dict[str, str]] = []
+    start = -1
+    for i, ln in enumerate(lines):
+        if "causas da morte" in ln.lower():
+            start = i
+            break
+    if start < 0:
+        return result
+    for ln in lines[start + 1:]:
+        low = ln.lower().strip()
+        if not low:
+            continue
+        if any(s in low for s in STOP_CAUSAS):
+            break
+        if _is_duration_token(ln):
+            continue
+        if _is_cid_only(ln):
+            continue
+        if _is_aux_only(ln):
+            continue
+        cid = _extract_cid(ln)
+        text_without_cid = _strip_trailing_cid(ln)
+        cleaned = _clean_causa_text(text_without_cid)
+        if cleaned:
+            result.append({"text": cleaned, "cid": cid})
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
 
@@ -399,52 +406,16 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
     raw_lines = raw_text.splitlines()
     lines = [_normalize_line(ln) for ln in raw_lines]
 
-    # NOME
-    nome = _extract_value_after_label(lines, "Nome do Falecido", window=6)
-    result["NOME"] = nome
+    result["NOME"] = _extract_text_after_label(lines, ["Nome do Falecido"], window=6)
+    result["NOME_MAE"] = _extract_text_after_label(lines, ["Nome da Mãe", "Nome da Mae"], window=4)
+    result["NOME_PAI"] = _extract_text_after_label(lines, ["Nome do Pai"], window=4)
+    result["NASCIMENTO"] = _extract_date_after_label(lines, ["Data de Nascimento"], window=6)
+    result["DATA_OBITO"] = _extract_date_after_label(lines, ["Data do óbito", "Data do obito"], window=6)
+    result["HORA_OBITO"] = _extract_time_after_label(lines, ["Hora"], window=4)
+    result["CIDADE_OBITO"] = _extract_text_after_label(
+        lines, ["Município de ocorrência", "Municipio de ocorrencia"], window=4
+    )
 
-    # NOME_MAE
-    nome_mae = _extract_value_after_label(lines, "Nome da Mãe", window=4)
-    if not nome_mae:
-        nome_mae = _extract_value_after_label(lines, "Nome da Mae", window=4)
-    result["NOME_MAE"] = nome_mae
-
-    # NOME_PAI
-    nome_pai = _extract_value_after_label(lines, "Nome do Pai", window=4)
-    result["NOME_PAI"] = nome_pai
-
-    # NASCIMENTO
-    nasc = _extract_value_after_label(lines, "Data de Nascimento", window=4)
-    if nasc:
-        nasc = _extract_date(nasc)
-    result["NASCIMENTO"] = nasc
-
-    # DATA_OBITO
-    data_obito = _extract_value_after_label(lines, "Data do óbito", window=4)
-    if not data_obito:
-        data_obito = _extract_value_after_label(lines, "Data do obito", window=4)
-    if data_obito:
-        data_obito = _extract_date(data_obito)
-    result["DATA_OBITO"] = data_obito
-
-    # HORA_OBITO (linha exatamente 'Hora')
-    hora_obito = ""
-    for i, ln in enumerate(lines):
-        if ln.strip().lower() == "hora":
-            if i + 1 < len(lines):
-                hora_obito = _extract_time(lines[i + 1])
-                if not hora_obito:
-                    hora_obito = _normalize_text(lines[i + 1])
-            break
-    result["HORA_OBITO"] = hora_obito
-
-    # CIDADE_OBITO
-    cidade_obito = _extract_value_after_label(lines, "Município de ocorrência", window=4)
-    if not cidade_obito:
-        cidade_obito = _extract_value_after_label(lines, "Municipio de ocorrencia", window=4)
-    result["CIDADE_OBITO"] = cidade_obito
-
-    # UF_OBITO
     uf_obito = ""
     idx_mun = _find_label_index(lines, "Município de ocorrência")
     if idx_mun < 0:
@@ -460,7 +431,6 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
                 uf_obito = m.group(1)
     result["UF_OBITO"] = uf_obito
 
-    # CEP
     cep = ""
     for ln in lines:
         m = CEP_RE.search(ln)
@@ -469,34 +439,33 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
             break
     result["CEP"] = cep
 
-    # Causas
     causas = _extract_causas(lines)
     causa_fields = ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_MORTE_4", "CAUSA_MORTE_5"]
+    cid_fields = ["CID_MORTE", "CID_MORTE_2", "CID_MORTE_3", "CID_MORTE_4", "CID_MORTE_5"]
+    cod_fields = [
+        "CODIGO_CAUSA_MORTE", "CODIGO_CAUSA_MORTE_2", "CODIGO_CAUSA_MORTE_3",
+        "CODIGO_CAUSA_MORTE_4", "CODIGO_CAUSA_MORTE_5",
+    ]
+
     for i, field in enumerate(causa_fields):
         if i < len(causas):
-            result[field] = causas[i]
+            result[field] = causas[i]["text"]
+            result[cid_fields[i]] = causas[i]["cid"]
+            result[cod_fields[i]] = causas[i]["cid"]
 
     causa_basica = ""
-    for c in reversed(causas):
-        if c.strip():
-            causa_basica = c.strip()
-            break
-    result["CAUSA_BASICA"] = causa_basica
+    cid_basica = ""
+    if causas:
+        causa_basica = causas[-1]["text"]
+        cid_basica = causas[-1]["cid"]
 
-    cid_basica = _extract_cid(causa_basica)
-    if not cid_basica:
+    any_cid = any(c["cid"] for c in causas)
+    if not cid_basica and not any_cid:
         cid_basica = _extract_cid(raw_text)
+
+    result["CAUSA_BASICA"] = causa_basica
     result["CID_BASICA"] = cid_basica
     result["CODIGO_CAUSA_BASICA"] = cid_basica
-
-    # Códigos/CID por causa
-    cid_fields = ["CID_MORTE", "CID_MORTE_2", "CID_MORTE_3", "CID_MORTE_4", "CID_MORTE_5"]
-    cod_fields = ["CODIGO_CAUSA_MORTE", "CODIGO_CAUSA_MORTE_2", "CODIGO_CAUSA_MORTE_3", "CODIGO_CAUSA_MORTE_4", "CODIGO_CAUSA_MORTE_5"]
-    for i, field in enumerate(cid_fields):
-        if i < len(causas):
-            cid = _extract_cid(causas[i])
-            result[field] = cid
-            result[cod_fields[i]] = cid
 
     return result
 
@@ -526,12 +495,10 @@ def validate_structured(structured: Dict[str, Any]) -> Dict[str, Any]:
     errors: List[str] = []
     warnings: List[str] = []
 
-    if not structured.get("NASCIMENTO") or not _valid_date(structured.get("NASCIMENTO", "")):
-        if structured.get("NASCIMENTO"):
-            errors.append("NASCIMENTO inválido")
-    if not structured.get("DATA_OBITO") or not _valid_date(structured.get("DATA_OBITO", "")):
-        if structured.get("DATA_OBITO"):
-            errors.append("DATA_OBITO inválida")
+    if structured.get("NASCIMENTO") and not _valid_date(structured.get("NASCIMENTO", "")):
+        errors.append("NASCIMENTO inválido")
+    if structured.get("DATA_OBITO") and not _valid_date(structured.get("DATA_OBITO", "")):
+        errors.append("DATA_OBITO inválida")
     if structured.get("HORA_OBITO") and not _valid_time(structured.get("HORA_OBITO", "")):
         errors.append("HORA_OBITO inválida")
     if structured.get("UF_OBITO") and structured.get("UF_OBITO", "").upper() not in UF_VALIDAS:
@@ -551,7 +518,9 @@ def validate_structured(structured: Dict[str, Any]) -> Dict[str, Any]:
     if structured.get("NOME") and structured.get("NOME_MAE") and structured["NOME"] == structured["NOME_MAE"]:
         errors.append("NOME igual a NOME_MAE")
 
-    if structured.get("CAUSA_BASICA") and re.fullmatch(r"[A-TV-Z]\d{2}(?:\.\d{1,3})?", structured["CAUSA_BASICA"], re.IGNORECASE):
+    if structured.get("CAUSA_BASICA") and re.fullmatch(
+        r"[A-TV-Z]\d{2}(?:\.\d{1,3})?", structured["CAUSA_BASICA"], re.IGNORECASE
+    ):
         errors.append("CAUSA_BASICA parece CID puro")
 
     if not structured.get("CID_BASICA"):
@@ -744,7 +713,11 @@ async def ocr(
         structured["NOMES_OK"] = "SIM" if validation["names_ok"] else "NAO"
         structured["NOME_OK"] = "SIM" if validation["nome_ok"] else "NAO"
 
-        warnings = validation["warnings"]
+        for key in HEADER:
+            if key not in structured:
+                structured[key] = ""
+
+        warnings = list(validation["warnings"])
         if not structured.get("CID_BASICA") and "CID_BASICA não localizado" not in warnings:
             warnings.append("CID_BASICA não localizado")
 
