@@ -282,176 +282,218 @@ def _extract_cid(text: str) -> str:
 # BLOCO DIRETO PARA SUBSTITUIR
 
 def _find_label_index(lines: List[str], label: str) -> int:
-    target = label.strip().lower().rstrip(":").strip()
+    # Comparacao exata ou por prefixo do rotulo normalizado.
+    # Nao usa busca ampla ("in") para evitar falsos positivos.
+    target = _normalize_text(label).strip()
+    if not target:
+        return -1
     for i, line in enumerate(lines):
-        norm = line.strip().lower().rstrip(":").strip()
-        if norm == target or norm.startswith(target + " ") or norm.startswith(target + ":"):
+        norm = _normalize_text(line).strip()
+        if not norm:
+            continue
+        if norm == target or norm.startswith(target):
             return i
     return -1
 
 
 def _extract_text_after_label(lines: List[str], labels: List[str], window: int = 6) -> str:
-    idx = -1
+    # Localiza o primeiro rotulo valido e extrai o texto seguinte.
+    base_idx = -1
     for label in labels:
         idx = _find_label_index(lines, label)
-        if idx >= 0:
+        if idx != -1:
+            base_idx = idx
             break
-    if idx < 0:
+    if base_idx == -1:
         return ""
 
-    line = lines[idx]
-    if ":" in line:
-        value = line.split(":", 1)[1].strip()
-        if value and not _looks_like_label(value) and not _is_numeric_line(value):
-            cid = _extract_cid(value)
-            text = _strip_trailing_cid(value, cid) if cid else value
-            text = _clean_causa_text(text) if text else text
+    def _aceitavel(cand: str) -> bool:
+        cand = cand.strip()
+        if not cand:
+            return False
+        if _looks_like_label(cand):
+            return False
+        if _is_numeric_line(cand):
+            return False
+        if _is_duration_token(cand):
+            return False
+        if _is_cid_only(cand):
+            return False
+        if _is_aux_only(cand):
+            return False
+        if not any(c.isalpha() for c in cand):
+            return False
+        return True
+
+    # Aceita valor na mesma linha apos ':'.
+    base_line = lines[base_idx]
+    if ":" in base_line:
+        after = base_line.split(":", 1)[1].strip()
+        if _aceitavel(after):
+            text = after
+            if base_idx + 1 < len(lines):
+                nxt = lines[base_idx + 1].strip()
+                if _aceitavel(nxt) and not _looks_like_label(nxt):
+                    text = (text + " " + nxt).strip()
             return text
 
-    start = idx + 1
-    end = min(len(lines), start + window)
-    first_value = ""
-    for j in range(start, end):
-        candidate = lines[j].strip()
-        if not candidate:
+    # Caso contrario, olha nas proximas linhas dentro da janela.
+    for j in range(base_idx + 1, min(base_idx + 1 + window, len(lines))):
+        cand = lines[j].strip()
+        if not _aceitavel(cand):
             continue
-        if _looks_like_label(candidate):
-            continue
-        if _is_numeric_line(candidate):
-            continue
-        if _is_duration_token(candidate):
-            continue
-        if _is_cid_only(candidate):
-            continue
-        if _is_aux_only(candidate):
-            continue
-        if not any(ch.isalpha() for ch in candidate):
-            continue
-
-        cid = _extract_cid(candidate)
-        text = _strip_trailing_cid(candidate, cid) if cid else candidate
-        text = _clean_causa_text(text) if text else text
-        first_value = text
-
-        for k in range(j + 1, end):
-            nxt = lines[k].strip()
-            if not nxt:
-                break
-            if _looks_like_label(nxt):
-                break
-            if _is_numeric_line(nxt):
-                break
-            if _is_duration_token(nxt):
-                break
-            if _is_cid_only(nxt):
-                break
-            if _is_aux_only(nxt):
-                break
-            if not any(ch.isalpha() for ch in nxt):
-                break
-            first_value = (first_value + " " + nxt).strip()
-        break
-
-    return first_value
+        text = cand
+        if j + 1 < len(lines):
+            nxt = lines[j + 1].strip()
+            if _aceitavel(nxt) and not _looks_like_label(nxt):
+                text = (text + " " + nxt).strip()
+        return text
+    return ""
 
 
 def _extract_date_after_label(lines: List[str], labels: List[str], window: int = 6, forced_year: str = "") -> str:
-    idx = -1
+    # Unica definicao de extracao de data. Retorna sempre DD/MM/AAAA.
+    base_idx = -1
     for label in labels:
         idx = _find_label_index(lines, label)
-        if idx >= 0:
+        if idx != -1:
+            base_idx = idx
             break
-    if idx < 0:
+    if base_idx == -1:
         return ""
 
-    start = idx
-    end = min(len(lines), idx + window + 1)
-    for j in range(start, end):
-        candidate = lines[j]
-        match = DATE_RE.search(candidate)
-        if match:
-            date_str = match.group(0)
-            if forced_year:
-                parts = date_str.split("/")
-                if len(parts) == 3:
-                    parts[2] = forced_year
-                    date_str = "/".join(parts)
-            return date_str
+    for j in range(base_idx, min(base_idx + 1 + window, len(lines))):
+        line = lines[j]
+        m = DATE_RE.search(line)
+        if not m:
+            continue
+        digits = re.findall(r"\d+", m.group(0))
+        if len(digits) < 2:
+            continue
+        day = digits[0].zfill(2)
+        month = digits[1].zfill(2)
+        if len(digits) >= 3:
+            year = digits[2]
+        else:
+            year = ""
+        if forced_year:
+            year = str(forced_year).strip()
+        if not year:
+            continue
+        year = year.zfill(4)
+        return f"{day}/{month}/{year}"
     return ""
 
 
 def _extract_time_after_label(lines: List[str], labels: List[str], window: int = 4) -> str:
-    idx = -1
+    # Retorna HH:MM ou HH:MM:SS conforme o match.
+    base_idx = -1
     for label in labels:
         idx = _find_label_index(lines, label)
-        if idx >= 0:
+        if idx != -1:
+            base_idx = idx
             break
-    if idx < 0:
+    if base_idx == -1:
         return ""
 
-    start = idx
-    end = min(len(lines), idx + window + 1)
-    for j in range(start, end):
-        candidate = lines[j]
-        match = TIME_RE.search(candidate)
-        if match:
-            return match.group(0)
+    for j in range(base_idx, min(base_idx + 1 + window, len(lines))):
+        line = lines[j]
+        m = TIME_RE.search(line)
+        if not m:
+            continue
+        matched = m.group(0).strip()
+        digits = re.findall(r"\d+", matched)
+        if len(digits) < 2:
+            continue
+        hh = digits[0].zfill(2)
+        mm = digits[1].zfill(2)
+        if len(digits) >= 3:
+            ss = digits[2].zfill(2)
+            return f"{hh}:{mm}:{ss}"
+        return f"{hh}:{mm}"
     return ""
 
 
 def _extract_uf_near(lines: List[str], idx: int) -> str:
+    # Busca apenas tokens de 2 letras nas proximas 6 linhas.
+    # Retorna somente se for sigla UF valida. Nunca retorna frase inteira.
     if idx < 0:
         return ""
-    end = min(len(lines), idx + 7)
-    for j in range(idx, end):
-        candidate = lines[j].strip().upper()
-        tokens = candidate.replace(",", " ").replace("-", " ").split()
-        for token in tokens:
-            if token in UF_VALIDAS:
-                return token
+    for j in range(idx, min(idx + 7, len(lines))):
+        cand = lines[j].strip().upper()
+        if not cand:
+            continue
+        tokens = re.split(r"[\s,;:/\\-]+", cand)
+        for tok in tokens:
+            tok = tok.strip()
+            if len(tok) == 2 and tok in UF_VALIDAS:
+                return tok
     return ""
 
 
 def _extract_causas(lines: List[str]) -> List[Dict[str, str]]:
+    # Inicia na linha apos 'causas da morte'.
+    start = _find_label_index(lines, "causas da morte")
+    if start == -1:
+        start = _find_label_index(lines, "causa da morte")
+    if start == -1:
+        return []
+
+    # Legendas explicitas que devem ser bloqueadas.
+    legendas_bloqueadas = [
+        "intervalo entre o início e a morte",
+        "intervalo entre o inicio e a morte",
+        "devido ou como consequência de",
+        "devido ou como consequencia de",
+        "parte i",
+        "parte ii",
+        "cid",
+        "meses dias horas minutos ignorado",
+    ]
+
+    def _e_legenda(low: str) -> bool:
+        for leg in legendas_bloqueadas:
+            if low == leg or low.startswith(leg) or leg in low:
+                return True
+        return False
+
+    def _parar(low: str) -> bool:
+        for stop in STOP_CAUSAS:
+            stop_low = stop.lower().strip()
+            if not stop_low:
+                continue
+            if low == stop_low or low.startswith(stop_low) or stop_low in low:
+                return True
+        return False
+
     causas: List[Dict[str, str]] = []
-    start_idx = -1
-    for i, line in enumerate(lines):
-        norm = line.strip().lower()
-        if norm.startswith("causas da morte"):
-            start_idx = i
+    for j in range(start + 1, len(lines)):
+        line = lines[j].strip()
+        low = line.lower().strip()
+
+        if _parar(low):
             break
-    if start_idx < 0:
-        return causas
-
-    for j in range(start_idx + 1, len(lines)):
-        raw = lines[j].strip()
-        norm = raw.lower()
-
-        if not raw:
+        if _e_legenda(low):
+            continue
+        if not line:
+            continue
+        if _is_duration_token(line):
+            continue
+        if _is_cid_only(line):
+            continue
+        if _is_aux_only(line):
+            continue
+        if _looks_like_label(line):
+            continue
+        if not any(c.isalpha() for c in line):
             continue
 
-        if any(norm.startswith(stop.lower()) or norm == stop.lower() for stop in STOP_CAUSAS):
-            break
-
-        if _is_duration_token(raw):
-            continue
-        if _is_cid_only(raw):
-            continue
-        if _is_aux_only(raw):
-            continue
-        if _looks_like_label(raw):
-            continue
-        if not any(ch.isalpha() for ch in raw):
-            continue
-
-        cid = _extract_cid(raw)
-        text = _strip_trailing_cid(raw, cid) if cid else raw
-        text = _clean_causa_text(text)
-        if not text:
-            continue
-
-        causas.append({"text": text, "cid": cid or ""})
-
+        # Extrai o CID da linha original antes de limpar.
+        cid = _extract_cid(line)
+        text_without_cid = _strip_trailing_cid(line)
+        cleaned = _clean_causa_text(text_without_cid)
+        if cleaned:
+            causas.append({"text": cleaned, "cid": cid})
     return causas
 
 
@@ -460,53 +502,72 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
     raw_lines = raw_text.splitlines()
     lines = [_normalize_line(ln) for ln in raw_lines]
 
-    result["NOME"] = _extract_text_after_label(lines, ["Nome", "Nome do falecido", "Nome do paciente"], window=6)
-    result["NOME_MAE"] = _extract_text_after_label(lines, ["Nome da mãe", "Nome da mae", "Mãe", "Mae"], window=6)
-    result["NOME_PAI"] = _extract_text_after_label(lines, ["Nome do pai", "Pai"], window=6)
+    # Nomes.
+    result["NOME"] = _extract_text_after_label(lines, ["Nome do Falecido"])
+    result["NOME_MAE"] = _extract_text_after_label(lines, ["Nome da Mãe", "Nome da Mae"])
+    result["NOME_PAI"] = _extract_text_after_label(lines, ["Nome do Pai"])
 
-    result["NASCIMENTO"] = _extract_date_after_label(lines, ["Data de Nascimento", "Data de nascimento"], window=6)
-    result["DATA_OBITO"] = _extract_date_after_label(lines, ["Data do óbito", "Data do obito", "Data de óbito", "Data de obito"], window=6, forced_year="2026")
-    result["HORA_OBITO"] = _extract_time_after_label(lines, ["Hora", "Hora do óbito", "Hora do obito"], window=4)
+    # Datas.
+    result["NASCIMENTO"] = _extract_date_after_label(lines, ["Data de Nascimento"], window=6)
+    result["DATA_OBITO"] = _extract_date_after_label(lines, ["Data do óbito", "Data do obito"], window=6, forced_year="2026")
 
-    cidade_idx = -1
-    for label in ["Município de ocorrência", "Municipio de ocorrencia", "Município do óbito", "Municipio do obito", "Local de ocorrência", "Local de ocorrencia"]:
-        cidade_idx = _find_label_index(lines, label)
-        if cidade_idx >= 0:
+    # Hora.
+    result["HORA_OBITO"] = _extract_time_after_label(lines, ["Hora"], window=4)
+
+    # Cidade do obito.
+    result["CIDADE_OBITO"] = _extract_text_after_label(lines, ["Município de ocorrência", "Municipio de ocorrencia"])
+
+    # UF do obito: primeiro a partir do indice do municipio.
+    mun_idx = -1
+    for label in ["Município de ocorrência", "Municipio de ocorrencia"]:
+        mun_idx = _find_label_index(lines, label)
+        if mun_idx != -1:
             break
-    result["CIDADE_OBITO"] = _extract_text_after_label(lines, ["Município de ocorrência", "Municipio de ocorrencia", "Município do óbito", "Municipio do obito", "Local de ocorrência", "Local de ocorrencia"], window=6)
-    result["UF_OBITO"] = _extract_uf_near(lines, cidade_idx)
-    if not result["UF_OBITO"]:
-        result["UF_OBITO"] = _extract_text_after_label(lines, ["UF", "Estado"], window=4).upper()
+    uf = _extract_uf_near(lines, mun_idx) if mun_idx != -1 else ""
+    if not uf:
+        # Fallback seguro: token UF apenas na linha seguinte ao rotulo 'UF'.
+        uf_idx = _find_label_index(lines, "UF")
+        if uf_idx != -1 and uf_idx + 1 < len(lines):
+            uf = _extract_uf_near(lines, uf_idx + 1)
+    result["UF_OBITO"] = uf
 
+    # CEP: primeiro match em lines.
     for line in lines:
-        match = CEP_RE.search(line)
-        if match:
-            result["CEP"] = match.group(0)
+        cep_match = CEP_RE.search(line)
+        if cep_match:
+            result["CEP"] = cep_match.group(0).strip()
             break
 
+    # Causas.
     causas = _extract_causas(lines)
-    for i, causa in enumerate(causas[:5], start=1):
-        result[f"CAUSA_MORTE{i}"] = causa["text"]
-        result[f"CID_MORTE{i}"] = causa["cid"]
-        result[f"CODIGO_CAUSA_MORTE{i}"] = causa["cid"]
 
-    causa_basica = ""
-    cid_basica = ""
-    for causa in reversed(causas):
-        if causa["text"]:
-            causa_basica = causa["text"]
-            cid_basica = causa["cid"]
-            break
+    causa_fields = ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_MORTE_4", "CAUSA_MORTE_5"]
+    cid_fields = ["CID_MORTE", "CID_MORTE_2", "CID_MORTE_3", "CID_MORTE_4", "CID_MORTE_5"]
+    cod_fields = ["CODIGO_CAUSA_MORTE", "CODIGO_CAUSA_MORTE_2", "CODIGO_CAUSA_MORTE_3", "CODIGO_CAUSA_MORTE_4", "CODIGO_CAUSA_MORTE_5"]
 
-    if not cid_basica:
-        cid_basica = _extract_cid(raw_text)
+    for i, causa in enumerate(causas[:5]):
+        result[causa_fields[i]] = causa["text"]
+        result[cid_fields[i]] = causa["cid"]
+        result[cod_fields[i]] = causa["cid"]
 
-    result["CAUSA_BASICA"] = causa_basica
-    result["CID_BASICA"] = cid_basica
-    result["CODIGO_CAUSA_BASICA"] = cid_basica
+    # CAUSA_BASICA = ultima causa valida; CID_BASICA alinhado a ela.
+    if causas:
+        ultima = causas[-1]
+        result["CAUSA_BASICA"] = ultima["text"]
+        result["CID_BASICA"] = ultima["cid"]
+    else:
+        result["CAUSA_BASICA"] = ""
+        result["CID_BASICA"] = ""
+
+    # Fallback ao raw_text somente se nenhuma causa valida tiver cid.
+    if not any(c["cid"] for c in causas):
+        fallback_cid = _extract_cid(raw_text)
+        if fallback_cid and not result["CID_BASICA"]:
+            result["CID_BASICA"] = fallback_cid
+
+    result["CODIGO_CAUSA_BASICA"] = result["CID_BASICA"]
 
     return result
-
 
 # ---------------------------------------------------------------------------
 # Validação
