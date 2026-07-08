@@ -293,41 +293,26 @@ def _find_label_index(lines: List[str], label: str) -> int:
 # Helpers tipados de extração
 # ---------------------------------------------------------------------------
 
-def _extract_text_after_label(lines: List[str], labels: List[str], window: int = 6) -> str:
-    for label in labels:
-        idx = _find_label_index(lines, label)
-        if idx < 0:
-            continue
-        same = lines[idx]
-        if ":" in same:
-            candidate = same.split(":", 1)[1].strip()
-            if (
-                candidate
-                and not _looks_like_label(candidate)
-                and not _is_numeric_line(candidate)
-                and re.search(r"[A-Za-zÀ-ú]", candidate)
-            ):
-                return _normalize_text(candidate)
-        for j in range(idx + 1, min(idx + 1 + window, len(lines))):
-            candidate = lines[j].strip()
-            if not candidate or _is_numeric_line(candidate) or _looks_like_label(candidate):
-                continue
-            if re.search(r"[A-Za-zÀ-ú]", candidate):
-                value = candidate
-                if j + 1 < len(lines):
-                    nxt = lines[j + 1].strip()
-                    if (
-                        nxt
-                        and not _looks_like_label(nxt)
-                        and not _is_numeric_line(nxt)
-                        and re.search(r"[A-Za-zÀ-ú]", nxt)
-                        and not DATE_RE.search(nxt)
-                        and len(nxt.split()) <= 4
-                    ):
-                        value = f"{value} {nxt}".strip()
-                return _normalize_text(value)
+def _extract_date_after_label(lines: List[str], labels: List[str], window: int = 6, forced_year: str = "") -> str:
+    import re
+    date_re = re.compile(r"(\d{1,2})[\/\s.\-](\d{1,2})[\/\s.\-](\d{2,4})")
+    lower_labels = [label.lower() for label in labels]
+    for i, line in enumerate(lines):
+        lower_line = line.lower()
+        for label in lower_labels:
+            if label in lower_line:
+                start = i
+                end = min(len(lines), i + window + 1)
+                for target in lines[start:end]:
+                    match = date_re.search(target)
+                    if match:
+                        day, month, year = match.groups()
+                        if len(year) == 2:
+                            year = "20" + year
+                        if forced_year:
+                            year = forced_year
+                        return f"{int(day):02d}/{int(month):02d}/{year}"
     return ""
-
 
 def _extract_date_after_label(lines: List[str], labels: List[str], window: int = 6) -> str:
     for label in labels:
@@ -411,7 +396,7 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
     result["NOME_MAE"] = _extract_text_after_label(lines, ["Nome da Mãe", "Nome da Mae"], window=4)
     result["NOME_PAI"] = _extract_text_after_label(lines, ["Nome do Pai"], window=4)
     result["NASCIMENTO"] = _extract_date_after_label(lines, ["Data de Nascimento"], window=6)
-    result["DATA_OBITO"] = _extract_date_after_label(lines, ["Data do óbito", "Data do obito"], window=6)
+    result["DATA_OBITO"] = _extract_date_after_label(lines, ['Data do óbito', 'Data do obito'], window=6, forced_year='2026')
     result["HORA_OBITO"] = _extract_time_after_label(lines, ["Hora"], window=4)
     result["CIDADE_OBITO"] = _extract_text_after_label(
         lines, ["Município de ocorrência", "Municipio de ocorrencia"], window=4
