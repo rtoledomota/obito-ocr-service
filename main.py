@@ -440,7 +440,7 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
             break
     result["CEP"] = cep
 
-     causas = _extract_causas(lines)
+    causas = _extract_causas(lines)
     causa_fields = ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_MORTE_4", "CAUSA_MORTE_5"]
     cid_fields = ["CID_MORTE", "CID_MORTE_2", "CID_MORTE_3", "CID_MORTE_4", "CID_MORTE_5"]
     cod_fields = [
@@ -448,22 +448,25 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         "CODIGO_CAUSA_MORTE_4", "CODIGO_CAUSA_MORTE_5",
     ]
 
-    for i in range(len(causa_fields)):
+    for i, field in enumerate(causa_fields):
         if i < len(causas):
-            result[causa_fields[i]] = causas[i]["text"]
+            result[field] = causas[i]["text"]
             result[cid_fields[i]] = causas[i]["cid"]
             result[cod_fields[i]] = causas[i]["cid"]
 
+    causa_basica = ""
+    cid_basica = ""
     if causas:
-        result["CAUSA_BASICA"] = causas[-1]["text"]
-        result["CID_BASICA"] = causas[-1]["cid"]
+        causa_basica = causas[-1]["text"]
+        cid_basica = causas[-1]["cid"]
 
-    # Fallback: se nenhuma causa extraída possui CID, busca no texto bruto
-    if not any(c["cid"] for c in causas):
-        result["CID_BASICA"] = _extract_cid(raw_text)
+    any_cid = any(c["cid"] for c in causas)
+    if not cid_basica and not any_cid:
+        cid_basica = _extract_cid(raw_text)
 
-    result["CODIGO_CAUSA_BASICA"] = result["CID_BASICA"]
-
+    result["CAUSA_BASICA"] = causa_basica
+    result["CID_BASICA"] = cid_basica
+    result["CODIGO_CAUSA_BASICA"] = cid_basica
     return result
 
 
