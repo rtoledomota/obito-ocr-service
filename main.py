@@ -398,9 +398,7 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
     result["NASCIMENTO"] = _extract_date_after_label(lines, ["Data de Nascimento"], window=6)
     result["DATA_OBITO"] = _extract_date_after_label(lines, ['Data do óbito', 'Data do obito'], window=6, forced_year='2026')
     result["HORA_OBITO"] = _extract_time_after_label(lines, ["Hora"], window=4)
-    result["CIDADE_OBITO"] = _extract_text_after_label(
-        lines, ["Município de ocorrência", "Municipio de ocorrencia"], window=4
-    )
+    result["CIDADE_OBITO"] = _extract_text_after_label(lines, ["Município de ocorrência", "Municipio de ocorrencia"], window=4)
 
     uf_obito = ""
     idx_mun = _find_label_index(lines, "Município de ocorrência")
