@@ -522,9 +522,31 @@ def _process_single_image(file_id: str, file_name: str) -> dict:
     return row
 
 def _ensure_sheet_exists() -> str:
-    """Cria a planilha se não existir, ou retorna o SHEET_ID configurado."""
+    """Cria a planilha se não existir, ou retorna o SHEET_ID configurado.
+    Garante que os cabeçalhos existam na primeira aba."""
     if SHEET_ID:
-        return SHEET_ID
+        sid = SHEET_ID
+        # Verifica se já tem cabeçalhos na primeira linha
+        sheets = _get_sheets_service()
+        sheet_name = _get_sheet_name(sid)
+        range_name = f"{sheet_name}!A1:{chr(65 + len(AUDIT_COLUMNS) - 1)}1"
+        existing = sheets.spreadsheets().values().get(
+            spreadsheetId=sid,
+            range=range_name,
+        ).execute()
+        values = existing.get("values", [])
+        if not values or not values[0] or len(values[0]) < len(AUDIT_COLUMNS):
+            # Escreve cabeçalhos
+            headers = [[col for col in AUDIT_COLUMNS]]
+            sheets.spreadsheets().values().update(
+                spreadsheetId=sid,
+                range=f"{sheet_name}!A1",
+                valueInputOption="RAW",
+                body={"values": headers},
+            ).execute()
+            logger.info(f"Cabeçalhos escritos na planilha existente: {sid}")
+        return sid
+
     sheets = _get_sheets_service()
     spreadsheet = {
         "properties": {"title": AUDIT_SHEET_TITLE},
@@ -532,17 +554,16 @@ def _ensure_sheet_exists() -> str:
     }
     sheet = sheets.spreadsheets().create(body=spreadsheet, fields="spreadsheetId").execute()
     sid = sheet.get("spreadsheetId")
-    
+
     # Escreve cabeçalho
     headers = [[col for col in AUDIT_COLUMNS]]
-    sheet_name = _get_sheet_name(sid)
     sheets.spreadsheets().values().update(
         spreadsheetId=sid,
-        range=f"{sheet_name}!A1",
+        range="Auditoria!A1",
         valueInputOption="RAW",
         body={"values": headers},
     ).execute()
-    
+
     logger.info(f"Nova planilha criada: {sid}")
     return sid
 
