@@ -461,7 +461,27 @@ def _extract_causas(lines: List[str]) -> List[Dict[str, str]]:
         results.append({"text": clean, "cid": cid})
 
     return results
+def _debug_slice(raw_text: str, start_markers: list[str], end_markers: list[str], limit: int = 1200) -> str:
+    text = raw_text or ""
+    lower = text.lower()
 
+    start = -1
+    for marker in start_markers:
+        idx = lower.find(marker.lower())
+        if idx != -1:
+            start = idx
+            break
+
+    if start == -1:
+        return ""
+
+    end = len(text)
+    for marker in end_markers:
+        idx = lower.find(marker.lower(), start + 1)
+        if idx != -1:
+            end = min(end, idx)
+
+    return text[start:end][:limit].strip()
 # ---------------------------------------------------------------------------
 # parse_obito
 # ---------------------------------------------------------------------------
