@@ -535,9 +535,10 @@ def _ensure_sheet_exists() -> str:
     
     # Escreve cabeçalho
     headers = [[col for col in AUDIT_COLUMNS]]
+    sheet_name = _get_sheet_name(sid)
     sheets.spreadsheets().values().update(
         spreadsheetId=sid,
-        range="Auditoria!A1",
+        range=f"{sheet_name}!A1",
         valueInputOption="RAW",
         body={"values": headers},
     ).execute()
@@ -545,17 +546,28 @@ def _ensure_sheet_exists() -> str:
     logger.info(f"Nova planilha criada: {sid}")
     return sid
 
+def _get_sheet_name(sheet_id: str) -> str:
+    """Obtém o nome da primeira aba disponível na planilha."""
+    sheets = _get_sheets_service()
+    metadata = sheets.spreadsheets().get(spreadsheetId=sheet_id, fields="sheets.properties.title").execute()
+    titles = metadata.get("sheets", [])
+    if titles:
+        return titles[0]["properties"]["title"]
+    return "Auditoria"  # fallback
+
 def _append_rows_to_sheet(sheet_id: str, rows: List[dict]):
     """Appenda linhas de resultado na planilha."""
     if not rows:
         return
     sheets = _get_sheets_service()
+    sheet_name = _get_sheet_name(sheet_id)
+    range_name = f"{sheet_name}!A1"
     values = []
     for row in rows:
         values.append([row.get(col, "") for col in AUDIT_COLUMNS])
     sheets.spreadsheets().values().append(
         spreadsheetId=sheet_id,
-        range="Auditoria!A1",
+        range=range_name,
         valueInputOption="RAW",
         insertDataOption="INSERT_ROWS",
         body={"values": values},
