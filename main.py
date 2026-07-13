@@ -209,7 +209,8 @@ def _normalize_label(label: str) -> str:
 
 
 def _looks_like_label(text: str) -> bool:
-    """Heurística conservadora para identificar rótulos de formulário."""\n    if not text:
+    """Heurística conservadora para identificar rótulos de formulário."""
+    if not text:
         return False
     low = text.lower().strip()
     if len(low) > 80:
@@ -225,7 +226,6 @@ def _looks_like_label(text: str) -> bool:
     if re.match(r'^\s*(?:\[\d+\]|\(\d+\)|\d+[\)\.]|\d+\s+)', text):
         return True
     return False
-
 
 def _is_numeric_line(text: str) -> bool:
     if not text:
