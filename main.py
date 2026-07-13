@@ -1,6 +1,9 @@
 import os
 import re
+import json
 import logging
+import base64
+import io
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -9,6 +12,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+# ── Config ─────────────────────────────────────────────────────────────
 logger = logging.getLogger("ocr-api")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -16,6 +20,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_API_BASE = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
 OPENAI_MODEL_DEFAULT = os.environ.get("OPENAI_MODEL_DEFAULT", "gpt-4o")
 
+# ── FastAPI App ─────────────────────────────────────────────────────────
 app = FastAPI(title="OCR Death Certificate Parser")
 
 app.add_middleware(
@@ -26,6 +31,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Pydantic Models ─────────────────────────────────────────────────────
 class OCRRequest(BaseModel):
     image: str
     filename: Optional[str] = "image.jpg"
@@ -42,6 +48,7 @@ class OCRResponse(BaseModel):
     warnings: list
     processingTimeMs: int
 
+# ── Regex Patterns ─────────────────────────────────────────────────────
 DATE_RE = re.compile(
     r'(\d{1,2})\s*[/|\-.\s]\s*(\d{1,2})\s*[/|\-.\s]\s*(\d{2,4})'
 )
@@ -51,6 +58,8 @@ UF_VALIDAS = {
     "MA", "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI",
     "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO"
 }
+
+# ── Helpers ────────────────────────────────────────────────────────────
 
 def _looks_like_label(text):
     if not text:
@@ -225,7 +234,8 @@ def _extract_causas(lines, raw_text):
         return "", ""
 
     end_idx = len(text)
-    for marker in ["parte ii", "atestante", "medico", "cartorio", "declarante"]:
+    for marker in ["parte ii", "atestante", "medico",
+                    "cartorio", "declarante"]:
         idx = lower.find(marker, start_idx + 1)
         if idx != -1 and idx < end_idx:
             end_idx = idx
@@ -264,11 +274,31 @@ def _extract_causas(lines, raw_text):
 
     return causa_basica, cid_basica
 
+def _debug_slice(raw_text, start_markers, end_markers, limit=1200):
+    text = raw_text or ""
+    lower = text.lower()
+    start = -1
+    for marker in start_markers:
+        idx = lower.find(marker.lower())
+        if idx != -1:
+            start = idx
+            break
+    if start == -1:
+        return ""
+    end = len(text)
+    for marker in end_markers:
+        idx = lower.find(marker.lower(), start + 1)
+        if idx != -1:
+            end = min(end, idx)
+    return text[start:end][:limit].strip()
+
 def _post_process(structured):
     result = dict(structured)
     campos_obrigatorios = ["NOME", "DATA_OBITO"]
-    campos_importantes = ["NOME_MAE", "NASCIMENTO", "UF_OBITO",
-                           "CAUSA_BASICA", "CID_BASICA", "CIDADE_OBITO"]
+    campos_importantes = [
+        "NOME_MAE", "NASCIMENTO", "UF_OBITO",
+        "CAUSA_BASICA", "CID_BASICA", "CIDADE_OBITO"
+    ]
 
     erros = []
     warnings_list = []
@@ -313,6 +343,8 @@ def _post_process(structured):
 
     return result
 
+# ── Parsing Principal ──────────────────────────────────────────────────
+
 def parse_obito(raw_text):
     lines = [line.strip() for line in (raw_text or "").splitlines() if line.strip()]
 
@@ -354,6 +386,8 @@ def parse_obito(raw_text):
 
     structured = _post_process(structured)
     return structured
+
+# ── OCR Provider ───────────────────────────────────────────────────────
 
 def _build_ocr_payload(image_base64, filename="image.jpg"):
     return {
@@ -423,6 +457,8 @@ def _call_ocr_provider(image_base64, filename="image.jpg"):
 
     return content.strip()
 
+# ── Endpoints ──────────────────────────────────────────────────────────
+
 @app.get("/health")
 def health():
     return {
@@ -474,6 +510,8 @@ def ocr(request: OCRRequest):
     except Exception as e:
         logger.exception("Erro interno no OCR")
         raise HTTPException(status_code=500, detail="Erro interno: " + str(e)[:200])
+
+# ── Startup ────────────────────────────────────────────────────────────
 
 @app.on_event("startup")
 def startup():
