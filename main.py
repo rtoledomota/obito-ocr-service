@@ -351,6 +351,10 @@ _CAUSA_BASICA_BLACKLIST = [
     'outras condições significativas', 'outras condicoes significativas',
     'nome do médico', 'nome do medico', 'crm',
     'óbito atestado', 'obito atestado', 'medico', 'médico',
+     'outras condições significativas', 'outras condicoes significativas',
+    'nome do médico', 'nome do medico', 'crm',
+    'óbito atestado', 'obito atestado', 'medico', 'médico',
+    'outras afecções', 'outras afeccoes',
 ]
 
 _INTERVALO_RE = re.compile(
@@ -378,7 +382,10 @@ def _causa_valida(c: str) -> bool:
         return False
     return True
 
-_CID_RE = re.compile(r'\b([A-TV-Z]\d{2}(?:\.\d{1,4})?)\b', re.IGNORECASE)
+_CID_RE = re.compile(
+    r'\b([A-TV-Z]\d{2}(?:\.\s*\d{1,4})?)\b',
+    re.IGNORECASE
+)
 
 def _extract_causes(text: str) -> List[str]:
     """
@@ -400,6 +407,9 @@ def _extract_causes(text: str) -> List[str]:
         "parte i", "devido ou como consequência de", "devido a",
         "intervalo entre o início e a morte", "intervalo entre o inicio e a morte",
         "cid", "meses dias horas minutos ignorado", "causas da morte", "causa da morte",
+        "parte i", "devido ou como consequência de", "devido a", "intervalo entre o início e a morte", 
+        "intervalo entre o inicio e a morte","cid", "meses dias horas minutos ignorado", "causas da morte",
+        "causa da morte", "outras afecções","outras afeccoes",
     ]
     start_idx = -1
     for i, (norm, _) in enumerate(pairs):
