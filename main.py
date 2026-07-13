@@ -354,7 +354,7 @@ _CAUSA_BASICA_BLACKLIST = [
 ]
 
 _INTERVALO_RE = re.compile(
-    r'[&lt;>]?\s*\d+\s*(dia|dias|hora|horas|min|minutos|d|h|m)'
+    r'[<>]?\s*\d+\s*(dia|dias|hora|horas|min|minutos|d|h|m)'
 )
 
 def _causa_valida(c: str) -> bool:
@@ -365,7 +365,7 @@ def _causa_valida(c: str) -> bool:
     if len(cl) < 3:
         return False
     # Rejeita coluna de intervalo/duração (ex.: >7d, <24h, 3d, 12h, 30m)
-    if re.fullmatch(r'[&lt;>]?\s*\d+\s*[dhm]?', cl):
+    if re.fullmatch(r'[<>]?\s*\d+\s*[dhm]?', cl):
         return False
     if _INTERVALO_RE.fullmatch(cl):
         return False
@@ -622,25 +622,24 @@ def validate_obito(structured: Dict[str, Any]) -> Dict[str, Any]:
     else:
         computed["idade_anos"] = idade
 
-    # Nomes
     structured["NOME_OK"] = "SIM" if structured.get("NOME") else "NAO"
     structured["NOMES_OK"] = "SIM" if (structured.get("NOME") and structured.get("NOME_MAE")) else "NAO"
 
-    # Score
     total_campos = len(HEADER)
     preenchidos = sum(1 for k in HEADER if structured.get(k))
     score = int((preenchidos / total_campos) * 100)
     score = max(0, score - len(errors) * 10)
     structured["QUALIDADE_SCORE"] = score
 
-    # ── Regra operacional de STATUS (PATCH B APLICADO) ──
-       if errors:
+    # ── Regra operacional de STATUS ──
+    if errors:
         status = 'REVISAR'
     elif not structured.get('CAUSA_BASICA'):
         status = 'REVISAR'
     else:
         status = 'OK'
     structured['STATUS'] = status
+
     structured["ERROS"] = " | ".join(errors)
 
     validation = {
