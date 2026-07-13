@@ -465,143 +465,125 @@ def _extract_causas(lines: List[str]) -> List[Dict[str, str]]:
 # ---------------------------------------------------------------------------
 # parse_obito
 # ---------------------------------------------------------------------------
-def parse_obito(raw_text: str) -> Dict[str, str]:
-    """Extrai campos estruturados da declaração de óbito a partir do texto OCR."""
-    text = _normalize_text(raw_text)
-    lines = [(_normalize_line(ln) if ln else "") for ln in text.split("\n")]
-
-    structured: Dict[str, str] = {field: "" for field in HEADER}
-
-    # Nome do falecido
-    _, nome = _extract_text_after_label(
-        lines,
-        ["nome do falecido", "nome", "8 nome do falecido", "8 nome"],
-    )
-    structured["NOME"] = nome
-
-    # Nome da mãe
-    _, nome_mae = _extract_text_after_label(
-        lines,
-        ["nome da mãe", "nome da mae", "mãe", "mae"],
-    )
-    structured["NOME_MAE"] = nome_mae
-
-    # Nome do pai
-    _, nome_pai = _extract_text_after_label(
-        lines,
-        ["nome do pai", "pai"],
-    )
-    structured["NOME_PAI"] = nome_pai
-
-    # Nascimento (sem forced_year)
-    structured["NASCIMENTO"] = _extract_date_after_label(
-        lines, ["data de nascimento", "nascimento", "data nascimento"]
-    )
-
-    # Data do óbito (forced_year='2026')
-    structured["DATA_OBITO"] = _extract_date_after_label(
-        lines, ["data do óbito", "data do obito", "data óbito", "data obito", "4 data do óbito"],
-        forced_year="2026",
-    )
-
-    # Hora do óbito
-    structured["HORA_OBITO"] = _extract_time_after_label(
-        lines, ["hora", "hora do óbito", "hora do obito", "5 hora"]
-    )
-
-    # Cidade do óbito
-    _, cidade = _extract_text_after_label(
-        lines, ["município do óbito", "municipio do obito", "cidade", "local do óbito", "local do obito"]
-    )
-    structured["CIDADE_OBITO"] = cidade
-
-    # UF do óbito (somente sigla válida)
-    structured["UF_OBITO"] = _extract_uf_near(
-        lines, ["uf", "estado", "uf do óbito", "uf do obito"]
-    )
-
-    # CEP
-    structured["CEP"] = _extract_cep_near(lines, ["cep", "cep do óbito", "cep do obito"])
-
-    # Causas da morte
-    causas = _extract_causas(lines)
-    for i, causa in enumerate(causas[:5], start=1):
-        if i == 1:
-            structured["CAUSA_MORTE"] = causa["text"]
-            structured["CID_MORTE"] = causa["cid"]
-            structured["CODIGO_CAUSA_MORTE"] = causa["cid"]
-        else:
-            structured[f"CAUSA_MORTE{i}"] = causa["text"]
-            structured[f"CID_MORTE{i}"] = causa["cid"]
-            structured[f"CODIGO_CAUSA_MORTE{i}"] = causa["cid"]
-
-    # Causa básica: alinha com a última causa válida que tenha CID
-    ultima_com_cid = ""
-    for causa in reversed(causas):
-        if causa.get("cid"):
-            ultima_com_cid = causa["cid"]
-            break
-
-    if ultima_com_cid:
-        structured["CID_BASICA"] = ultima_com_cid
-        structured["CODIGO_CAUSA_BASICA"] = ultima_com_cid
-        # Texto da causa básica: tenta rótulo específico, senão última causa válida
-        idx_basica, basica_texto = _extract_text_after_label(
-            lines, ["causa básica", "causa basica", "causa da morte básica", "causa basica de morte"]
-        )
-        if basica_texto and not _is_cid_only(basica_texto):
-            structured["CAUSA_BASICA"] = basica_texto
-        elif causas:
-            structured["CAUSA_BASICA"] = causas[-1]["text"]
-    else:
-        # Fallback: procura CID no raw_text inteiro
-        fallback_cid = CID_RE.search(text)
-        if fallback_cid:
-            structured["CID_BASICA"] = fallback_cid.group(0)
-            structured["CODIGO_CAUSA_BASICA"] = fallback_cid.group(0)
-
-    # Campos de compatibilidade com Apps Script (preenchidos no pós-processamento)
-    structured["STATUS"] = ""
-    structured["QUALIDADE_SCORE"] = ""
-    structured["ERROS"] = ""
-
-    return structured
-def _debug_slice(raw_text: str, start_markers: list[str], end_markers: list[str], limit: int = 1200) -> str:
-    text = raw_text or ""
-    lower = text.lower()
-
-    start = -1
-    for marker in start_markers:
-        idx = lower.find(marker.lower())
-        if idx != -1:
-            start = idx
-            break
-
-    if start == -1:
-        return ""
-
-    end = len(text)
-    for marker in end_markers:
-        idx = lower.find(marker.lower(), start + 1)
-        if idx != -1:
-            end = min(end, idx)
-
-    return text[start:end][:limit].strip()
+def parse_obito(raw_text: str) -> dict:
+    lines = [line.strip() for line in (raw_text or "").splitlines() if line.strip()]
 
     causas_trecho = _debug_slice(
-    raw_text,
-    start_markers=["causas da morte", "parte i", "causa da morte", "causas"],
-    end_markers=["parte ii", "ii ", "atestante", "médico", "medico", "cartório", "cartorio"]
-)
+        raw_text,
+        start_markers=[
+            "causas da morte",
+            "parte i",
+            "causa da morte",
+            "causas"
+        ],
+        end_markers=[
+            "parte ii",
+            "ii ",
+            "atestante",
+            "médico",
+            "medico",
+            "cartório",
+            "cartorio"
+        ]
+    )
+    print("DEBUG_CAUSAS_TRECHO:", causas_trecho)
 
-municipio_trecho = _debug_slice(
-    raw_text,
-    start_markers=["município de ocorrência", "municipio de ocorrencia", "local de ocorrência", "local de ocorrencia"],
-    end_markers=["sepultamento", "cemitério", "cemiterio", "declarante", "atestante", "causas da morte"]
-)
+    municipio_trecho = _debug_slice(
+        raw_text,
+        start_markers=[
+            "município de ocorrência",
+            "municipio de ocorrencia",
+            "local de ocorrência",
+            "local de ocorrencia"
+        ],
+        end_markers=[
+            "sepultamento",
+            "cemitério",
+            "cemiterio",
+            "declarante",
+            "atestante",
+            "causas da morte"
+        ]
+    )
+    print("DEBUG_MUNICIPIO_TRECHO:", municipio_trecho)
 
-print("DEBUG_MUNICIPIO_TRECHO:", municipio_trecho)
-print("DEBUG_CAUSAS_TRECHO:", causas_trecho)
+    nome = _extract_text_after_label(
+        lines,
+        [
+            "nome do falecido",
+            "nome do falecida",
+            "nome do",
+            "falecido"
+        ]
+    )
+
+    nome_mae = _extract_text_after_label(
+        lines,
+        [
+            "nome da mae",
+            "nome da mãe",
+            "mae",
+            "mãe"
+        ]
+    )
+
+    nome_pai = _extract_text_after_label(
+        lines,
+        [
+            "nome do pai",
+            "pai"
+        ]
+    )
+
+    nascimento = _extract_date_after_label(
+        lines,
+        [
+            "data de nascimento",
+            "nascimento",
+            "nasc."
+        ],
+        forced_year=None
+    )
+
+    data_obito = _extract_date_after_label(
+        lines,
+        [
+            "data do obito",
+            "data do óbito",
+            "obito",
+            "óbito"
+        ],
+        forced_year="2026"
+    )
+
+    hora_obito = _extract_time_after_label(
+        lines,
+        [
+            "hora",
+            "hora do obito",
+            "hora do óbito"
+        ]
+    )
+
+    cidade_obito, uf_obito = _extract_city_state(lines, raw_text)
+
+    causa_basica, cid_basica = _extract_causas(lines, raw_text)
+
+    structured = {
+        "NOME": nome or "",
+        "NOME_MAE": nome_mae or "",
+        "NOME_PAI": nome_pai or "",
+        "NASCIMENTO": nascimento or "",
+        "DATA_OBITO": data_obito or "",
+        "HORA_OBITO": hora_obito or "",
+        "CIDADE_OBITO": cidade_obito or "",
+        "UF_OBITO": uf_obito or "",
+        "CAUSA_BASICA": causa_basica or "",
+        "CID_BASICA": cid_basica or "",
+    }
+
+    structured = _post_process(structured)
+    return structured
     
 
 # ---------------------------------------------------------------------------
