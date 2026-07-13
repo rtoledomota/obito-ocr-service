@@ -3,3 +3,6 @@ fastapi
 uvicorn
 requests
 pytest
+google-auth==2.35.0
+google-api-python-client==2.151.0
+google-auth-httplib2==0.2.0
