@@ -10,7 +10,7 @@ from typing import Optional
 import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 # ── Config ─────────────────────────────────────────────────────────────
 logger = logging.getLogger("ocr-api")
@@ -33,7 +33,7 @@ app.add_middleware(
 
 # ── Pydantic Models ─────────────────────────────────────────────────────
 class OCRRequest(BaseModel):
-    image: str  # base64
+    image: str
     filename: Optional[str] = "image.jpg"
 
 class OCRResponse(BaseModel):
@@ -59,27 +59,26 @@ UF_VALIDAS = {
     "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO"
 }
 
-# ── Helpers Genéricas ──────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────
 
 def _looks_like_label(text: str) -> bool:
-    """Heurística conservadora para identificar rótulos de formulário."""
     if not text:
         return False
     t = text.strip().lower()
     if not t:
         return False
-    if any(kw in t for kw in ["data do", "nome do", "nome da", "causa", "parte",
-                               "hora", "cartão", "cartao", "naturalidade",
-                               "município", "municipio", "sepultamento",
-                               "atestante", "médico", "medico", "declarante",
-                               "tipo de", "fetal", "não fetal", "nao fetal",
-                               "óbito", "obito", "nascimento", "pai", "mãe", "mae",
-                               "cartorio", "registro", "uf"]):
-        return True
-    return False
+    labels = [
+        "data do", "nome do", "nome da", "causa", "parte",
+        "hora", "cartão", "cartao", "naturalidade",
+        "município", "municipio", "sepultamento",
+        "atestante", "médico", "medico", "declarante",
+        "tipo de", "fetal", "não fetal", "nao fetal",
+        "óbito", "obito", "nascimento", "pai", "mãe", "mae",
+        "cartorio", "registro", "uf"
+    ]
+    return any(kw in t for kw in labels)
 
-def _normalize_date(day: str, month: str, year: str, forced_year: Optional[str] = None) -> str:
-    """Normaliza dia/mês/ano para dd/mm/aaaa."""
+def _normalize_date(day: str, month: str, year: str, forced_year: str = None) -> str:
     try:
         d = int(day)
         m = int(month)
@@ -93,7 +92,6 @@ def _normalize_date(day: str, month: str, year: str, forced_year: Optional[str] 
     return f"{d:02d}/{m:02d}/{y}"
 
 def _normalize_uf(raw: str) -> str:
-    """Extrai UF válida de um texto."""
     if not raw:
         return ""
     raw = raw.strip().upper()
@@ -104,32 +102,7 @@ def _normalize_uf(raw: str) -> str:
             return uf
     return ""
 
-def _debug_slice(raw_text: str, start_markers: list[str], end_markers: list[str],
-                 limit: int = 1200) -> str:
-    """Extrai trecho do texto entre marcadores de início e fim."""
-    text = raw_text or ""
-    lower = text.lower()
-
-    start = -1
-    for marker in start_markers:
-        idx = lower.find(marker.lower())
-        if idx != -1:
-            start = idx
-            break
-
-    if start == -1:
-        return ""
-
-    end = len(text)
-    for marker in end_markers:
-        idx = lower.find(marker.lower(), start + 1)
-        if idx != -1:
-            end = min(end, idx)
-
-    return text[start:end][:limit].strip()
-
-def _find_label_index(lines: list[str], labels: list[str]) -> Optional[int]:
-    """Localiza linha que contém um dos labels, aceitando prefixos numéricos."""
+def _find_label_index(lines: list[str], labels: list[str]) -> int | None:
     for i, line in enumerate(lines):
         if not line:
             continue
@@ -145,9 +118,7 @@ def _find_label_index(lines: list[str], labels: list[str]) -> Optional[int]:
                 return i
     return None
 
-def _extract_text_after_label(lines: list[str], labels: list[str],
-                              max_lines: int = 3) -> str:
-    """Extrai o texto não-rótulo após um label."""
+def _extract_text_after_label(lines: list[str], labels: list[str], max_lines: int = 3) -> str:
     idx = _find_label_index(lines, labels)
     if idx is None:
         return ""
@@ -164,9 +135,7 @@ def _extract_text_after_label(lines: list[str], labels: list[str],
         return candidate
     return ""
 
-def _extract_date_after_label(lines: list[str], labels: list[str],
-                               forced_year: Optional[str] = None) -> str:
-    """Extrai data após label, aceitando pipe | como separador."""
+def _extract_date_after_label(lines: list[str], labels: list[str], forced_year: str = None) -> str:
     idx = _find_label_index(lines, labels)
     if idx is None:
         return ""
@@ -177,12 +146,10 @@ def _extract_date_after_label(lines: list[str], labels: list[str],
     text_block = " ".join(search_lines)
     match = DATE_RE.search(text_block)
     if match:
-        return _normalize_date(match.group(1), match.group(2),
-                               match.group(3), forced_year)
+        return _normalize_date(match.group(1), match.group(2), match.group(3), forced_year)
     return ""
 
 def _extract_time_after_label(lines: list[str], labels: list[str]) -> str:
-    """Extrai horário após label."""
     idx = _find_label_index(lines, labels)
     if idx is None:
         return ""
@@ -197,13 +164,12 @@ def _extract_time_after_label(lines: list[str], labels: list[str]) -> str:
     return ""
 
 def _extract_city_state(lines: list[str], raw_text: str) -> tuple[str, str]:
-    """Extrai cidade e UF a partir do texto bruto."""
     text = raw_text or ""
     lower = text.lower()
     cidade = ""
     uf = ""
 
-    # 1. Tenta "município de ocorrência"
+    # Tenta "município de ocorrência"
     for marker in ["município de ocorrência", "municipio de ocorrencia",
                     "local de ocorrência", "local de ocorrencia"]:
         idx = lower.find(marker)
@@ -214,8 +180,8 @@ def _extract_city_state(lines: list[str], raw_text: str) -> tuple[str, str]:
             line = line.strip()
             if not line or len(line) < 3:
                 continue
-            if any(kw in line.lower() for kw in ["uf", "município", "municipio",
-                                                   "país", "país", "se estrangeiro"]):
+            if any(kw in line.lower() for kw in
+                   ["uf", "município", "municipio", "país", "se estrangeiro"]):
                 continue
             parts = line.split()
             if len(parts) >= 2 and len(parts[-1]) == 2 and parts[-1].isalpha():
@@ -227,7 +193,7 @@ def _extract_city_state(lines: list[str], raw_text: str) -> tuple[str, str]:
         if cidade:
             break
 
-    # 2. Fallback: naturalidade
+    # Fallback: naturalidade
     if not cidade:
         idx = lower.find("naturalidade")
         if idx != -1:
@@ -236,8 +202,8 @@ def _extract_city_state(lines: list[str], raw_text: str) -> tuple[str, str]:
                 line = line.strip()
                 if not line or len(line) < 3:
                     continue
-                if any(kw in line.lower() for kw in ["uf", "município", "municipio",
-                                                       "país", "país", "se estrangeiro"]):
+                if any(kw in line.lower() for kw in
+                       ["uf", "município", "municipio", "país", "se estrangeiro"]):
                     continue
                 parts = line.split()
                 if len(parts) >= 2 and len(parts[-1]) == 2 and parts[-1].isalpha():
@@ -247,7 +213,7 @@ def _extract_city_state(lines: list[str], raw_text: str) -> tuple[str, str]:
                     cidade = line
                 break
 
-    # 3. Fallback: UF por regex
+    # Fallback: UF por regex
     if not uf:
         for match in re.finditer(r'\b([A-Z]{2})\b', text):
             if match.group(1) in UF_VALIDAS:
@@ -257,13 +223,11 @@ def _extract_city_state(lines: list[str], raw_text: str) -> tuple[str, str]:
     return cidade.strip(), uf
 
 def _extract_causas(lines: list[str], raw_text: str) -> tuple[str, str]:
-    """Extrai causa básica e CID da Parte I, bloqueando Parte II e rodapé."""
     text = raw_text or ""
     lower = text.lower()
 
-    # Encontra início da seção de causas
     start_idx = -1
-    for marker in ["causas da morte", "parte i", "causa da morte", "causas"]:
+    for marker in ["causas da morte", "parte i", "causa da morte"]:
         idx = lower.find(marker)
         if idx != -1:
             start_idx = idx
@@ -272,7 +236,6 @@ def _extract_causas(lines: list[str], raw_text: str) -> tuple[str, str]:
     if start_idx == -1:
         return "", ""
 
-    # Encontra fim da seção (Parte II ou rodapé)
     end_idx = len(text)
     for marker in ["parte ii", "atestante", "médico", "medico",
                     "cartório", "cartorio", "declarante"]:
@@ -281,8 +244,6 @@ def _extract_causas(lines: list[str], raw_text: str) -> tuple[str, str]:
             end_idx = idx
 
     causas_block = text[start_idx:end_idx].strip()
-
-    # Linhas do bloco de causas
     block_lines = [l.strip() for l in causas_block.splitlines() if l.strip()]
 
     causa_basica = ""
@@ -291,42 +252,36 @@ def _extract_causas(lines: list[str], raw_text: str) -> tuple[str, str]:
 
     for line in block_lines:
         ll = line.lower()
-        # Pula legendas/rodapé
         if any(kw in ll for kw in ["parte", "condições significativas", "contribuiram",
                                      "não entraram", "cadeia acima", "código",
-                                     "registro", "ufs", "cartório", "cartorio"]):
+                                     "registro", "ufs"]):
             continue
         if len(line) < 4:
             continue
         if _looks_like_label(line) and len(line) < 80:
             continue
 
-        # Tenta extrair CID (padrão: letras + números)
         cid_match = re.search(r'\b([A-Z]\d{2,3})\b', line)
         if cid_match:
             last_cid = cid_match.group(1)
 
-        # Se não parece rótulo, é candidata a causa
         if not causa_basica and len(line) > 5:
             causa_basica = line
         elif len(line) > 5 and len(causa_basica) < 150:
             causa_basica += " | " + line
 
-    # Limita causa a 300 caracteres
     if len(causa_basica) > 300:
         causa_basica = causa_basica[:300]
 
-    # Último CID encontrado
     cid_basica = last_cid if last_cid else ""
 
     return causa_basica, cid_basica
 
 def _post_process(structured: dict) -> dict:
-    """Pós-processamento: status, score, erros, compatibilidade."""
     result = dict(structured)
     campos_obrigatorios = ["NOME", "DATA_OBITO"]
-    campos_importantes = ["NOME_MAE", "NASCIMENTO", "UF_OBITO", "CAUSA_BASICA",
-                           "CID_BASICA", "CIDADE_OBITO"]
+    campos_importantes = ["NOME_MAE", "NASCIMENTO", "UF_OBITO",
+                           "CAUSA_BASICA", "CID_BASICA", "CIDADE_OBITO"]
 
     erros = []
     warnings_list = []
@@ -339,27 +294,23 @@ def _post_process(structured: dict) -> dict:
         if not result.get(campo):
             warnings_list.append(f"{campo} ausente")
 
-    # Valida UF
     uf = result.get("UF_OBITO", "") or ""
     if uf and uf not in UF_VALIDAS:
         erros.append("UF_OBITO invalida")
         result["UF_OBITO"] = ""
 
-    # Valida DATA_OBITO
     data = result.get("DATA_OBITO", "") or ""
     if data and not re.match(r'\d{2}/\d{2}/\d{4}', data):
         erros.append("DATA_OBITO formato invalido")
         result["DATA_OBITO"] = ""
 
-    # Valida CAUSA_BASICA
     causa = result.get("CAUSA_BASICA", "") or ""
-    if causa and any(kw in causa.lower() for kw in ["condições significativas",
-                                                      "contribuiram", "cadeia acima",
-                                                      "parte ii", "código", "registro"]):
+    if causa and any(kw in causa.lower() for kw in
+                     ["condições significativas", "contribuiram",
+                      "cadeia acima", "parte ii", "código", "registro"]):
         erros.append("CAUSA_BASICA")
         result["CAUSA_BASICA"] = ""
 
-    # Status
     if not erros and not warnings_list:
         result["STATUS"] = "OK"
     elif not erros:
@@ -367,41 +318,17 @@ def _post_process(structured: dict) -> dict:
     else:
         result["STATUS"] = "REVISAR"
 
-    # Score
     penalty = len(erros) * 15 + len(warnings_list) * 5
     result["QUALIDADE_SCORE"] = max(0, min(100, 100 - penalty))
-
     result["ERROS"] = "; ".join(erros) if erros else ""
-    result["VALIDATION_ERRORS"] = erros
-    result["VALIDATION_WARNINGS"] = warnings_list
 
     return result
 
 # ── Parsing Principal ──────────────────────────────────────────────────
 
 def parse_obito(raw_text: str) -> dict:
-    """Parser principal para declaração de óbito em layout tabular/OCR."""
     lines = [line.strip() for line in (raw_text or "").splitlines() if line.strip()]
 
-    # ── DEBUG: blocos para diagnóstico ──
-    causas_trecho = _debug_slice(
-        raw_text,
-        start_markers=["causas da morte", "parte i", "causa da morte", "causas"],
-        end_markers=["parte ii", "ii ", "atestante", "médico", "medico",
-                      "cartório", "cartorio"]
-    )
-    logger.info("DEBUG_CAUSAS_TRECHO: %s", causas_trecho[:500] if causas_trecho else "(vazio)")
-
-    municipio_trecho = _debug_slice(
-        raw_text,
-        start_markers=["município de ocorrência", "municipio de ocorrencia",
-                        "local de ocorrência", "local de ocorrencia"],
-        end_markers=["sepultamento", "cemitério", "cemiterio",
-                      "declarante", "atestante", "causas da morte"]
-    )
-    logger.info("DEBUG_MUNICIPIO_TRECHO: %s", municipio_trecho[:300] if municipio_trecho else "(vazio)")
-
-    # ── Extração dos campos ──
     nome = _extract_text_after_label(
         lines, ["nome do falecido", "nome do falecida", "nome do", "falecido"]
     )
@@ -444,7 +371,6 @@ def parse_obito(raw_text: str) -> dict:
 # ── OCR Provider ───────────────────────────────────────────────────────
 
 def _build_ocr_payload(image_base64: str, filename: str = "image.jpg") -> dict:
-    """Monta payload para OCR com prompt neutro."""
     return {
         "model": OPENAI_MODEL_DEFAULT,
         "messages": [
@@ -482,7 +408,6 @@ def _build_ocr_payload(image_base64: str, filename: str = "image.jpg") -> dict:
     }
 
 def _call_ocr_provider(image_base64: str, filename: str = "image.jpg") -> str:
-    """Chama o provider OCR e retorna o texto transcrito."""
     url = f"{OPENAI_API_BASE}/chat/completions"
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -499,7 +424,6 @@ def _call_ocr_provider(image_base64: str, filename: str = "image.jpg") -> str:
     if not content or not content.strip():
         raise ValueError("Provider OCR retornou conteúdo vazio.")
 
-    # Verifica recusa explícita (mas não mata por frase isolada)
     refusal_lower = content.strip().lower()
     refusal_patterns = [
         "não posso ajudar", "não posso processar", "cannot process",
@@ -530,7 +454,6 @@ def ocr(request: OCRRequest):
 
     try:
         raw_text = _call_ocr_provider(request.image, request.filename)
-
         structured = parse_obito(raw_text)
 
         validation_errors = structured.pop("VALIDATION_ERRORS", [])
