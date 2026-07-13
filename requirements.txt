@@ -3,7 +3,7 @@ uvicorn[standard]==0.34.2
 pytesseract==0.3.13
 Pillow==11.1.0
 pdf2image==1.17.0
-pydantic==2.30.1
+pydantic>=2.9.0,<3.0.0
 python-multipart==0.0.20
 requests==2.32.3
 google-auth==2.38.0
