@@ -722,9 +722,10 @@ def _post_process(structured: Dict[str, str]) -> Dict[str, str]:
 
 def _build_ocr_payload(image_data_url: str, mime: str) -> Dict[str, Any]:
     prompt = (
-        "Voce e um assistente especializado em extrair dados de declaracoes de obito. "
-        "Extraia fielmente todos os campos visiveis no documento, preservando a ordem das linhas. "
-        "Retorne apenas o texto extraido, sem comentarios adicionais."
+        "Transcreva fielmente todo o texto visivel na imagem. "
+        "Preserve a ordem e as quebras de linha originais. "
+        "Nao resuma, nao interprete e nao explique. "
+        "Retorne apenas o texto transcrito."
     )
     return {
         "model": OPENAI_MODEL_DEFAULT,
@@ -755,18 +756,51 @@ def _call_ocr_provider(image_data_url: str, mime: str) -> str:
     response.raise_for_status()
     data = response.json()
 
-    content = ""
+    # Consolidar content mesmo se vier como lista/blocos
+    content: Any = ""
     try:
         content = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError):
         content = ""
 
-    if not content:
-        raise RuntimeError("Resposta do provider OCR vazia.")
+    if isinstance(content, list):
+        parts: List[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                text = block.get("text") or block.get("content") or ""
+                if text:
+                    parts.append(str(text))
+            elif isinstance(block, str):
+                parts.append(block)
+        content = "\n".join(parts)
+    elif not isinstance(content, str):
+        content = str(content) if content is not None else ""
 
-    for phrase in REFUSAL_PHRASES:
-        if phrase.lower() in content.lower():
-            raise RuntimeError("Provider recusou o processamento da imagem.")
+    content = content.strip()
+
+    if not content:
+        raise RuntimeError("Resposta vazia do provider OCR.")
+
+    # Recusa apenas quando a resposta inteira comecar claramente com frases comuns
+    refusal_starts = (
+        "i can't help",
+        "i cannot help",
+        "i can't assist",
+        "i cannot assist",
+        "i'm not able to help",
+        "i am not able to help",
+        "i'm unable to help",
+        "i am unable to help",
+        "desculpe, mas nao posso",
+        "desculpe, mas nao posso ajudar",
+        "nao posso ajudar",
+        "nao posso processar",
+        "nao posso transcrever",
+    )
+    content_lower = content.lower().lstrip()
+    if any(content_lower.startswith(prefix) for prefix in refusal_starts):
+        snippet = content[:300]
+        raise RuntimeError(f"Provider recusou o processamento da imagem. Resposta: {snippet}")
 
     return content
 
