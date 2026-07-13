@@ -286,19 +286,18 @@ def _split_lines(raw_text: str) -> List[str]:
 
 
 def _find_label_index(lines: List[str], labels: List[str], start: int = 0) -> int:
-    """Match por igualdade exata normalizada ou startswith do rotulo normalizado."""
-    norm_labels = [_normalize_label(l) for l in labels if l]
+    _NUM_PREFIX_RE = re.compile(r'^\s*(?:\[\d+\]|\(\d+\)|\d+[\)\.])\s*')
+    norm_labels = [(_normalize_label(lbl) if lbl else "") for lbl in labels]
     for idx in range(start, len(lines)):
-        line = lines[idx]
-        if not line:
+        raw = lines[idx] or ""
+        cleaned = _NUM_PREFIX_RE.sub("", raw).strip()
+        norm_line = _normalize_label(cleaned)
+        if not norm_line:
             continue
-        norm = _normalize_label(line)
-        if not norm:
-            continue
-        for target in norm_labels:
-            if not target:
+        for nlbl in norm_labels:
+            if not nlbl:
                 continue
-            if norm == target or norm.startswith(target):
+            if norm_line == nlbl or norm_line.startswith(nlbl):
                 return idx
     return -1
 
@@ -353,35 +352,26 @@ def _normalize_date(day: str, month: str, year: str, forced_year: Optional[str] 
     return ""
 
 
-def _extract_date_after_label(
-    lines: List[str],
-    labels: List[str],
-    start: int = 0,
-    forced_year: Optional[str] = None,
-) -> str:
+def _extract_date_after_label(lines: List[str], labels: List[str], start: int = 0, forced_year: Optional[str] = None) -> str:
     idx = _find_label_index(lines, labels, start)
     if idx < 0:
         return ""
-
-    # Mesma linha
-    line = lines[idx]
-    if ":" in line:
-        after = line.split(":", 1)[1].strip()
-        m = DATE_RE.search(after)
-        if m:
-            return _normalize_date(m.group(1), m.group(2), m.group(3), forced_year)
-
-    # Proximas linhas
-    for j in range(idx + 1, min(idx + 6, len(lines))):
-        candidate = lines[j]
-        if not candidate:
+    window_end = min(len(lines), idx + 5)
+    for j in range(idx, window_end):
+        line = lines[j] or ""
+        m = DATE_RE.search(line)
+        if not m:
             continue
-        if _is_aux_line(candidate):
+        date_str = m.group(0)
+        normalized = _normalize_date(date_str)
+        if not normalized:
             continue
-        m = DATE_RE.search(candidate)
-        if m:
-            return _normalize_date(m.group(1), m.group(2), m.group(3), forced_year)
-
+        if forced_year:
+            parts = normalized.split("/")
+            if len(parts) == 3:
+                parts[2] = str(forced_year)
+                normalized = "/".join(parts)
+        return normalized
     return ""
 
 
@@ -389,30 +379,12 @@ def _extract_time_after_label(lines: List[str], labels: List[str], start: int = 
     idx = _find_label_index(lines, labels, start)
     if idx < 0:
         return ""
-
-    line = lines[idx]
-    if ":" in line:
-        after = line.split(":", 1)[1].strip()
-        m = TIME_RE.search(after)
+    window_end = min(len(lines), idx + 5)
+    for j in range(idx, window_end):
+        line = lines[j] or ""
+        m = TIME_RE.search(line)
         if m:
-            hh = m.group(1).zfill(2)
-            mm = m.group(2).zfill(2)
-            ss = m.group(3)
-            return f"{hh}:{mm}:{ss}" if ss else f"{hh}:{mm}"
-
-    for j in range(idx + 1, min(idx + 6, len(lines))):
-        candidate = lines[j]
-        if not candidate:
-            continue
-        if _is_aux_line(candidate):
-            continue
-        m = TIME_RE.search(candidate)
-        if m:
-            hh = m.group(1).zfill(2)
-            mm = m.group(2).zfill(2)
-            ss = m.group(3)
-            return f"{hh}:{mm}:{ss}" if ss else f"{hh}:{mm}"
-
+            return m.group(0)
     return ""
 
 
@@ -467,51 +439,59 @@ def _extract_cep_near(lines: List[str], labels: List[str], start: int = 0) -> st
 
 
 def _extract_causas(lines: List[str]) -> List[Dict[str, str]]:
-    """Extrai causas da secao causal. Retorna lista de dicts com chaves 'text' e 'cid'.
-    Bloqueia explicitamente legendas da secao causal.
-    """
-    causas: List[Dict[str, str]] = []
+    _CID_RE = re.compile(r'\b[A-TV-Z]\d{2}(?:\.\d{1,3})?\b', re.I)
+    _DURATION_RE = re.compile(r'^\s*\d+\s*(?:ano|anos|mes|meses|dia|dias|hora|horas|min|mins|minuto|minutos|semana|semanas)\b', re.I)
+    _STOP_WORDS = ("codigo", "registro", "ufs", "cartorio", "cartório", "declarante", "medico", "médico", "atestante", "parte ii")
+    _START_MARKERS = ("causas da morte", "causa da morte", "parte i")
 
-    # Localizar inicio da secao de causas
-    start_idx = _find_label_index(lines, ["Causa da morte", "Causas da morte", "Causa do obito", "Causas do obito"])
+    start_idx = -1
+    for i, line in enumerate(lines):
+        norm = _normalize_label(line or "")
+        if any(norm.startswith(m) for m in _START_MARKERS):
+            start_idx = i
+            break
+
     if start_idx < 0:
-        start_idx = _find_label_index(lines, ["Parte I", "Parte i"])
-    if start_idx < 0:
-        start_idx = 0
+        return []
 
-    end_idx = len(lines)
-    stop_idx = _find_label_index(lines, ["Causa basica", "CID basica", "Codigo da causa basica"], start_idx + 1)
-    if stop_idx > start_idx:
-        end_idx = stop_idx
+    results: List[Dict[str, str]] = []
+    for line in lines[start_idx + 1:]:
+        text = (line or "").strip()
+        norm = _normalize_label(text)
 
-    for idx in range(start_idx + 1, end_idx):
-        line = lines[idx]
-        if not line:
-            continue
-        norm = _normalize_label(line)
-        if norm in STOP_CAUSAS:
-            continue
-        if _looks_like_label(line):
-            continue
-        if _is_numeric_line(line):
-            continue
-        if _is_duration_line(line):
-            continue
-        if _is_cid_only(line):
-            continue
-
-        # CID pode estar no final da linha
-        cid_match = CID_RE.search(line)
-        cid = cid_match.group(1) if cid_match else ""
-        text = line
-        if cid:
-            text = line.replace(cid, "").strip(" -:;,")
         if not text:
             continue
+        if any(sw in norm for sw in _STOP_WORDS):
+            break
+        if norm in _START_MARKERS or norm.startswith("parte i"):
+            continue
+        if text.endswith(":") or text.endswith(":"):
+            continue
+        if text.isdigit():
+            continue
+        if _DURATION_RE.match(text):
+            continue
+        if _CID_RE.fullmatch(text):
+            continue
+        if len(text) <= 3 and not text.isalpha():
+            continue
 
-        causas.append({"text": text, "cid": cid})
+        cid_match = _CID_RE.search(text)
+        cid = cid_match.group(0).upper() if cid_match else ""
+        clinical = text
+        if cid_match:
+            clinical = (text[:cid_match.start()] + text[cid_match.end():]).strip(" .:-;")
 
-    return causas
+        if not clinical:
+            continue
+        if clinical.lower() in ("causa da morte", "causas da morte", "parte i", "parte ii"):
+            continue
+        if _CID_RE.fullmatch(clinical):
+            continue
+
+        results.append({"text": clinical, "cid": cid})
+
+    return results
 
 
 def _extract_causa_basica(lines: List[str], causas: List[Dict[str, str]], raw_text: str) -> Tuple[str, str]:
@@ -695,23 +675,58 @@ def validate_structured(structured: Dict[str, str]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _post_process(structured: Dict[str, str]) -> Dict[str, str]:
-    # Garantir UF valida
-    uf = structured.get("UF_OBITO", "")
-    if uf and uf.upper() not in UF_VALIDAS:
+    _VALID_UFS = {"AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI", "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO"}
+    _CID_RE = re.compile(r'\b[A-TV-Z]\d{2}(?:\.\d{1,3})?\b', re.I)
+    _ADMIN_WORDS = ("codigo", "registro", "ufs", "cartorio", "cartório", "declarante", "medico", "médico", "atestante")
+
+    uf = (structured.get("UF_OBITO") or "").strip().upper()
+    if uf in _VALID_UFS:
+        structured["UF_OBITO"] = uf
+    else:
         structured["UF_OBITO"] = ""
-    elif uf:
-        structured["UF_OBITO"] = uf.upper()
 
-    # Garantir que CAUSA_BASICA nao seja CID puro
-    if structured.get("CAUSA_BASICA") and _is_cid_only(structured["CAUSA_BASICA"]):
+    causa = (structured.get("CAUSA_BASICA") or "").strip()
+    causa_norm = _normalize_label(causa)
+    cid_from_causa = ""
+    if causa:
+        m = _CID_RE.search(causa)
+        if m:
+            cid_from_causa = m.group(0).upper()
+
+    is_cid_pure = bool(_CID_RE.fullmatch(causa))
+    is_label = causa.endswith(":") or causa_norm in ("causa basica", "causa básica", "causa da morte", "causas da morte")
+    is_admin = any(w in causa_norm for w in _ADMIN_WORDS)
+
+    if not causa or is_cid_pure or is_label or is_admin:
         structured["CAUSA_BASICA"] = ""
+        structured["CODIGO_CAUSA_BASICA"] = ""
+    else:
+        structured["CAUSA_BASICA"] = causa
+        structured["CODIGO_CAUSA_BASICA"] = cid_from_causa
 
-    # Garantir que CAUSA_BASICA nao seja legenda da secao
-    if structured.get("CAUSA_BASICA") and _normalize_label(structured["CAUSA_BASICA"]) in STOP_CAUSAS:
-        structured["CAUSA_BASICA"] = ""
+    nome = (structured.get("NOME") or "").strip()
+    data_obito = (structured.get("DATA_OBITO") or "").strip()
+    causa_basica = (structured.get("CAUSA_BASICA") or "").strip()
+    uf_obito = (structured.get("UF_OBITO") or "").strip()
 
-    # Alinhar CID_BASICA com CODIGO_CAUSA_BASICA
-    structured["CODIGO_CAUSA_BASICA"] = structured.get("CID_BASICA", "")
+    erros: List[str] = []
+    if not nome:
+        erros.append("NOME ausente")
+    if not data_obito:
+        erros.append("DATA_OBITO ausente")
+    if not causa_basica:
+        erros.append("CAUSA_BASICA ausente")
+    if not uf_obito:
+        erros.append("UF_OBITO invalida")
+
+    if nome and data_obito and causa_basica:
+        structured["STATUS"] = "OK"
+        structured["QUALIDADE_SCORE"] = "100"
+        structured["ERROS"] = ""
+    else:
+        structured["STATUS"] = "REVISAR"
+        structured["QUALIDADE_SCORE"] = "85"
+        structured["ERROS"] = "; ".join(erros)
 
     return structured
 
