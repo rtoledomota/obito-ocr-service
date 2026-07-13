@@ -12,6 +12,14 @@ Variáveis de ambiente:
 import os
 import re
 import io
+import time
+import base64
+from threading import Thread, Event
+from typing import List, Optional
+from datetime import datetime, timedelta
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
 import json
 import base64
 import hashlib
@@ -102,6 +110,22 @@ LABEL_KEYWORDS = [
     'carimbo', 'meses', 'dias', 'horas', 'minutos', 'causas', 'causa',
     'óbito atestado', 'obito atestado', 'outras condições', 'outras condicoes',
     'prováveis', 'provaveis',
+]
+# ── Configuração Batch / Drive / Sheets ─────────────────────────────
+DRIVE_SERVICE_ACCOUNT_JSON = os.environ.get("DRIVE_SERVICE_ACCOUNT_JSON", "")
+SHEET_ID = os.environ.get("SHEET_ID", "")               # ID da planilha existente (ou vazio pra criar nova)
+DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "")  # Pasta raiz a monitorar
+POLL_INTERVAL_MINUTES = int(os.environ.get("POLL_INTERVAL_MINUTES", "60"))
+AUDIT_SHEET_TITLE = os.environ.get("AUDIT_SHEET_TITLE", "Auditoria Obito OCR")
+AUTO_PROCESS_ENABLED = os.environ.get("AUTO_PROCESS_ENABLED", "false").lower() == "true"
+PROCESSED_IMAGES_LOG = "processed_images.log"  # arquivo local para evitar reprocessamento
+
+# Ordem das colunas na planilha de auditoria
+AUDIT_COLUMNS = [
+    "DATA_PROCESSAMENTO", "NOME_ARQUIVO", "STATUS", "QUALIDADE_SCORE",
+    "NOME", "NOME_MAE", "NASCIMENTO", "DATA_OBITO", "HORA_OBITO",
+    "CIDADE_OBITO", "UF_OBITO", "CAUSA_MORTE", "CAUSA_BASICA",
+    "CID_BASICA", "TIPO_OBITO", "ERROS", "HASH_ARQUIVO"
 ]
 
 # ---------------------------------------------------------------------------
@@ -345,7 +369,274 @@ def _find_uf_after(
                 if _looks_like_label(cnorm):
                     break
     return ""
+# ═══════════════════════════════════════════════════════════════════
+# Módulo Batch: Google Drive / Sheets / Processamento em Lote
+# ═══════════════════════════════════════════════════════════════════
 
+def _get_drive_service():
+    """Constrói cliente autenticado do Google Drive via service account."""
+    if not DRIVE_SERVICE_ACCOUNT_JSON:
+        raise RuntimeError("DRIVE_SERVICE_ACCOUNT_JSON não configurado.")
+    creds = service_account.Credentials.from_service_account_info(
+        json.loads(DRIVE_SERVICE_ACCOUNT_JSON),
+        scopes=["https://www.googleapis.com/auth/drive.readonly"],
+    )
+    return build("drive", "v3", credentials=creds)
+
+def _get_sheets_service():
+    """Constrói cliente autenticado do Google Sheets via service account."""
+    if not DRIVE_SERVICE_ACCOUNT_JSON:
+        raise RuntimeError("DRIVE_SERVICE_ACCOUNT_JSON não configurado.")
+    creds = service_account.Credentials.from_service_account_info(
+        json.loads(DRIVE_SERVICE_ACCOUNT_JSON),
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
+    return build("sheets", "v4", credentials=creds)
+
+def _list_images_in_folder(folder_id: str, since: Optional[datetime] = None) -> List[dict]:
+    """
+    Lista arquivos de imagem (.jpg, .jpeg, .png, .gif, .bmp, .tiff)
+    dentro de folder_id (não recursivo).
+    Se `since` for fornecido, retorna apenas arquivos modificados após aquela data.
+    """
+    drive = _get_drive_service()
+    query = (
+        f"'{folder_id}' in parents and "
+        f"(mimeType='image/jpeg' or mimeType='image/png' or "
+        f"mimeType='image/gif' or mimeType='image/bmp' or "
+        f"mimeType='image/tiff') and trashed=false"
+    )
+    page_token = None
+    files = []
+    while True:
+        resp = drive.files().list(
+            q=query,
+            fields="files(id, name, mimeType, size, modifiedTime, createdTime)",
+            pageSize=100,
+            pageToken=page_token,
+        ).execute()
+        batch = resp.get("files", [])
+        if since:
+            batch = [
+                f for f in batch
+                if _parse_rfc3339(f.get("modifiedTime", "")) > since
+            ]
+        files.extend(batch)
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return files
+
+def _parse_rfc3339(ts: str) -> Optional[datetime]:
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+def _download_image_bytes(file_id: str) -> Tuple[bytes, str]:
+    """Baixa o conteúdo binário de um arquivo do Drive e seu MIME type."""
+    drive = _get_drive_service()
+    meta = drive.files().get(fileId=file_id, fields="name, mimeType").execute()
+    request = drive.files().get_media(fileId=file_id)
+    fh = io.BytesIO()
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    return fh.getvalue(), meta.get("mimeType", "image/jpeg")
+
+def _ocr_image_from_bytes(image_bytes: bytes, mime_type: str) -> Tuple[str, float]:
+    """Chama o mesmo pipeline de OCR interno (sem HTTP)."""
+    return ocr_openai_compatible(image_bytes, mime_type, OPENAI_MODEL_DEFAULT)
+
+def _process_single_image(file_id: str, file_name: str) -> dict:
+    """Pipeline completo para uma imagem: baixar → OCR → parse → validar."""
+    logger.info(f"Processando: {file_name} ({file_id})")
+    try:
+        image_bytes, mime_type = _download_image_bytes(file_id)
+    except Exception as e:
+        return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_DRIVE", "ERROS": str(e)}
+    
+    try:
+        raw_text, confidence = _ocr_image_from_bytes(image_bytes, mime_type)
+    except Exception as e:
+        return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_OCR", "ERROS": str(e)}
+    
+    try:
+        structured = parse_obito(raw_text)
+    except Exception as e:
+        structured = {k: "" for k in HEADER}
+        structured["ERROS"] = f"Erro no parser: {e}"
+    
+    structured["HASH_ARQUIVO"] = _sha256_bytes(image_bytes)
+    structured["HASH_CONTEUDO"] = _sha256_text(raw_text)
+    
+    validate_obito(structured)
+    
+    row = {
+        "DATA_PROCESSAMENTO": datetime.utcnow().strftime("%d/%m/%Y %H:%M:%S"),
+        "NOME_ARQUIVO": file_name,
+        "STATUS": structured.get("STATUS", ""),
+        "QUALIDADE_SCORE": str(structured.get("QUALIDADE_SCORE", "")),
+        "NOME": structured.get("NOME", ""),
+        "NOME_MAE": structured.get("NOME_MAE", ""),
+        "NASCIMENTO": structured.get("NASCIMENTO", ""),
+        "DATA_OBITO": structured.get("DATA_OBITO", ""),
+        "HORA_OBITO": structured.get("HORA_OBITO", ""),
+        "CIDADE_OBITO": structured.get("CIDADE_OBITO", ""),
+        "UF_OBITO": structured.get("UF_OBITO", ""),
+        "CAUSA_MORTE": structured.get("CAUSA_MORTE", ""),
+        "CAUSA_BASICA": structured.get("CAUSA_BASICA", ""),
+        "CID_BASICA": structured.get("CID_BASICA", ""),
+        "TIPO_OBITO": structured.get("TIPO_OBITO", ""),
+        "ERROS": structured.get("ERROS", ""),
+        "HASH_ARQUIVO": structured.get("HASH_ARQUIVO", ""),
+    }
+    return row
+
+def _ensure_sheet_exists() -> str:
+    """Cria a planilha se não existir, ou retorna o SHEET_ID configurado."""
+    if SHEET_ID:
+        return SHEET_ID
+    sheets = _get_sheets_service()
+    spreadsheet = {
+        "properties": {"title": AUDIT_SHEET_TITLE},
+        "sheets": [{"properties": {"title": "Auditoria"}}],
+    }
+    sheet = sheets.spreadsheets().create(body=spreadsheet, fields="spreadsheetId").execute()
+    sid = sheet.get("spreadsheetId")
+    
+    # Escreve cabeçalho
+    headers = [[col for col in AUDIT_COLUMNS]]
+    sheets.spreadsheets().values().update(
+        spreadsheetId=sid,
+        range="Auditoria!A1",
+        valueInputOption="RAW",
+        body={"values": headers},
+    ).execute()
+    
+    logger.info(f"Nova planilha criada: {sid}")
+    return sid
+
+def _append_rows_to_sheet(sheet_id: str, rows: List[dict]):
+    """Appenda linhas de resultado na planilha."""
+    if not rows:
+        return
+    sheets = _get_sheets_service()
+    values = []
+    for row in rows:
+        values.append([row.get(col, "") for col in AUDIT_COLUMNS])
+    sheets.spreadsheets().values().append(
+        spreadsheetId=sheet_id,
+        range="Auditoria!A1",
+        valueInputOption="RAW",
+        insertDataOption="INSERT_ROWS",
+        body={"values": values},
+    ).execute()
+
+def _load_processed_ids() -> set:
+    """Carrega IDs de imagens já processadas (para evitar repetição)."""
+    if not os.path.exists(PROCESSED_IMAGES_LOG):
+        return set()
+    with open(PROCESSED_IMAGES_LOG, "r") as f:
+        return set(line.strip() for line in f if line.strip())
+
+def _save_processed_ids(ids: set):
+    """Salva IDs processados no arquivo de log."""
+    with open(PROCESSED_IMAGES_LOG, "a") as f:
+        for fid in ids:
+            f.write(fid + "\n")
+
+def run_batch(folder_id: str = None, force_reprocess: bool = False) -> dict:
+    """
+    Pipeline completo do lote:
+    1. Lista imagens não processadas na pasta
+    2. OCR cada uma
+    3. Escreve na planilha
+    4. Marca como processadas
+    """
+    fid = folder_id or DRIVE_FOLDER_ID
+    if not fid:
+        return {"success": False, "error": "Nenhum DRIVE_FOLDER_ID configurado."}
+
+    processed_ids = set() if force_reprocess else _load_processed_ids()
+    images = _list_images_in_folder(fid)
+    
+    # Filtra apenas não processadas
+    new_images = [img for img in images if img["id"] not in processed_ids]
+    
+    if not new_images:
+        return {
+            "success": True,
+            "total": len(images),
+            "processed": 0,
+            "new": 0,
+            "message": "Nenhuma imagem nova encontrada.",
+        }
+
+    sheet_id = _ensure_sheet_exists()
+    rows = []
+    success_ids = set()
+    fail_ids = set()
+
+    for img in new_images:
+        row = _process_single_image(img["id"], img["name"])
+        rows.append(row)
+        if row["STATUS"] in ("ERRO_DRIVE", "ERRO_OCR"):
+            fail_ids.add(img["id"])
+        else:
+            success_ids.add(img["id"])
+
+    if rows:
+        _append_rows_to_sheet(sheet_id, rows)
+
+    _save_processed_ids(success_ids)
+
+    return {
+        "success": True,
+        "total": len(images),
+        "new": len(new_images),
+        "processed": len(success_ids),
+        "failed": len(fail_ids),
+        "sheet_id": sheet_id,
+        "message": f"{len(success_ids)} imagens processadas, {len(fail_ids)} falhas.",
+    }
+
+# ═══════════════════════════════════════════════════════════════════
+# Background Monitor (thread de polling)
+# ═══════════════════════════════════════════════════════════════════
+
+_monitor_thread: Optional[Thread] = None
+_monitor_stop = Event()
+
+def _monitor_worker():
+    """Thread que verifica periodicamente a pasta do Drive."""
+    logger.info(f"Monitor iniciado: a cada {POLL_INTERVAL_MINUTES} minuto(s).")
+    while not _monitor_stop.is_set():
+        try:
+            result = run_batch()
+            if result.get("new", 0) > 0:
+                logger.info(f"Monitor: {result['message']}")
+        except Exception as e:
+            logger.error(f"Erro no monitor: {e}")
+        _monitor_stop.wait(POLL_INTERVAL_MINUTES * 60)
+
+def start_monitor():
+    """Inicia a thread de monitoramento em background."""
+    global _monitor_thread
+    if _monitor_thread and _monitor_thread.is_alive():
+        logger.info("Monitor já está rodando.")
+        return
+    _monitor_stop.clear()
+    _monitor_thread = Thread(target=_monitor_worker, daemon=True)
+    _monitor_thread.start()
+
+def stop_monitor():
+    """Para a thread de monitoramento."""
+    _monitor_stop.set()
+    if _monitor_thread:
+        _monitor_thread.join(timeout=10)
+    logger.info("Monitor parado.")
 # ── Constantes para extração de causas ──────────────────────────────────
 _CAUSA_BASICA_BLACKLIST = [
     'outras condições significativas', 'outras condicoes significativas',
@@ -860,9 +1151,82 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     if "requestId" not in detail:
         detail["requestId"] = None
     return JSONResponse(status_code=exc.status_code, content=detail)
+# ═══════════════════════════════════════════════════════════════════
+# Endpoints Batch
+# ═══════════════════════════════════════════════════════════════════
 
+@app.post("/batch/process")
+async def batch_process(request: Request, authorization: Optional[str] = Header(None)):
+    """Processa todas as imagens novas de uma pasta do Drive."""
+    _check_auth(authorization)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    folder_id = body.get("folderId") or body.get("folder_id") or None
+    force = body.get("force_reprocess", body.get("force", False))
+    request_id = body.get("requestId") or body.get("request_id") or None
+
+    if AUTO_PROCESS_ENABLED and not folder_id:
+        folder_id = DRIVE_FOLDER_ID
+
+    result = run_batch(folder_id=folder_id, force_reprocess=force)
+    result["requestId"] = request_id
+    status_code = 200 if result.get("success") else 500
+    return JSONResponse(status_code=status_code, content=result)
+
+@app.get("/batch/status")
+async def batch_status(authorization: Optional[str] = Header(None)):
+    """Status do monitor e da pasta configurada."""
+    _check_auth(authorization)
+    return {
+        "monitor_running": _monitor_thread is not None and _monitor_thread.is_alive(),
+        "drive_folder_id": DRIVE_FOLDER_ID,
+        "sheet_id": SHEET_ID,
+        "auto_process_enabled": AUTO_PROCESS_ENABLED,
+        "poll_interval_minutes": POLL_INTERVAL_MINUTES,
+        "processed_count": len(_load_processed_ids()),
+    }
+
+@app.post("/batch/monitor/start")
+async def monitor_start(authorization: Optional[str] = Header(None)):
+    """Inicia o monitoramento automático da pasta."""
+    _check_auth(authorization)
+    if not DRIVE_FOLDER_ID:
+        return JSONResponse(status_code=400, content={
+            "code": "MISSING_FOLDER",
+            "message": "DRIVE_FOLDER_ID não configurado.",
+        })
+    start_monitor()
+    return {"success": True, "message": "Monitor iniciado."}
+
+@app.post("/batch/monitor/stop")
+async def monitor_stop(authorization: Optional[str] = Header(None)):
+    """Para o monitoramento automático."""
+    _check_auth(authorization)
+    stop_monitor()
+    return {"success": True, "message": "Monitor parado."}
+
+@app.post("/batch/config/sheet")
+async def config_sheet(request: Request, authorization: Optional[str] = Header(None)):
+    """Cria ou retorna o ID da planilha de auditoria."""
+    _check_auth(authorization)
+    try:
+        sheet_id = _ensure_sheet_exists()
+        return {"success": True, "sheet_id": sheet_id}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={
+            "success": False, "error": str(e),
+        })
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════
+# Auto-start do monitor (se habilitado via env var)
+# ═══════════════════════════════════════════════════════════════════
+
+if AUTO_PROCESS_ENABLED and DRIVE_FOLDER_ID and DRIVE_SERVICE_ACCOUNT_JSON:
+    start_monitor()
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=False)
