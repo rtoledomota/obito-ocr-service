@@ -566,6 +566,43 @@ def parse_obito(raw_text: str) -> Dict[str, str]:
     structured["ERROS"] = ""
 
     return structured
+def _debug_slice(raw_text: str, start_markers: list[str], end_markers: list[str], limit: int = 1200) -> str:
+    text = raw_text or ""
+    lower = text.lower()
+
+    start = -1
+    for marker in start_markers:
+        idx = lower.find(marker.lower())
+        if idx != -1:
+            start = idx
+            break
+
+    if start == -1:
+        return ""
+
+    end = len(text)
+    for marker in end_markers:
+        idx = lower.find(marker.lower(), start + 1)
+        if idx != -1:
+            end = min(end, idx)
+
+    return text[start:end][:limit].strip()
+
+    causas_trecho = _debug_slice(
+    raw_text,
+    start_markers=["causas da morte", "parte i", "causa da morte", "causas"],
+    end_markers=["parte ii", "ii ", "atestante", "médico", "medico", "cartório", "cartorio"]
+)
+
+municipio_trecho = _debug_slice(
+    raw_text,
+    start_markers=["município de ocorrência", "municipio de ocorrencia", "local de ocorrência", "local de ocorrencia"],
+    end_markers=["sepultamento", "cemitério", "cemiterio", "declarante", "atestante", "causas da morte"]
+)
+
+print("DEBUG_MUNICIPIO_TRECHO:", municipio_trecho)
+print("DEBUG_CAUSAS_TRECHO:", causas_trecho)
+    
 
 # ---------------------------------------------------------------------------
 # Validação
