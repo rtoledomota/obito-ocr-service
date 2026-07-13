@@ -634,16 +634,13 @@ def validate_obito(structured: Dict[str, Any]) -> Dict[str, Any]:
     structured["QUALIDADE_SCORE"] = score
 
     # ── Regra operacional de STATUS (PATCH B APLICADO) ──
-    if errors:
-        status = 'REVISAR'
-    elif score < 70:
+       if errors:
         status = 'REVISAR'
     elif not structured.get('CAUSA_BASICA'):
         status = 'REVISAR'
     else:
         status = 'OK'
     structured['STATUS'] = status
-
     structured["ERROS"] = " | ".join(errors)
 
     validation = {
