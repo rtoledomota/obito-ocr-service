@@ -443,7 +443,7 @@ def _list_images_in_folder(folder_id: str, since: Optional[datetime] = None) -> 
             pageSize=100,
         ).execute()
         for subfolder in folders_resp.get('files', []):
-            logger.info(f"Explorando subpasta: {subfolder['name']}")
+            print(f"Explorando subpasta: {subfolder['name']}")
             sub_files = _list_images_in_folder(subfolder['id'], since=since)
             files.extend(sub_files)
         page_token = folders_resp.get("nextPageToken")
