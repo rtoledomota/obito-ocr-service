@@ -362,15 +362,12 @@ def _extract_date_after_label(lines: List[str], labels: List[str], start: int = 
         m = DATE_RE.search(line)
         if not m:
             continue
-        date_str = m.group(0)
-        normalized = _normalize_date(date_str)
+        day = m.group(1)
+        month = m.group(2)
+        year = m.group(3)
+        normalized = _normalize_date(day, month, year, forced_year)
         if not normalized:
             continue
-        if forced_year:
-            parts = normalized.split("/")
-            if len(parts) == 3:
-                parts[2] = str(forced_year)
-                normalized = "/".join(parts)
         return normalized
     return ""
 
