@@ -278,8 +278,7 @@ def _extract_cid(text: str) -> str:
         return ""
     m = CID_RE.search(text)
     return m.group(0).upper() if m else ""
-
-# BLOCO DIRETO PARA SUBSTITUIR
+# BLOCO UNICO CORRIGIDO
 
 def _find_label_index(lines: List[str], label: str) -> int:
     # Comparacao exata ou por prefixo do rotulo normalizado.
