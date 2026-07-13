@@ -45,7 +45,7 @@ class OCRResponse(BaseModel):
     text: Optional[str] = ""
     structured: dict
     validation: dict
-    warnings: list[str]
+    warnings: list
     processingTimeMs: int
 
 # ── Regex Patterns ─────────────────────────────────────────────────────
@@ -61,7 +61,7 @@ UF_VALIDAS = {
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
-def _looks_like_label(text: str) -> bool:
+def _looks_like_label(text):
     if not text:
         return False
     t = text.strip().lower()
@@ -69,16 +69,16 @@ def _looks_like_label(text: str) -> bool:
         return False
     labels = [
         "data do", "nome do", "nome da", "causa", "parte",
-        "hora", "cartão", "cartao", "naturalidade",
-        "município", "municipio", "sepultamento",
-        "atestante", "médico", "medico", "declarante",
-        "tipo de", "fetal", "não fetal", "nao fetal",
-        "óbito", "obito", "nascimento", "pai", "mãe", "mae",
+        "hora", "cartao", "cartao", "naturalidade",
+        "municipio", "sepultamento",
+        "atestante", "medico", "declarante",
+        "tipo de", "fetal", "nao fetal",
+        "obito", "nascimento", "pai", "mae",
         "cartorio", "registro", "uf"
     ]
     return any(kw in t for kw in labels)
 
-def _normalize_date(day: str, month: str, year: str, forced_year: str = None) -> str:
+def _normalize_date(day, month, year, forced_year=None):
     try:
         d = int(day)
         m = int(month)
@@ -89,9 +89,9 @@ def _normalize_date(day: str, month: str, year: str, forced_year: str = None) ->
     y = forced_year if forced_year else year
     if len(y) == 2:
         y = "20" + y if int(y) < 50 else "19" + y
-    return f"{d:02d}/{m:02d}/{y}"
+    return "%02d/%02d/%s" % (d, m, y)
 
-def _normalize_uf(raw: str) -> str:
+def _normalize_uf(raw):
     if not raw:
         return ""
     raw = raw.strip().upper()
@@ -102,7 +102,7 @@ def _normalize_uf(raw: str) -> str:
             return uf
     return ""
 
-def _find_label_index(lines: list[str], labels: list[str]) -> int | None:
+def _find_label_index(lines, labels):
     for i, line in enumerate(lines):
         if not line:
             continue
@@ -118,7 +118,7 @@ def _find_label_index(lines: list[str], labels: list[str]) -> int | None:
                 return i
     return None
 
-def _extract_text_after_label(lines: list[str], labels: list[str], max_lines: int = 3) -> str:
+def _extract_text_after_label(lines, labels, max_lines=3):
     idx = _find_label_index(lines, labels)
     if idx is None:
         return ""
@@ -135,7 +135,7 @@ def _extract_text_after_label(lines: list[str], labels: list[str], max_lines: in
         return candidate
     return ""
 
-def _extract_date_after_label(lines: list[str], labels: list[str], forced_year: str = None) -> str:
+def _extract_date_after_label(lines, labels, forced_year=None):
     idx = _find_label_index(lines, labels)
     if idx is None:
         return ""
@@ -149,7 +149,7 @@ def _extract_date_after_label(lines: list[str], labels: list[str], forced_year: 
         return _normalize_date(match.group(1), match.group(2), match.group(3), forced_year)
     return ""
 
-def _extract_time_after_label(lines: list[str], labels: list[str]) -> str:
+def _extract_time_after_label(lines, labels):
     idx = _find_label_index(lines, labels)
     if idx is None:
         return ""
@@ -160,18 +160,17 @@ def _extract_time_after_label(lines: list[str], labels: list[str]) -> str:
     text_block = " ".join(search_lines)
     match = TIME_RE.search(text_block)
     if match:
-        return f"{match.group(1)}:{match.group(2)}"
+        return "%s:%s" % (match.group(1), match.group(2))
     return ""
 
-def _extract_city_state(lines: list[str], raw_text: str) -> tuple[str, str]:
+def _extract_city_state(lines, raw_text):
     text = raw_text or ""
     lower = text.lower()
     cidade = ""
     uf = ""
 
-    # Tenta "município de ocorrência"
-    for marker in ["município de ocorrência", "municipio de ocorrencia",
-                    "local de ocorrência", "local de ocorrencia"]:
+    for marker in ["municipio de ocorrencia", "municipio de ocorrencia",
+                    "local de ocorrencia", "local de ocorrencia"]:
         idx = lower.find(marker)
         if idx == -1:
             continue
@@ -181,7 +180,7 @@ def _extract_city_state(lines: list[str], raw_text: str) -> tuple[str, str]:
             if not line or len(line) < 3:
                 continue
             if any(kw in line.lower() for kw in
-                   ["uf", "município", "municipio", "país", "se estrangeiro"]):
+                   ["uf", "municipio", "pais", "se estrangeiro"]):
                 continue
             parts = line.split()
             if len(parts) >= 2 and len(parts[-1]) == 2 and parts[-1].isalpha():
@@ -193,7 +192,6 @@ def _extract_city_state(lines: list[str], raw_text: str) -> tuple[str, str]:
         if cidade:
             break
 
-    # Fallback: naturalidade
     if not cidade:
         idx = lower.find("naturalidade")
         if idx != -1:
@@ -203,7 +201,7 @@ def _extract_city_state(lines: list[str], raw_text: str) -> tuple[str, str]:
                 if not line or len(line) < 3:
                     continue
                 if any(kw in line.lower() for kw in
-                       ["uf", "município", "municipio", "país", "se estrangeiro"]):
+                       ["uf", "municipio", "pais", "se estrangeiro"]):
                     continue
                 parts = line.split()
                 if len(parts) >= 2 and len(parts[-1]) == 2 and parts[-1].isalpha():
@@ -213,7 +211,6 @@ def _extract_city_state(lines: list[str], raw_text: str) -> tuple[str, str]:
                     cidade = line
                 break
 
-    # Fallback: UF por regex
     if not uf:
         for match in re.finditer(r'\b([A-Z]{2})\b', text):
             if match.group(1) in UF_VALIDAS:
@@ -222,7 +219,7 @@ def _extract_city_state(lines: list[str], raw_text: str) -> tuple[str, str]:
 
     return cidade.strip(), uf
 
-def _extract_causas(lines: list[str], raw_text: str) -> tuple[str, str]:
+def _extract_causas(lines, raw_text):
     text = raw_text or ""
     lower = text.lower()
 
@@ -237,8 +234,8 @@ def _extract_causas(lines: list[str], raw_text: str) -> tuple[str, str]:
         return "", ""
 
     end_idx = len(text)
-    for marker in ["parte ii", "atestante", "médico", "medico",
-                    "cartório", "cartorio", "declarante"]:
+    for marker in ["parte ii", "atestante", "medico",
+                    "cartorio", "declarante"]:
         idx = lower.find(marker, start_idx + 1)
         if idx != -1 and idx < end_idx:
             end_idx = idx
@@ -252,8 +249,8 @@ def _extract_causas(lines: list[str], raw_text: str) -> tuple[str, str]:
 
     for line in block_lines:
         ll = line.lower()
-        if any(kw in ll for kw in ["parte", "condições significativas", "contribuiram",
-                                     "não entraram", "cadeia acima", "código",
+        if any(kw in ll for kw in ["parte", "condicoes significativas", "contribuiram",
+                                     "nao entraram", "cadeia acima", "codigo",
                                      "registro", "ufs"]):
             continue
         if len(line) < 4:
@@ -268,7 +265,7 @@ def _extract_causas(lines: list[str], raw_text: str) -> tuple[str, str]:
         if not causa_basica and len(line) > 5:
             causa_basica = line
         elif len(line) > 5 and len(causa_basica) < 150:
-            causa_basica += " | " + line
+            causa_basica = causa_basica + " | " + line
 
     if len(causa_basica) > 300:
         causa_basica = causa_basica[:300]
@@ -277,7 +274,7 @@ def _extract_causas(lines: list[str], raw_text: str) -> tuple[str, str]:
 
     return causa_basica, cid_basica
 
-def _post_process(structured: dict) -> dict:
+def _post_process(structured):
     result = dict(structured)
     campos_obrigatorios = ["NOME", "DATA_OBITO"]
     campos_importantes = ["NOME_MAE", "NASCIMENTO", "UF_OBITO",
@@ -288,11 +285,11 @@ def _post_process(structured: dict) -> dict:
 
     for campo in campos_obrigatorios:
         if not result.get(campo):
-            erros.append(f"{campo} ausente")
+            erros.append("%s ausente" % campo)
 
     for campo in campos_importantes:
         if not result.get(campo):
-            warnings_list.append(f"{campo} ausente")
+            warnings_list.append("%s ausente" % campo)
 
     uf = result.get("UF_OBITO", "") or ""
     if uf and uf not in UF_VALIDAS:
@@ -306,8 +303,8 @@ def _post_process(structured: dict) -> dict:
 
     causa = result.get("CAUSA_BASICA", "") or ""
     if causa and any(kw in causa.lower() for kw in
-                     ["condições significativas", "contribuiram",
-                      "cadeia acima", "parte ii", "código", "registro"]):
+                     ["condicoes significativas", "contribuiram",
+                      "cadeia acima", "parte ii", "codigo", "registro"]):
         erros.append("CAUSA_BASICA")
         result["CAUSA_BASICA"] = ""
 
@@ -326,14 +323,14 @@ def _post_process(structured: dict) -> dict:
 
 # ── Parsing Principal ──────────────────────────────────────────────────
 
-def parse_obito(raw_text: str) -> dict:
+def parse_obito(raw_text):
     lines = [line.strip() for line in (raw_text or "").splitlines() if line.strip()]
 
     nome = _extract_text_after_label(
         lines, ["nome do falecido", "nome do falecida", "nome do", "falecido"]
     )
     nome_mae = _extract_text_after_label(
-        lines, ["nome da mae", "nome da mãe", "mae", "mãe"]
+        lines, ["nome da mae", "nome da mae", "mae"]
     )
     nome_pai = _extract_text_after_label(
         lines, ["nome do pai", "pai"]
@@ -343,11 +340,11 @@ def parse_obito(raw_text: str) -> dict:
         forced_year=None
     )
     data_obito = _extract_date_after_label(
-        lines, ["data do obito", "data do óbito", "obito", "óbito"],
+        lines, ["data do obito", "data do obito", "obito"],
         forced_year="2026"
     )
     hora_obito = _extract_time_after_label(
-        lines, ["hora", "hora do obito", "hora do óbito"]
+        lines, ["hora", "hora do obito"]
     )
     cidade_obito, uf_obito = _extract_city_state(lines, raw_text)
     causa_basica, cid_basica = _extract_causas(lines, raw_text)
@@ -370,7 +367,7 @@ def parse_obito(raw_text: str) -> dict:
 
 # ── OCR Provider ───────────────────────────────────────────────────────
 
-def _build_ocr_payload(image_base64: str, filename: str = "image.jpg") -> dict:
+def _build_ocr_payload(image_base64, filename="image.jpg"):
     return {
         "model": OPENAI_MODEL_DEFAULT,
         "messages": [
@@ -388,15 +385,15 @@ def _build_ocr_payload(image_base64: str, filename: str = "image.jpg") -> dict:
                     {
                         "type": "text",
                         "text": (
-                            "Transcreva fielmente todo o texto visível na imagem, "
-                            "preservando a ordem, as quebras de linha e a formatação "
-                            "exatamente como aparecem. Não resuma, não explique, não interprete."
+                            "Transcreva fielmente todo o texto visivel na imagem, "
+                            "preservando a ordem, as quebras de linha e a formatacao "
+                            "exatamente como aparecem. Nao resuma, nao explique, nao interprete."
                         )
                     },
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": f"data:image/jpeg;base64,{image_base64}",
+                            "url": "data:image/jpeg;base64," + image_base64,
                             "detail": "high"
                         }
                     }
@@ -407,10 +404,10 @@ def _build_ocr_payload(image_base64: str, filename: str = "image.jpg") -> dict:
         "temperature": 0.0
     }
 
-def _call_ocr_provider(image_base64: str, filename: str = "image.jpg") -> str:
-    url = f"{OPENAI_API_BASE}/chat/completions"
+def _call_ocr_provider(image_base64, filename="image.jpg"):
+    url = OPENAI_API_BASE + "/chat/completions"
     headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Authorization": "Bearer " + OPENAI_API_KEY,
         "Content-Type": "application/json"
     }
     payload = _build_ocr_payload(image_base64, filename)
@@ -422,18 +419,18 @@ def _call_ocr_provider(image_base64: str, filename: str = "image.jpg") -> str:
     content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
 
     if not content or not content.strip():
-        raise ValueError("Provider OCR retornou conteúdo vazio.")
+        raise ValueError("Provider OCR retornou conteudo vazio.")
 
     refusal_lower = content.strip().lower()
     refusal_patterns = [
-        "não posso ajudar", "não posso processar", "cannot process",
-        "não consigo extrair", "não é possível extrair",
+        "nao posso ajudar", "nao posso processar", "cannot process",
+        "nao consigo extrair", "nao e possivel extrair",
         "desculpe", "sorry", "i cannot", "i can't",
     ]
     for pattern in refusal_patterns:
         if refusal_lower.startswith(pattern):
             raise ValueError(
-                f"Provider recusou o processamento: '{content[:200]}'"
+                "Provider recusou o processamento: '" + content[:200] + "'"
             )
 
     return content.strip()
@@ -456,9 +453,10 @@ def ocr(request: OCRRequest):
         raw_text = _call_ocr_provider(request.image, request.filename)
         structured = parse_obito(raw_text)
 
-        validation_errors = structured.pop("VALIDATION_ERRORS", [])
-        validation_warnings = structured.pop("VALIDATION_WARNINGS", [])
+        validation_errors = []
+        validation_warnings = []
         score = structured.get("QUALIDADE_SCORE", 0)
+        status = structured.get("STATUS", "REVISAR")
 
         processing_ms = int((datetime.now() - start_time).total_seconds() * 1000)
 
@@ -475,21 +473,21 @@ def ocr(request: OCRRequest):
                 "errors": validation_errors,
                 "warnings": validation_warnings,
                 "score": score,
-                "status": structured.get("STATUS", "REVISAR")
+                "status": status
             },
-            warnings=[f"{campo} ausente" for campo in validation_warnings],
+            warnings=[],
             processingTimeMs=processing_ms
         )
 
     except requests.exceptions.Timeout:
         raise HTTPException(status_code=504, detail="Timeout do provider OCR")
     except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=502, detail=f"Erro no provider OCR: {str(e)[:200]}")
+        raise HTTPException(status_code=502, detail="Erro no provider OCR: " + str(e)[:200])
     except ValueError as e:
-        raise HTTPException(status_code=500, detail=f"Falha no provider OCR: {str(e)[:200]}")
+        raise HTTPException(status_code=500, detail="Falha no provider OCR: " + str(e)[:200])
     except Exception as e:
         logger.exception("Erro interno no OCR")
-        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)[:200]}")
+        raise HTTPException(status_code=500, detail="Erro interno: " + str(e)[:200])
 
 # ── Startup ────────────────────────────────────────────────────────────
 
