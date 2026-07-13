@@ -2,13 +2,13 @@ import os
 import re
 import logging
 from datetime import datetime, timezone
+from typing import Optional
 
 import requests
-from fastapi import FastAPI, Body
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
-# ── Config ─────────────────────────────────────────────────────────────
 logger = logging.getLogger("ocr-api")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -16,7 +16,6 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_API_BASE = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
 OPENAI_MODEL_DEFAULT = os.environ.get("OPENAI_MODEL_DEFAULT", "gpt-4o")
 
-# ── FastAPI App ─────────────────────────────────────────────────────────
 app = FastAPI(title="OCR Death Certificate Parser")
 
 app.add_middleware(
@@ -27,18 +26,31 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Regex Patterns ─────────────────────────────────────────────────────
+class OCRRequest(BaseModel):
+    image: str
+    filename: Optional[str] = "image.jpg"
+
+class OCRResponse(BaseModel):
+    requestId: str
+    status: str
+    provider: str
+    confidence: float
+    rawText: str
+    text: Optional[str] = ""
+    structured: dict
+    validation: dict
+    warnings: list
+    processingTimeMs: int
+
 DATE_RE = re.compile(
     r'(\d{1,2})\s*[/|\-.\s]\s*(\d{1,2})\s*[/|\-.\s]\s*(\d{2,4})'
 )
 TIME_RE = re.compile(r'(\d{1,2}):(\d{2})')
-UF_VALIDAS = set([
+UF_VALIDAS = {
     "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO",
     "MA", "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI",
     "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO"
-])
-
-# ── Helpers ────────────────────────────────────────────────────────────
+}
 
 def _looks_like_label(text):
     if not text:
@@ -55,10 +67,7 @@ def _looks_like_label(text):
         "obito", "nascimento", "pai", "mae",
         "cartorio", "registro", "uf"
     ]
-    for kw in labels:
-        if kw in t:
-            return True
-    return False
+    return any(kw in t for kw in labels)
 
 def _normalize_date(day, month, year, forced_year=None):
     try:
@@ -72,6 +81,17 @@ def _normalize_date(day, month, year, forced_year=None):
     if len(y) == 2:
         y = "20" + y if int(y) < 50 else "19" + y
     return "%02d/%02d/%s" % (d, m, y)
+
+def _normalize_uf(raw):
+    if not raw:
+        return ""
+    raw = raw.strip().upper()
+    if raw in UF_VALIDAS:
+        return raw
+    for uf in UF_VALIDAS:
+        if uf in raw:
+            return uf
+    return ""
 
 def _find_label_index(lines, labels):
     for i, line in enumerate(lines):
@@ -117,8 +137,7 @@ def _extract_date_after_label(lines, labels, forced_year=None):
     text_block = " ".join(search_lines)
     match = DATE_RE.search(text_block)
     if match:
-        return _normalize_date(match.group(1), match.group(2),
-                               match.group(3), forced_year)
+        return _normalize_date(match.group(1), match.group(2), match.group(3), forced_year)
     return ""
 
 def _extract_time_after_label(lines, labels):
@@ -206,8 +225,7 @@ def _extract_causas(lines, raw_text):
         return "", ""
 
     end_idx = len(text)
-    for marker in ["parte ii", "atestante", "medico",
-                    "cartorio", "declarante"]:
+    for marker in ["parte ii", "atestante", "medico", "cartorio", "declarante"]:
         idx = lower.find(marker, start_idx + 1)
         if idx != -1 and idx < end_idx:
             end_idx = idx
@@ -249,10 +267,8 @@ def _extract_causas(lines, raw_text):
 def _post_process(structured):
     result = dict(structured)
     campos_obrigatorios = ["NOME", "DATA_OBITO"]
-    campos_importantes = [
-        "NOME_MAE", "NASCIMENTO", "UF_OBITO",
-        "CAUSA_BASICA", "CID_BASICA", "CIDADE_OBITO"
-    ]
+    campos_importantes = ["NOME_MAE", "NASCIMENTO", "UF_OBITO",
+                           "CAUSA_BASICA", "CID_BASICA", "CIDADE_OBITO"]
 
     erros = []
     warnings_list = []
@@ -297,8 +313,6 @@ def _post_process(structured):
 
     return result
 
-# ── Parsing Principal ──────────────────────────────────────────────────
-
 def parse_obito(raw_text):
     lines = [line.strip() for line in (raw_text or "").splitlines() if line.strip()]
 
@@ -340,8 +354,6 @@ def parse_obito(raw_text):
 
     structured = _post_process(structured)
     return structured
-
-# ── OCR Provider ───────────────────────────────────────────────────────
 
 def _build_ocr_payload(image_base64, filename="image.jpg"):
     return {
@@ -411,8 +423,6 @@ def _call_ocr_provider(image_base64, filename="image.jpg"):
 
     return content.strip()
 
-# ── Endpoint ───────────────────────────────────────────────────────────
-
 @app.get("/health")
 def health():
     return {
@@ -420,33 +430,13 @@ def health():
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
-@app.post("/ocr")
-def ocr(request: dict = Body(...)):
+@app.post("/ocr", response_model=OCRResponse)
+def ocr(request: OCRRequest):
     request_id = datetime.now().strftime("%Y%m%d%H%M%S%f")
     start_time = datetime.now()
 
-    has_image = "image" in request
-    image_val = request.get("image")
-    image_len = len(image_val) if isinstance(image_val, str) else 0
-    filename = request.get("filename", "image.jpg")
-    keys_enviadas = list(request.keys())
-
-    logger.info("OCR request %s: has_image=%s, image_len=%d, filename=%s, keys=%s",
-                 request_id, has_image, image_len, filename, keys_enviadas)
-
-    if not has_image or not image_val or not isinstance(image_val, str):
-        logger.error("OCR request %s: campo 'image' invalido ou ausente", request_id)
-        return JSONResponse(
-            status_code=422,
-            content={
-                "requestId": request_id,
-                "error": "VALIDATION_ERROR",
-                "message": "Campo 'image' (string base64) e obrigatorio"
-            }
-        )
-
     try:
-        raw_text = _call_ocr_provider(image_val, filename)
+        raw_text = _call_ocr_provider(request.image, request.filename)
         structured = parse_obito(raw_text)
 
         validation_errors = structured.pop("VALIDATION_ERRORS", [])
@@ -456,70 +446,34 @@ def ocr(request: dict = Body(...)):
 
         processing_ms = int((datetime.now() - start_time).total_seconds() * 1000)
 
-        response_data = {
-            "requestId": request_id,
-            "status": "processed",
-            "provider": "openai-compatible",
-            "confidence": 1.0,
-            "rawText": raw_text,
-            "text": "",
-            "structured": structured,
-            "validation": {
+        return OCRResponse(
+            requestId=request_id,
+            status="processed",
+            provider="openai-compatible",
+            confidence=1.0,
+            rawText=raw_text,
+            text="",
+            structured=structured,
+            validation={
                 "ok": len(validation_errors) == 0,
                 "errors": validation_errors,
                 "warnings": validation_warnings,
                 "score": score,
                 "status": status
             },
-            "warnings": ["%s ausente" % w for w in validation_warnings],
-            "processingTimeMs": processing_ms
-        }
-
-        logger.info("OCR request %s: status=%s, erros=%s, warnings=%s",
-                     request_id, status, validation_errors, validation_warnings)
-
-        return JSONResponse(content=response_data, status_code=200)
+            warnings=["%s ausente" % w for w in validation_warnings],
+            processingTimeMs=processing_ms
+        )
 
     except requests.exceptions.Timeout:
-        logger.error("OCR request %s: timeout do provider OCR", request_id)
-        return JSONResponse(
-            status_code=504,
-            content={
-                "requestId": request_id,
-                "error": "TIMEOUT",
-                "message": "Timeout do provider OCR"
-            }
-        )
+        raise HTTPException(status_code=504, detail="Timeout do provider OCR")
     except requests.exceptions.RequestException as e:
-        logger.error("OCR request %s: erro no provider: %s", request_id, str(e)[:200])
-        return JSONResponse(
-            status_code=502,
-            content={
-                "requestId": request_id,
-                "error": "PROVIDER_ERROR",
-                "message": "Erro no provider OCR: " + str(e)[:200]
-            }
-        )
+        raise HTTPException(status_code=502, detail="Erro no provider OCR: " + str(e)[:200])
     except ValueError as e:
-        logger.error("OCR request %s: falha no OCR: %s", request_id, str(e)[:200])
-        return JSONResponse(
-            status_code=500,
-            content={
-                "requestId": request_id,
-                "error": "OCR_FAILED",
-                "message": "Falha no provider OCR: " + str(e)[:200]
-            }
-        )
+        raise HTTPException(status_code=500, detail="Falha no provider OCR: " + str(e)[:200])
     except Exception as e:
-        logger.exception("OCR request %s: erro interno", request_id)
-        return JSONResponse(
-            status_code=500,
-            content={
-                "requestId": request_id,
-                "error": "INTERNAL_ERROR",
-                "message": "Erro interno: " + str(e)[:500]
-            }
-        )
+        logger.exception("Erro interno no OCR")
+        raise HTTPException(status_code=500, detail="Erro interno: " + str(e)[:200])
 
 @app.on_event("startup")
 def startup():
