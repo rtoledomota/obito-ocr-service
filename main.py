@@ -7,6 +7,8 @@ import requests
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi import Request
+from fastapi.responses import JSONResponse
 
 logger = logging.getLogger("ocr-api")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -284,4 +286,47 @@ def startup():
     logger.info("=" * 50)
     logger.info("OCR API iniciando...")
     logger.info("Modelo=%s, key=%s", OPENAI_MODEL_DEFAULT, bool(OPENAI_API_KEY))
-    logger.info("=" * 50)
+@app.post("/echo-request")
+async def echo_request(request: Request):
+    """Retorna exatamente o que o servidor recebeu — para diagnóstico."""
+    try:
+        body = await request.json()
+        return JSONResponse(content={
+            "status": "recebido",
+            "keys": list(body.keys()),
+            "has_image": "image" in body,
+            "image_type": type(body.get("image", "")).__name__,
+            "image_len": len(body.get("image", "")) if isinstance(body.get("image"), str) else 0,
+            "image_prefix": (body.get("image", "")[:80] + "...") if isinstance(body.get("image"), str) else "",
+            "filename": body.get("filename", ""),
+            "content_type": request.headers.get("content-type", ""),
+            "content_length": request.headers.get("content-length", ""),
+        })
+    except Exception as e:
+        return JSONResponse(status_code=422, content={
+            "status": "erro",
+            "erro": str(e)[:200]
+        })    logger.info("=" * 50)
+function testarEcho() {
+  // Reuse a mesma imagem do OCR
+  var fileId = "1BsSuzIRH2BJ8e6SFpZrjTkcZP50rItOt";
+  var file = DriveApp.getFileById(fileId);
+  var blob = file.getBlob();
+  var base64 = Utilities.base64Encode(blob.getBytes());
+
+  var payload = {
+    "image": base64,
+    "filename": "img61.jpg"
+  };
+
+  var options = {
+    "method": "post",
+    "contentType": "application/json",
+    "payload": JSON.stringify(payload),
+    "muteHttpExceptions": true
+  };
+
+  var response = UrlFetchApp.fetch("https://seu-app.onrender.com/echo-request", options);
+  Logger.log("Status: " + response.getResponseCode());
+  Logger.log("Body: " + response.getContentText());
+}
