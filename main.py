@@ -396,10 +396,12 @@ def _get_sheets_service():
 def _list_images_in_folder(folder_id: str, since: Optional[datetime] = None) -> List[dict]:
     """
     Lista arquivos de imagem (.jpg, .jpeg, .png, .gif, .bmp, .tiff)
-    dentro de folder_id (não recursivo).
+    dentro de folder_id de forma RECURSIVA (inclui subpastas).
     Se `since` for fornecido, retorna apenas arquivos modificados após aquela data.
     """
     drive = _get_drive_service()
+    
+    # 1. Busca IMAGENS na pasta atual
     query = (
         f"'{folder_id}' in parents and "
         f"(mimeType='image/jpeg' or mimeType='image/png' or "
@@ -411,11 +413,11 @@ def _list_images_in_folder(folder_id: str, since: Optional[datetime] = None) -> 
     while True:
         resp = drive.files().list(
             q=query,
-            fields="files(id, name, mimeType, size, modifiedTime, createdTime)",
-            pageSize=100,
+            fields="files(id, name, mimeType, modifiedTime, parents)",
             pageToken=page_token,
+            pageSize=200,
         ).execute()
-        batch = resp.get("files", [])
+        batch = resp.get('files', [])
         if since:
             batch = [
                 f for f in batch
@@ -425,6 +427,29 @@ def _list_images_in_folder(folder_id: str, since: Optional[datetime] = None) -> 
         page_token = resp.get("nextPageToken")
         if not page_token:
             break
+    
+    # 2. Busca SUBPASTAS (recursão)
+    folder_query = (
+        f"'{folder_id}' in parents and "
+        f"mimeType='application/vnd.google-apps.folder' and "
+        f"trashed=false"
+    )
+    page_token = None
+    while True:
+        folders_resp = drive.files().list(
+            q=folder_query,
+            fields="files(id, name)",
+            pageToken=page_token,
+            pageSize=100,
+        ).execute()
+        for subfolder in folders_resp.get('files', []):
+            logger.info(f"Explorando subpasta: {subfolder['name']}")
+            sub_files = _list_images_in_folder(subfolder['id'], since=since)
+            files.extend(sub_files)
+        page_token = folders_resp.get("nextPageToken")
+        if not page_token:
+            break
+    
     return files
 
 def _parse_rfc3339(ts: str) -> Optional[datetime]:
