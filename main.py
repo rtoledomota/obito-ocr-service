@@ -1,332 +1,862 @@
+"""
+Serviço obito-ocr-service
+Backend FastAPI para OCR de declaração de óbito usando provedor OpenAI-compatible.
+Variáveis de ambiente:
+  ENDPOINT_AUTH_TOKEN      Token Bearer para autenticar POST /ocr
+  OPENAI_API_URL           URL base do provedor OpenAI-compatible (chat completions)
+  OPENAI_API_KEY           Chave de API do provedor
+  OPENAI_MODEL_DEFAULT     Modelo padrão de visão
+  MAX_FILE_SIZE_MB         Tamanho máximo de arquivo em MB
+  PORT                     Porta HTTP
+"""
 import os
 import re
-import logging
-from datetime import datetime, timezone
-
+import io
+import json
+import base64
+import hashlib
+import unicodedata
+import datetime as dt
+from typing import Any, Dict, List, Optional, Tuple
 import requests
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
-from fastapi import Request
-from fastapi.responses import JSONResponse
+import uvicorn
 
-logger = logging.getLogger("ocr-api")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-
+# ---------------------------------------------------------------------------
+# Configuração
+# ---------------------------------------------------------------------------
+ENDPOINT_AUTH_TOKEN = os.environ.get("ENDPOINT_AUTH_TOKEN", "")
+OPENAI_API_URL = os.environ.get("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-OPENAI_API_BASE = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
 OPENAI_MODEL_DEFAULT = os.environ.get("OPENAI_MODEL_DEFAULT", "gpt-4o")
+MAX_FILE_SIZE_MB = int(os.environ.get("MAX_FILE_SIZE_MB", "10"))
+PORT = int(os.environ.get("PORT", "8000"))
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
-app = FastAPI(title="OCR API")
+# Ordem oficial do cabeçalho estruturado
+HEADER = [
+    'NOME', 'NOME_SOCIAL', 'NASCIMENTO', 'SEXO', 'RACA_COR', 'ESTADO_CIVIL',
+    'NACIONALIDADE', 'NOME_MAE', 'NOME_PAI', 'PROFISSAO', 'LOGRADOURO',
+    'NUMERO', 'COMPLEMENTO', 'BAIRRO', 'CIDADE', 'UF', 'CEP',
+    'CIDADE_NASCIMENTO', 'UF_NASCIMENTO', 'CPF', 'RG', 'ORGAO_EMISSOR_RG',
+    'DATA_OBITO', 'HORA_OBITO', 'LOCAL_OBITO', 'CIDADE_OBITO', 'UF_OBITO',
+    'CAUSA_MORTE', 'CAUSA_MORTE_2', 'CAUSA_MORTE_3', 'CAUSA_MORTE_4',
+    'CAUSA_MORTE_5', 'CAUSA_BASICA', 'CODIGO_CAUSA_BASICA',
+    'CODIGO_CAUSA_MORTE', 'CODIGO_CAUSA_MORTE_2', 'CODIGO_CAUSA_MORTE_3',
+    'CODIGO_CAUSA_MORTE_4', 'CODIGO_CAUSA_MORTE_5', 'CID_BASICA', 'CID_MORTE',
+    'CID_MORTE_2', 'CID_MORTE_3', 'CID_MORTE_4', 'CID_MORTE_5', 'TIPO_OBITO',
+    'ASSISTIDO', 'DATA_ATESTADO', 'NOMES_OK', 'NOME_OK', 'GARBAGE_CODES',
+    'QTD_GARBAGE', 'PROTOCOLO_TEV', 'ERROS', 'QUALIDADE_SCORE',
+    'HASH_ARQUIVO', 'HASH_CONTEUDO', 'STATUS', 'NOME_MES', 'DATA_PROCESSAMENTO'
+]
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+UF_VALIDAS = {
+    'AC', 'AL', 'AP', 'AM', 'BA', 'CE', 'DF', 'ES', 'GO', 'MA', 'MT', 'MS',
+    'MG', 'PA', 'PB', 'PR', 'PE', 'PI', 'RJ', 'RN', 'RS', 'RO', 'RR', 'SC',
+    'SP', 'SE', 'TO'
+}
 
-DATE_RE = re.compile(r'(\d{1,2})\s*[/|\-.\s]\s*(\d{1,2})\s*[/|\-.\s]\s*(\d{2,4})')
-TIME_RE = re.compile(r'(\d{1,2}):(\d{2})')
-UF_VALIDAS = {"AC","AL","AP","AM","BA","CE","DF","ES","GO","MA","MT","MS","MG","PA","PB","PR","PE","PI","RJ","RN","RS","RO","RR","SC","SP","SE","TO"}
+MESES_PT = {
+    '01': 'JANEIRO', '02': 'FEVEREIRO', '03': 'MARCO', '04': 'ABRIL',
+    '05': 'MAIO', '06': 'JUNHO', '07': 'JULHO', '08': 'AGOSTO',
+    '09': 'SETEMBRO', '10': 'OUTUBRO', '11': 'NOVEMBRO', '12': 'DEZEMBRO'
+}
 
-def _looks_like_label(text):
-    if not text: return False
-    t = text.strip().lower()
-    if not t: return False
-    for kw in ["data do","nome do","nome da","causa","parte","hora","cartao","naturalidade","municipio","sepultamento","atestante","medico","declarante","tipo de","fetal","nao fetal","obito","nascimento","pai","mae","cartorio","registro","uf"]:
-        if kw in t: return True
-    return False
+REFUSAL_PHRASES = [
+    "i'm sorry",
+    "i can't assist with that",
+    "i can't assist",
+    "cannot assist",
+    "unable to help",
+    "cannot help with that request",
+    "i can't help with that",
+    "desculpe",
+    "não posso ajudar",
+    "nao posso ajudar",
+]
 
-def _normalize_date(day, month, year, forced_year=None):
-    try:
-        d, m = int(day), int(month)
-    except ValueError: return ""
-    if d < 1 or d > 31 or m < 1 or m > 12: return ""
-    y = forced_year or year
-    if len(y) == 2: y = "20" + y if int(y) < 50 else "19" + y
-    return "%02d/%02d/%s" % (d, m, y)
+NOISE_LINES = {
+    'parte i', 'parte ii', 'devido ou como consequência de', 'devido a',
+    'intervalo entre o início e a morte', 'cid',
+    'meses dias horas minutos ignorado', 'meses', 'dias', 'horas',
+    'minutos', 'ignorado', 'nome', 'nome do médico', 'nome do medico',
+    'crm', 'assinatura', 'carimbo', 'uf', 'município', 'municipio',
+    'data', 'hora', 'local', 'causas da morte', 'causa da morte',
+    'causas', 'causa', 'outras condições significativas',
+    'outras condicoes significativas', 'prováveis circunstâncias',
+    'provaveis circunstancias', 'óbito atestado por médico',
+    'obito atestado por medico', 'endereço', 'endereco', 'logradouro',
+    'número', 'numero', 'complemento', 'bairro', 'cep', 'cpf', 'rg',
+    'sexo', 'raça', 'raca', 'estado civil', 'nacionalidade', 'profissão',
+    'profissao', 'ocupação', 'ocupacao', 'naturalidade',
+}
 
-def _find_label_index(lines, labels):
-    for i, line in enumerate(lines):
-        if not line: continue
-        clean = line.strip()
-        clean = re.sub(r'^\[\d+\]\s*', '', clean)
-        clean = re.sub(r'^\(\d+\)\s*', '', clean)
-        clean = re.sub(r'^\d+\)\s*', '', clean)
-        clean = re.sub(r'^\d+\.\s*', '', clean)
-        clean = re.sub(r'^\d+\s+', '', clean)
-        for label in labels:
-            if clean.lower().startswith(label.lower()): return i
-    return None
+LABEL_KEYWORDS = [
+    'nome', 'nome do', 'nome da', 'data', 'hora', 'local', 'município',
+    'municipio', 'uf', 'cep', 'cpf', 'rg', 'sexo', 'raça', 'raca',
+    'estado civil', 'nacionalidade', 'profissão', 'profissao', 'ocupação',
+    'ocupacao', 'naturalidade', 'logradouro', 'endereço', 'endereco',
+    'número', 'numero', 'complemento', 'bairro', 'cidade', 'parte',
+    'devido', 'intervalo', 'cid', 'crm', 'médico', 'medico', 'assinatura',
+    'carimbo', 'meses', 'dias', 'horas', 'minutos', 'causas', 'causa',
+    'óbito atestado', 'obito atestado', 'outras condições', 'outras condicoes',
+    'prováveis', 'provaveis',
+]
 
-def _extract_text_after_label(lines, labels, max_lines=3):
-    idx = _find_label_index(lines, labels)
-    if idx is None: return ""
-    for offset in range(1, max_lines + 1):
-        if idx + offset >= len(lines): break
-        c = lines[idx + offset].strip()
-        if not c or _looks_like_label(c) or len(c) < 2: continue
-        return c
-    return ""
+# ---------------------------------------------------------------------------
+# Exceção de provedor OCR
+# ---------------------------------------------------------------------------
+class OCRProviderError(Exception):
+    """Erro de provedor OCR (recusa, falha ou resposta inválida)."""
+    def __init__(self, message: str, status_code: int = 502):
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = "OCR_PROVIDER_ERROR"
 
-def _extract_date_after_label(lines, labels, forced_year=None):
-    idx = _find_label_index(lines, labels)
-    if idx is None: return ""
-    sl = []
-    for offset in range(0, 6):
-        if idx + offset < len(lines): sl.append(lines[idx + offset])
-    m = DATE_RE.search(" ".join(sl))
-    if m: return _normalize_date(m.group(1), m.group(2), m.group(3), forced_year)
-    return ""
-
-def _extract_time_after_label(lines, labels):
-    idx = _find_label_index(lines, labels)
-    if idx is None: return ""
-    sl = []
-    for offset in range(0, 4):
-        if idx + offset < len(lines): sl.append(lines[idx + offset])
-    m = TIME_RE.search(" ".join(sl))
-    if m: return "%s:%s" % (m.group(1), m.group(2))
-    return ""
-
-def _extract_city_state(lines, raw_text):
-    text = raw_text or ""; lower = text.lower()
-    cidade = ""; uf = ""
-    for marker in ["municipio de ocorrencia", "local de ocorrencia"]:
-        idx = lower.find(marker)
-        if idx == -1: continue
-        for line in text[idx:idx+300].splitlines()[1:4]:
-            line = line.strip()
-            if not line or len(line) < 3: continue
-            if any(kw in line.lower() for kw in ["uf","municipio","pais","se estrangeiro"]): continue
-            parts = line.split()
-            if len(parts) >= 2 and len(parts[-1]) == 2 and parts[-1].isalpha():
-                cidade = " ".join(parts[:-1]); uf = parts[-1].upper()
-            elif not cidade: cidade = line
-            break
-        if cidade: break
-    if not cidade:
-        idx = lower.find("naturalidade")
-        if idx != -1:
-            for line in text[idx:idx+300].splitlines()[1:4]:
-                line = line.strip()
-                if not line or len(line) < 3: continue
-                if any(kw in line.lower() for kw in ["uf","municipio","pais","se estrangeiro"]): continue
-                parts = line.split()
-                if len(parts) >= 2 and len(parts[-1]) == 2 and parts[-1].isalpha():
-                    cidade = " ".join(parts[:-1]); uf = parts[-1].upper()
-                elif not cidade: cidade = line
-                break
-    if not uf:
-        for m in re.finditer(r'\b([A-Z]{2})\b', text):
-            if m.group(1) in UF_VALIDAS: uf = m.group(1); break
-    return cidade.strip(), uf
-
-def _extract_causas(lines, raw_text):
-    text = raw_text or ""; lower = text.lower()
-    start = -1
-    for mk in ["causas da morte", "parte i", "causa da morte"]:
-        idx = lower.find(mk)
-        if idx != -1: start = idx; break
-    if start == -1: return "", ""
-    end = len(text)
-    for mk in ["parte ii", "atestante", "medico", "cartorio", "declarante"]:
-        idx = lower.find(mk, start + 1)
-        if idx != -1 and idx < end: end = idx
-    blk = text[start:end].strip()
-    blines = [l.strip() for l in blk.splitlines() if l.strip()]
-    causa = ""; last_cid = ""
-    for line in blines:
-        ll = line.lower()
-        if any(kw in ll for kw in ["parte","condicoes significativas","contribuiram","nao entraram","cadeia acima","codigo","registro","ufs"]): continue
-        if len(line) < 4: continue
-        if _looks_like_label(line) and len(line) < 80: continue
-        cm = re.search(r'\b([A-Z]\d{2,3})\b', line)
-        if cm: last_cid = cm.group(1)
-        if not causa and len(line) > 5: causa = line
-        elif len(line) > 5 and len(causa) < 150: causa += " | " + line
-    if len(causa) > 300: causa = causa[:300]
-    return causa, last_cid or ""
-
-def _post_process(structured):
-    r = dict(structured)
-    erros = []; warns = []
-    for c in ["NOME","DATA_OBITO"]:
-        if not r.get(c): erros.append("%s ausente" % c)
-    for c in ["NOME_MAE","NASCIMENTO","UF_OBITO","CAUSA_BASICA","CID_BASICA","CIDADE_OBITO"]:
-        if not r.get(c): warns.append("%s ausente" % c)
-    uf = r.get("UF_OBITO","") or ""
-    if uf and uf not in UF_VALIDAS: erros.append("UF_OBITO invalida"); r["UF_OBITO"] = ""
-    data = r.get("DATA_OBITO","") or ""
-    if data and not re.match(r'\d{2}/\d{2}/\d{4}', data): erros.append("DATA_OBITO formato invalido"); r["DATA_OBITO"] = ""
-    causa = r.get("CAUSA_BASICA","") or ""
-    if causa and any(kw in causa.lower() for kw in ["condicoes significativas","contribuiram","cadeia acima","parte ii","codigo","registro"]):
-        erros.append("CAUSA_BASICA"); r["CAUSA_BASICA"] = ""
-    if not erros and not warns: r["STATUS"] = "OK"
-    elif not erros: r["STATUS"] = "OK_COM_WARNINGS"
-    else: r["STATUS"] = "REVISAR"
-    penalty = len(erros) * 15 + len(warns) * 5
-    r["QUALIDADE_SCORE"] = max(0, min(100, 100 - penalty))
-    r["ERROS"] = "; ".join(erros) if erros else ""
-    return r, erros, warns
-
-def parse_obito(raw_text):
-    lines = [l.strip() for l in (raw_text or "").splitlines() if l.strip()]
-    nome = _extract_text_after_label(lines, ["nome do falecido","nome do falecida","nome do","falecido"])
-    nome_mae = _extract_text_after_label(lines, ["nome da mae","mae"])
-    nome_pai = _extract_text_after_label(lines, ["nome do pai","pai"])
-    nascimento = _extract_date_after_label(lines, ["data de nascimento","nascimento","nasc."], forced_year=None)
-    data_obito = _extract_date_after_label(lines, ["data do obito","obito"], forced_year="2026")
-    hora_obito = _extract_time_after_label(lines, ["hora","hora do obito"])
-    cidade_obito, uf_obito = _extract_city_state(lines, raw_text)
-    causa_basica, cid_basica = _extract_causas(lines, raw_text)
-    structured = {
-        "NOME": nome or "", "NOME_MAE": nome_mae or "", "NOME_PAI": nome_pai or "",
-        "NASCIMENTO": nascimento or "", "DATA_OBITO": data_obito or "",
-        "HORA_OBITO": hora_obito or "", "CIDADE_OBITO": cidade_obito or "",
-        "UF_OBITO": uf_obito or "", "CAUSA_BASICA": causa_basica or "",
-        "CID_BASICA": cid_basica or "",
-    }
-    structured, erros, warns = _post_process(structured)
-    return structured, erros, warns
-
-def _build_ocr_payload(image_base64, filename="image.jpg"):
-    return {
-        "model": OPENAI_MODEL_DEFAULT,
-        "messages": [
-            {"role": "system", "content": "You are an OCR assistant. Transcribe all visible text in the image faithfully, preserving line breaks and reading order exactly as they appear. Do not summarize, interpret, paraphrase, or explain. Output only the raw text."},
-            {"role": "user", "content": [
-                {"type": "text", "text": "Transcreva fielmente todo o texto visivel na imagem, preservando a ordem, as quebras de linha e a formatacao exatamente como aparecem. Nao resuma, nao explique, nao interprete."},
-                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + image_base64, "detail": "high"}}
-            ]}
-        ],
-        "max_tokens": 4096,
-        "temperature": 0.0
-    }
-
-def _call_ocr_provider(image_base64, filename="image.jpg"):
-    resp = requests.post(
-        OPENAI_API_BASE + "/chat/completions",
-        headers={"Authorization": "Bearer " + OPENAI_API_KEY, "Content-Type": "application/json"},
-        json=_build_ocr_payload(image_base64, filename),
-        timeout=120
-    )
-    resp.raise_for_status()
-    content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-    if not content or not content.strip():
-        raise ValueError("Provider OCR retornou conteudo vazio.")
-    return content.strip()
+# ---------------------------------------------------------------------------
+# App FastAPI
+# ---------------------------------------------------------------------------
+app = FastAPI(title="obito-ocr-service", version="1.0.0")
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
+    return {"status": "ok", "service": "obito-ocr-service", "version": "1.0.0"}
 
+# ---------------------------------------------------------------------------
+# Autenticação
+# ---------------------------------------------------------------------------
+def _check_auth(authorization: Optional[str]) -> None:
+    if not ENDPOINT_AUTH_TOKEN:
+        return
+    if not authorization:
+        raise HTTPException(status_code=401, detail={
+            "code": "UNAUTHORIZED",
+            "message": "Cabeçalho Authorization ausente.",
+            "requestId": None,
+        })
+    parts = authorization.split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer" or parts[1] != ENDPOINT_AUTH_TOKEN:
+        raise HTTPException(status_code=401, detail={
+            "code": "UNAUTHORIZED",
+            "message": "Token Bearer inválido.",
+            "requestId": None,
+        })
+
+# ---------------------------------------------------------------------------
+# Utilidades de texto
+# ---------------------------------------------------------------------------
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+
+def _unaccent(s: str) -> str:
+    return ''.join(c for c in unicodedata.normalize('NFKD', s) if not unicodedata.combining(c))
+
+def _norm_label(s: str) -> str:
+    return _unaccent(s).lower().strip()
+
+def _normalize_lines(text: str) -> List[str]:
+    return [line.strip() for line in text.split("\n") if line.strip()]
+
+def _strip_numeric_prefix(line: str) -> str:
+    s = line.strip()
+    m = re.match(r'^(\d+\s*[\.\):\-]?\s*)(.*)$', s)
+    if m and re.search(r'[A-Za-zÀ-ú]', m.group(2)):
+        return m.group(2).strip()
+    return s
+
+def _build_pairs(text: str) -> List[Tuple[str, str]]:
+    return [(_strip_numeric_prefix(l), l) for l in _normalize_lines(text)]
+
+def _is_noise_line(norm_line: str) -> bool:
+    nl = _norm_label(norm_line)
+    if not nl:
+        return True
+    if nl in NOISE_LINES:
+        return True
+    if nl.endswith(":") and len(nl) < 40:
+        return True
+    if re.fullmatch(r'[\d\s\.\-:/]+', norm_line) and len(norm_line) < 3:
+        return True
+    for kw in LABEL_KEYWORDS:
+        if nl == kw or nl.startswith(kw):
+            return True
+    return False
+
+def _looks_like_label(norm_line: str) -> bool:
+    return _is_noise_line(norm_line)
+
+def _normalize_date(value: str) -> str:
+    if not value:
+        return ""
+    v = value.strip()
+    v = re.sub(r"[^0-9/\-\s]", " ", v)
+    v = re.sub(r"\s+", " ", v).strip()
+    m = re.match(r"^(\d{1,2})[\s/\-]+(\d{1,2})[\s/\-]+(\d{2,4})$", v)
+    if not m:
+        return value.strip()
+    d, mo, y = m.group(1), m.group(2), m.group(3)
+    if len(y) == 2:
+        y = "19" + y if int(y) > 30 else "20" + y
+    try:
+        dt.date(int(y), int(mo), int(d))
+    except ValueError:
+        return value.strip()
+    return f"{int(d):02d}/{int(mo):02d}/{y}"
+
+def _normalize_hour(value: str) -> str:
+    if not value:
+        return ""
+    v = value.strip()
+    m = re.search(r"(\d{1,2})[:hH]+(\d{2})", v)
+    if m:
+        h = int(m.group(1))
+        mm = int(m.group(2))
+        if 0 <= h <= 23 and 0 <= mm <= 59:
+            return f"{h:02d}:{mm:02d}"
+    return v
+
+def _is_valid_hour(value: str) -> bool:
+    return bool(re.fullmatch(r"\d{2}:\d{2}", value or "")) and _normalize_hour(value) == value
+
+def _normalize_uf(value: str) -> str:
+    if not value:
+        return ""
+    v = value.strip().upper()
+    if v == "UF":
+        return ""
+    m = re.search(r"\b([A-Z]{2})\b", v)
+    if m and m.group(1) in UF_VALIDAS:
+        return m.group(1)
+    if v in UF_VALIDAS:
+        return v
+    return ""
+
+def _normalize_cep(value: str) -> str:
+    if not value:
+        return ""
+    digits = re.sub(r"\D", "", value)
+    if len(digits) == 8:
+        return f"{digits[:5]}-{digits[5:]}"
+    return value.strip()
+
+# ---------------------------------------------------------------------------
+# Parser: busca estrita por próxima linha
+# ---------------------------------------------------------------------------
+def _find_label_index(
+    pairs: List[Tuple[str, str]], labels: List[str], start_at: int = 0,
+) -> int:
+    labels_norm = [_norm_label(l) for l in labels]
+    for i in range(start_at, len(pairs)):
+        norm, _ = pairs[i]
+        nl = _norm_label(norm)
+        for lab in labels_norm:
+            if nl == lab or nl == lab + ":" or nl.endswith(lab) or nl.endswith(lab + ":"):
+                return i
+    return -1
+
+def _find_next_value_after_label(
+    text: str, labels: List[str],
+    stop_labels: Optional[List[str]] = None,
+    max_distance: int = 5, start_at: int = 0,
+) -> Tuple[str, int]:
+    pairs = _build_pairs(text)
+    stop_norm = [_norm_label(s) for s in (stop_labels or [])]
+    idx = _find_label_index(pairs, labels, start_at=start_at)
+    while idx != -1:
+        for j in range(idx + 1, min(idx + 1 + max_distance, len(pairs))):
+            cnorm, corig = pairs[j]
+            cl = _norm_label(cnorm)
+            if any(cl == s or cl.startswith(s) for s in stop_norm):
+                break
+            if _is_noise_line(cnorm):
+                continue
+            if len(corig.strip()) < 2:
+                continue
+            return corig.strip(), idx
+        idx = _find_label_index(pairs, labels, start_at=idx + 1)
+    return "", -1
+
+def _find_inline_value(text: str, labels: List[str]) -> str:
+    pairs = _build_pairs(text)
+    labels_norm = [_norm_label(l) for l in labels]
+    for norm, orig in pairs:
+        nl = _norm_label(norm)
+        for lab in labels_norm:
+            if nl == lab or nl.startswith(lab):
+                rest = norm[len(lab):].lstrip(": -\t").strip()
+                if rest and _norm_label(rest) != "uf" and len(rest) > 1 and not _is_noise_line(rest):
+                    return rest
+    return ""
+
+def _find_block_value(
+    text: str, labels: List[str],
+    stop_labels: Optional[List[str]] = None, max_distance: int = 5,
+) -> str:
+    inline = _find_inline_value(text, labels)
+    if inline:
+        return inline
+    value, _ = _find_next_value_after_label(text, labels, stop_labels=stop_labels, max_distance=max_distance)
+    return value
+
+def _find_hora_obito(text: str) -> str:
+    pairs = _build_pairs(text)
+    for i, (norm, _) in enumerate(pairs):
+        nl = _norm_label(norm)
+        if nl == "hora":
+            for j in range(i + 1, min(i + 1 + 5, len(pairs))):
+                cnorm, corig = pairs[j]
+                cl = _norm_label(cnorm)
+                if cl == "hora" or cl.startswith("horas"):
+                    break
+                if _is_noise_line(cnorm):
+                    continue
+                candidate = corig.strip()
+                hour = _normalize_hour(candidate)
+                if _is_valid_hour(hour):
+                    return hour
+                if _looks_like_label(cnorm):
+                    break
+    return ""
+
+def _find_uf_after(
+    text: str, after_labels: List[str], max_distance: int = 10,
+) -> str:
+    pairs = _build_pairs(text)
+    start = _find_label_index(pairs, after_labels)
+    if start == -1:
+        start = 0
+    for i in range(start, len(pairs)):
+        norm, _ = pairs[i]
+        if _norm_label(norm) == "uf":
+            for j in range(i + 1, min(i + 1 + max_distance, len(pairs))):
+                cnorm, corig = pairs[j]
+                cl = _norm_label(cnorm)
+                if cl == "uf":
+                    continue
+                if _is_noise_line(cnorm):
+                    continue
+                uf = _normalize_uf(corig)
+                if uf:
+                    return uf
+                if _looks_like_label(cnorm):
+                    break
+    return ""
+
+# ── Constantes para extração de causas ──────────────────────────────────
+_CAUSA_BASICA_BLACKLIST = [
+    'outras condições significativas', 'outras condicoes significativas',
+    'nome do médico', 'nome do medico', 'crm',
+    'óbito atestado', 'obito atestado', 'medico', 'médico',
+]
+
+_INTERVALO_RE = re.compile(
+    r'[&lt;>]?\s*\d+\s*(dia|dias|hora|horas|min|minutos|d|h|m)'
+)
+
+def _causa_valida(c: str) -> bool:
+    """Verifica se uma string é uma causa de morte válida (não é ruído)."""
+    if not c or not c.strip():
+        return False
+    cl = _norm_label(c)
+    if len(cl) < 3:
+        return False
+    # Rejeita coluna de intervalo/duração (ex.: >7d, <24h, 3d, 12h, 30m)
+    if re.fullmatch(r'[&lt;>]?\s*\d+\s*[dhm]?', cl):
+        return False
+    if _INTERVALO_RE.fullmatch(cl):
+        return False
+    if 'intervalo entre o inicio e a morte' in cl:
+        return False
+    for proibido in _CAUSA_BASICA_BLACKLIST:
+        if proibido in cl:
+            return False
+    if _is_noise_line(c):
+        return False
+    return True
+
+_CID_RE = re.compile(r'\b([A-TV-Z]\d{2}(?:\.\d{1,4})?)\b', re.IGNORECASE)
+
+def _extract_causes(text: str) -> List[str]:
+    """
+    Extrai causas da morte em ordem.
+    - Inicia em 'CAUSAS DA MORTE'
+    - Para imediatamente em: 'Parte II', 'Outras condições significativas',
+      'Nome do Médico', 'CRM', 'Óbito atestado por Médico', 'PROVÁVEIS CIRCUNSTÂNCIAS'
+    - Ignora linhas auxiliares: 'Parte I', 'Devido ou como consequência de',
+      'Intervalo entre o início e a morte', 'CID', 'Meses Dias Horas Minutos Ignorado'
+    """
+    pairs = _build_pairs(text)
+    start_markers = ["causas da morte", "causa da morte"]
+    stop_markers = [
+        "parte ii", "outras condições significativas", "outras condicoes significativas",
+        "nome do médico", "nome do medico", "crm", "óbito atestado por médico",
+        "obito atestado por medico", "prováveis circunstâncias", "provaveis circunstancias",
+    ]
+    ignore_markers = [
+        "parte i", "devido ou como consequência de", "devido a",
+        "intervalo entre o início e a morte", "intervalo entre o inicio e a morte",
+        "cid", "meses dias horas minutos ignorado", "causas da morte", "causa da morte",
+    ]
+    start_idx = -1
+    for i, (norm, _) in enumerate(pairs):
+        nl = _norm_label(norm)
+        if any(m in nl for m in start_markers):
+            start_idx = i
+            break
+    if start_idx == -1:
+        return []
+    causes: List[str] = []
+    for norm, orig in pairs[start_idx + 1:]:
+        nl = _norm_label(norm)
+        if any(nl == s or nl.startswith(s) for s in stop_markers):
+            break
+        if any(nl == s or nl.startswith(s) for s in ignore_markers):
+            continue
+        if re.fullmatch(r"\([a-eA-E]\)", norm):
+            continue
+        if _is_noise_line(norm):
+            continue
+        if len(orig.strip()) < 3:
+            continue
+        causes.append(orig.strip())
+    # ── Filtro adicional: remove causas inválidas pelo patch ──────────
+    causes = [c.strip() for c in causes if _causa_valida(c)]
+    return causes
+
+# ---------------------------------------------------------------------------
+# Parser principal
+# ---------------------------------------------------------------------------
+def parse_obito(text: str) -> Dict[str, Any]:
+    """Constrói o dicionário estruturado a partir do texto OCR."""
+    structured: Dict[str, Any] = {k: "" for k in HEADER}
+
+    structured["NOME"] = _find_block_value(
+        text,
+        ["Nome do Falecido", "Nome do falecido", "Nome do(a) Falecido(a)", "Nome do(a) falecido(a)"],
+        stop_labels=["Nome da mãe", "Nome da mae", "Nome do pai", "Nome social", "Data"],
+    )
+    structured["NOME_SOCIAL"] = _find_block_value(
+        text, ["Nome social", "Nome Social"],
+        stop_labels=["Nome do falecido", "Nome da mãe", "Nome da mae", "Nome do pai"],
+    )
+    structured["NOME_MAE"] = _find_block_value(
+        text,
+        ["Nome da Mãe", "Nome da mãe", "Nome da mae", "Nome da Mae"],
+        stop_labels=["Nome do pai", "Profissão", "Profissao", "Endereço", "Endereco", "Nacionalidade"],
+    )
+    structured["NOME_PAI"] = _find_block_value(
+        text,
+        ["Nome do Pai", "Nome do pai"],
+        stop_labels=["Profissão", "Profissao", "Endereço", "Endereco", "Nacionalidade", "Nome da mãe", "Nome da mae"],
+    )
+    structured["NASCIMENTO"] = _normalize_date(
+        _find_block_value(text,
+            ["Data de nascimento", "Data de Nascimento", "Nascimento"],
+            stop_labels=["Data do óbito", "Data do obito", "Sexo", "Raça", "Raca"],
+        )
+    )
+    structured["DATA_OBITO"] = _normalize_date(
+        _find_block_value(text,
+            ["Data do óbito", "Data de óbito", "Data do obito", "Data de obito"],
+            stop_labels=["Hora", "Local do óbito", "Local do obito", "Município de ocorrência", "Municipio de ocorrencia"],
+        )
+    )
+    structured["HORA_OBITO"] = _find_hora_obito(text)
+    structured["DATA_ATESTADO"] = _normalize_date(
+        _find_block_value(text, ["Data do atestado", "Data de emissão", "Data da emissão"])
+    )
+    structured["LOCAL_OBITO"] = _find_block_value(
+        text, ["Local do óbito", "Local de óbito", "Local do obito", "Local de obito"],
+        stop_labels=["Município de ocorrência", "Municipio de ocorrencia", "UF"],
+    )
+    structured["CIDADE_OBITO"] = _find_block_value(
+        text,
+        ["Município de ocorrência", "Municipio de ocorrência", "Município de ocorrencia", "Municipio de ocorrencia"],
+        stop_labels=["UF", "Estado", "Data", "CEP", "Cep"],
+    )
+    structured["UF_OBITO"] = _find_uf_after(text, ["Município de ocorrência", "Municipio de ocorrencia"])
+    structured["LOGRADOURO"] = _find_block_value(text, ["Logradouro", "Endereço", "Endereco"], stop_labels=["Número", "Numero", "Complemento", "Bairro"])
+    structured["NUMERO"] = _find_block_value(text, ["Número", "Numero"], stop_labels=["Complemento", "Bairro"])
+    structured["COMPLEMENTO"] = _find_block_value(text, ["Complemento"], stop_labels=["Bairro", "Município", "Municipio"])
+    structured["BAIRRO"] = _find_block_value(text, ["Bairro"], stop_labels=["Município", "Municipio", "Cidade", "UF"])
+    structured["CIDADE"] = _find_block_value(text, ["Município", "Municipio", "Cidade"], stop_labels=["UF", "CEP", "Cep"])
+    structured["UF"] = _find_uf_after(text, ["Endereço", "Endereco", "Logradouro", "Bairro", "Município", "Municipio", "Cidade"])
+    structured["CEP"] = _normalize_cep(_find_block_value(text, ["CEP", "Cep"]))
+    structured["CIDADE_NASCIMENTO"] = _find_block_value(
+        text, ["Naturalidade", "Município de nascimento", "Municipio de nascimento", "Cidade de nascimento"],
+        stop_labels=["UF de nascimento", "Nacionalidade"],
+    )
+    structured["UF_NASCIMENTO"] = _find_uf_after(text, ["Naturalidade", "Município de nascimento", "Municipio de nascimento"])
+    structured["CPF"] = _find_block_value(text, ["CPF"])
+    structured["RG"] = _find_block_value(text, ["RG", "Registro Geral"])
+    structured["ORGAO_EMISSOR_RG"] = _find_block_value(text, ["Órgão emissor", "Orgao emissor", "Órgão expedidor", "Orgao expedidor"])
+    structured["SEXO"] = _find_block_value(text, ["Sexo"], stop_labels=["Raça", "Raca", "Cor"])
+    structured["RACA_COR"] = _find_block_value(text, ["Raça/Cor", "Raça", "Raca/Cor", "Raca", "Cor"])
+    structured["ESTADO_CIVIL"] = _find_block_value(text, ["Estado civil"])
+    structured["NACIONALIDADE"] = _find_block_value(text, ["Nacionalidade"])
+    structured["PROFISSAO"] = _find_block_value(text, ["Profissão", "Profissao", "Ocupação", "Ocupacao"])
+
+    # --- Causas (PATCH A APLICADO) ---
+    causes = _extract_causes(text)
+
+    if causes:
+        structured['CAUSA_MORTE'] = causes[0] if len(causes) >= 1 else ''
+        structured['CAUSA_MORTE_2'] = causes[1] if len(causes) >= 2 else ''
+        structured['CAUSA_MORTE_3'] = causes[2] if len(causes) >= 3 else ''
+        structured['CAUSA_MORTE_4'] = causes[3] if len(causes) >= 4 else ''
+        structured['CAUSA_MORTE_5'] = causes[4] if len(causes) >= 5 else ''
+        # CAUSA_BASICA = última causa realmente válida
+        validas = [c for c in causes if _causa_valida(c)]
+        structured['CAUSA_BASICA'] = validas[-1] if validas else ''
+    else:
+        for k in ('CAUSA_MORTE', 'CAUSA_MORTE_2', 'CAUSA_MORTE_3',
+                  'CAUSA_MORTE_4', 'CAUSA_MORTE_5', 'CAUSA_BASICA'):
+            structured[k] = ''
+
+    # --- CID_BASICA: extração por regex, sem inventar ---
+    cid_basica = ''
+    if structured.get('CAUSA_BASICA'):
+        cids = _CID_RE.findall(structured['CAUSA_BASICA'])
+        if cids:
+            cid_basica = cids[-1].upper()
+    if not cid_basica:
+        cids = _CID_RE.findall(text)
+        if cids:
+            cid_basica = cids[-1].upper()
+    structured['CID_BASICA'] = cid_basica
+
+    # --- Tipo de óbito / assistido ---
+    structured["TIPO_OBITO"] = _find_block_value(text, ["Tipo de óbito", "Tipo de obito"])
+    structured["ASSISTIDO"] = _find_block_value(text, ["Assistido", "Foi assistido"])
+    structured["PROTOCOLO_TEV"] = _find_block_value(text, ["Protocolo TEV", "Protocolo"])
+
+    # --- Hashes e processamento ---
+    structured["HASH_CONTEUDO"] = _sha256_text(text)
+    structured["DATA_PROCESSAMENTO"] = dt.datetime.utcnow().isoformat() + "Z"
+
+    if structured["DATA_OBITO"]:
+        partes = structured["DATA_OBITO"].split("/")
+        if len(partes) == 3:
+            mes = partes[1].zfill(2)
+            structured["NOME_MES"] = MESES_PT.get(mes, "")
+
+    return structured
+
+# ---------------------------------------------------------------------------
+# Validação
+# ---------------------------------------------------------------------------
+def _valid_date(value: str) -> bool:
+    if not value:
+        return False
+    try:
+        d, m, y = value.split("/")
+        dt.date(int(y), int(m), int(d))
+        return True
+    except Exception:
+        return False
+
+def _valid_hour(value: str) -> bool:
+    if not value:
+        return False
+    try:
+        h, mm = value.split(":")
+        return 0 <= int(h) <= 23 and 0 <= int(mm) <= 59
+    except Exception:
+        return False
+
+def _valid_uf(value: str) -> bool:
+    return bool(value) and value.upper() in UF_VALIDAS
+
+def _valid_cep(value: str) -> bool:
+    return bool(re.fullmatch(r"\d{5}-\d{3}", value or ""))
+
+def _age_coherence(nasc: str, obito: str) -> Tuple[Optional[str], Optional[int]]:
+    if not (_valid_date(nasc) and _valid_date(obito)):
+        return None, None
+    try:
+        dn = dt.datetime.strptime(nasc, "%d/%m/%Y")
+        do = dt.datetime.strptime(obito, "%d/%m/%Y")
+        if do < dn:
+            return "Data de óbito anterior à data de nascimento", None
+        idade = int((do - dn).days / 365.25)
+        if idade < 0 or idade > 130:
+            return f"Idade incoerente: {idade} anos", None
+        return None, idade
+    except Exception:
+        return None, None
+
+def validate_obito(structured: Dict[str, Any]) -> Dict[str, Any]:
+    """Gera o bloco de validação e preenche campos derivados de qualidade."""
+    errors: List[str] = []
+    warnings: List[str] = []
+    computed: Dict[str, Any] = {}
+
+    campos_criticos = ["NOME", "NOME_MAE", "NASCIMENTO", "DATA_OBITO", "CIDADE_OBITO", "UF_OBITO"]
+    for campo in campos_criticos:
+        if not structured.get(campo):
+            errors.append(f"Campo crítico ausente: {campo}")
+
+    if structured.get("NASCIMENTO") and not _valid_date(structured["NASCIMENTO"]):
+        errors.append("NASCIMENTO com data inválida")
+    if structured.get("DATA_OBITO") and not _valid_date(structured["DATA_OBITO"]):
+        errors.append("DATA_OBITO com data inválida")
+    if structured.get("HORA_OBITO") and not _valid_hour(structured["HORA_OBITO"]):
+        warnings.append("HORA_OBITO com formato inválido")
+    if structured.get("UF_OBITO") and not _valid_uf(structured["UF_OBITO"]):
+        warnings.append("UF_OBITO inválida")
+    if structured.get("UF") and not _valid_uf(structured["UF"]):
+        warnings.append("UF do endereço inválida")
+    if structured.get("CEP") and not _valid_cep(structured["CEP"]):
+        warnings.append("CEP com formato inválido")
+
+    age_err, idade = _age_coherence(
+        structured.get("NASCIMENTO", ""), structured.get("DATA_OBITO", "")
+    )
+    if age_err:
+        errors.append(age_err)
+        computed["idade_anos"] = None
+    else:
+        computed["idade_anos"] = idade
+
+    # Nomes
+    structured["NOME_OK"] = "SIM" if structured.get("NOME") else "NAO"
+    structured["NOMES_OK"] = "SIM" if (structured.get("NOME") and structured.get("NOME_MAE")) else "NAO"
+
+    # Score
+    total_campos = len(HEADER)
+    preenchidos = sum(1 for k in HEADER if structured.get(k))
+    score = int((preenchidos / total_campos) * 100)
+    score = max(0, score - len(errors) * 10)
+    structured["QUALIDADE_SCORE"] = score
+
+    # ── Regra operacional de STATUS (PATCH B APLICADO) ──
+    if errors:
+        status = 'REVISAR'
+    elif score < 70:
+        status = 'REVISAR'
+    elif not structured.get('CAUSA_BASICA'):
+        status = 'REVISAR'
+    else:
+        status = 'OK'
+    structured['STATUS'] = status
+
+    structured["ERROS"] = " | ".join(errors)
+
+    validation = {
+        "ok": len(errors) == 0,
+        "errors": errors,
+        "warnings": warnings,
+        "computed": computed,
+    }
+    return validation
+
+# ---------------------------------------------------------------------------
+# Adaptador OCR (OpenAI-compatible)
+# ---------------------------------------------------------------------------
+def _detect_refusal(text: str) -> bool:
+    if not text:
+        return True
+    low = text.lower().strip()
+    for phrase in REFUSAL_PHRASES:
+        if phrase in low:
+            return True
+    alnum = sum(1 for c in text if c.isalnum())
+    if alnum < 10:
+        return True
+    return False
+
+def ocr_openai_compatible(
+    image_bytes: bytes, mime_type: str, model: str,
+) -> Tuple[str, float]:
+    if not OPENAI_API_KEY:
+        raise OCRProviderError("OPENAI_API_KEY não configurado.", 502)
+    if not OPENAI_API_URL:
+        raise OCRProviderError("OPENAI_API_URL não configurado.", 502)
+
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    data_url = f"data:{mime_type};base64,{b64}"
+
+    prompt = (
+        "Você é um motor de OCR especializado em declarações de óbito brasileiras. "
+        "Extraia TODO o texto visível no documento, preservando a estrutura por linhas, "
+        "rótulos e ordem dos campos. Não resuma, não omita campos e não invente dados. "
+        "Retorne apenas o texto extraído, sem comentários."
+    )
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }
+        ],
+        "temperature": 0.0,
+        "max_tokens": 4000,
+    }
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        resp = requests.post(OPENAI_API_URL, headers=headers, json=payload, timeout=120)
+    except requests.RequestException as e:
+        raise OCRProviderError(f"Falha de comunicação com provedor OCR: {e}", 502)
+
+    if resp.status_code != 200:
+        raise OCRProviderError(
+            f"Provedor OCR retornou HTTP {resp.status_code}: {resp.text[:500]}", 502
+        )
+
+    try:
+        data = resp.json()
+    except Exception:
+        raise OCRProviderError("Resposta do provedor OCR não é JSON válido.", 502)
+
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except Exception:
+        raise OCRProviderError("Resposta do provedor OCR sem conteúdo esperado.", 502)
+
+    if not isinstance(content, str) or not content.strip():
+        raise OCRProviderError("Provedor OCR retornou conteúdo vazio.", 502)
+
+    if _detect_refusal(content):
+        raise OCRProviderError(
+            "Provedor OCR recusou processar a imagem ou retornou texto inválido.", 502
+        )
+
+    confidence = 0.9
+    try:
+        usage = data.get("usage", {})
+        if usage:
+            confidence = 0.92
+    except Exception:
+        pass
+
+    return content.strip(), confidence
+
+# ---------------------------------------------------------------------------
+# Endpoint POST /ocr
+# ---------------------------------------------------------------------------
 @app.post("/ocr")
-async def ocr(request: Request):
-    request_id = datetime.now().strftime("%Y%m%d%H%M%S%f")
-    start = datetime.now()
+async def ocr_endpoint(request: Request, authorization: Optional[str] = Header(None)):
+    _check_auth(authorization)
 
     try:
         body = await request.json()
-    except Exception as e:
-        logger.error("OCR %s: falha ao parsear body JSON: %s", request_id, str(e)[:200])
-        return JSONResponse(status_code=422, content={
-            "requestId": request_id,
-            "error": "INVALID_JSON",
-            "message": "Body nao e JSON valido: " + str(e)[:200]
+    except Exception:
+        return JSONResponse(status_code=400, content={
+            "code": "INVALID_JSON",
+            "message": "Corpo da requisição não é JSON válido.",
+            "requestId": None,
         })
 
-    logger.info("OCR %s: keys=%s, has_image=%s, image_len=%d, filename=%s",
-                request_id, list(body.keys()), "image" in body,
-                len(body.get("image","")) if isinstance(body.get("image"),str) else 0,
-                body.get("filename",""))
+    request_id = body.get("requestId") or body.get("request_id") or None
+    file_b64 = body.get("file")
+    mime_type = body.get("mimeType") or body.get("mime_type")
+    model = body.get("model") or OPENAI_MODEL_DEFAULT
+    file_name = body.get("fileName") or body.get("file_name") or ""
+    file_id = body.get("fileId") or body.get("file_id") or ""
 
-    if "image" not in body or not isinstance(body.get("image"), str) or not body["image"]:
+    if not file_b64:
+        return JSONResponse(status_code=400, content={
+            "code": "MISSING_FILE",
+            "message": "Campo 'file' (base64) é obrigatório.",
+            "requestId": request_id,
+        })
+    if not mime_type:
+        return JSONResponse(status_code=400, content={
+            "code": "MISSING_MIME_TYPE",
+            "message": "Campo 'mimeType' é obrigatório.",
+            "requestId": request_id,
+        })
+    if "pdf" in mime_type.lower() or (file_name and file_name.lower().endswith(".pdf")):
         return JSONResponse(status_code=422, content={
-            "requestId": request_id, "error": "INVALID_IMAGE",
-            "message": "Campo 'image' (string base64) obrigatorio"
+            "code": "PDF_NOT_SUPPORTED_IN_V1",
+            "message": "PDF não é suportado na versão 1. Envie imagem (PNG/JPG).",
+            "requestId": request_id,
         })
 
     try:
-        raw_text = _call_ocr_provider(body["image"], body.get("filename", "image.jpg"))
-        structured, erros, warns = parse_obito(raw_text)
-        score = structured.get("QUALIDADE_SCORE", 0)
-        status = structured.get("STATUS", "REVISAR")
-        processing_ms = int((datetime.now() - start).total_seconds() * 1000)
-
-        return JSONResponse(content={
+        file_bytes = base64.b64decode(file_b64, validate=False)
+    except Exception:
+        return JSONResponse(status_code=400, content={
+            "code": "INVALID_BASE64",
+            "message": "Não foi possível decodificar o base64 de 'file'.",
             "requestId": request_id,
-            "status": "processed",
-            "provider": "openai-compatible",
-            "confidence": 1.0,
-            "rawText": raw_text,
-            "text": "",
-            "structured": structured,
-            "validation": {
-                "ok": len(erros) == 0,
-                "errors": erros,
-                "warnings": warns,
-                "score": score,
-                "status": status
-            },
-            "warnings": ["%s ausente" % w for w in warns],
-            "processingTimeMs": processing_ms
-        })
-    except Exception as e:
-        logger.exception("Erro no OCR %s", request_id)
-        return JSONResponse(status_code=500, content={
-            "requestId": request_id, "error": "INTERNAL_ERROR",
-            "message": "Erro interno: " + str(e)[:500]
         })
 
-@app.on_event("startup")
-def startup():
-    logger.info("=" * 50)
-    logger.info("OCR API iniciando...")
-    logger.info("Modelo=%s, key=%s", OPENAI_MODEL_DEFAULT, bool(OPENAI_API_KEY))
-@app.post("/echo-request")
-async def echo_request(request: Request):
-    """Retorna exatamente o que o servidor recebeu — para diagnóstico."""
+    if len(file_bytes) > MAX_FILE_SIZE_BYTES:
+        return JSONResponse(status_code=413, content={
+            "code": "FILE_TOO_LARGE",
+            "message": f"Arquivo excede o limite de {MAX_FILE_SIZE_MB} MB.",
+            "requestId": request_id,
+        })
+
+    hash_arquivo = _sha256_bytes(file_bytes)
+
     try:
-        body = await request.json()
-        return JSONResponse(content={
-            "status": "recebido",
-            "keys": list(body.keys()),
-            "has_image": "image" in body,
-            "image_type": type(body.get("image", "")).__name__,
-            "image_len": len(body.get("image", "")) if isinstance(body.get("image"), str) else 0,
-            "image_prefix": (body.get("image", "")[:80] + "...") if isinstance(body.get("image"), str) else "",
-            "filename": body.get("filename", ""),
-            "content_type": request.headers.get("content-type", ""),
-            "content_length": request.headers.get("content-length", ""),
+        raw_text, confidence = ocr_openai_compatible(file_bytes, mime_type, model)
+    except OCRProviderError as e:
+        return JSONResponse(status_code=e.status_code, content={
+            "code": e.code, "message": str(e), "requestId": request_id,
         })
     except Exception as e:
-        return JSONResponse(status_code=422, content={
-            "status": "erro",
-            "erro": str(e)[:200]
-        })    logger.info("=" * 50)
-function testarEcho() {
-  // Reuse a mesma imagem do OCR
-  var fileId = "1BsSuzIRH2BJ8e6SFpZrjTkcZP50rItOt";
-  var file = DriveApp.getFileById(fileId);
-  var blob = file.getBlob();
-  var base64 = Utilities.base64Encode(blob.getBytes());
+        return JSONResponse(status_code=502, content={
+            "code": "OCR_PROVIDER_ERROR",
+            "message": f"Erro inesperado no provedor OCR: {e}",
+            "requestId": request_id,
+        })
 
-  var payload = {
-    "image": base64,
-    "filename": "img61.jpg"
-  };
+    try:
+        structured = parse_obito(raw_text)
+    except Exception as e:
+        structured = {k: "" for k in HEADER}
+        structured["ERROS"] = f"Erro no parser: {e}"
 
-  var options = {
-    "method": "post",
-    "contentType": "application/json",
-    "payload": JSON.stringify(payload),
-    "muteHttpExceptions": true
-  };
+    structured["HASH_ARQUIVO"] = hash_arquivo
+    structured["HASH_CONTEUDO"] = _sha256_text(raw_text)
 
-  var response = UrlFetchApp.fetch("https://seu-app.onrender.com/echo-request", options);
-  Logger.log("Status: " + response.getResponseCode());
-  Logger.log("Body: " + response.getContentText());
-}
+    validation = validate_obito(structured)
+    warnings = validation.get("warnings", [])
+    if validation.get("errors"):
+        warnings.extend([f"ERRO: {e}" for e in validation["errors"]])
+
+    response = {
+        "text": raw_text,
+        "confidence": confidence,
+        "provider": "openai-compatible",
+        "requestId": request_id,
+        "warnings": warnings,
+        "rawText": raw_text,
+        "structured": structured,
+        "validation": validation,
+        "headerOrder": HEADER,
+    }
+    return JSONResponse(status_code=200, content=response)
+
+# ---------------------------------------------------------------------------
+# Tratamento de erros global
+# ---------------------------------------------------------------------------
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+    if "code" not in detail:
+        detail["code"] = "HTTP_ERROR"
+    if "requestId" not in detail:
+        detail["requestId"] = None
+    return JSONResponse(status_code=exc.status_code, content=detail)
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=False)
