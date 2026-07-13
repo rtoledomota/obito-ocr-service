@@ -574,13 +574,14 @@ def _save_processed_ids(ids: set):
         for fid in ids:
             f.write(fid + "\n")
 
-def run_batch(folder_id: str = None, force_reprocess: bool = False) -> dict:
+def run_batch(folder_id: str = None, force_reprocess: bool = False, limit: int = 0) -> dict:
     """
     Pipeline completo do lote:
     1. Lista imagens não processadas na pasta
     2. OCR cada uma
     3. Escreve na planilha
     4. Marca como processadas
+    Se limit > 0, processa no máximo esse número de imagens.
     """
     fid = folder_id or DRIVE_FOLDER_ID
     if not fid:
@@ -588,10 +589,10 @@ def run_batch(folder_id: str = None, force_reprocess: bool = False) -> dict:
 
     processed_ids = set() if force_reprocess else _load_processed_ids()
     images = _list_images_in_folder(fid)
-    
+
     # Filtra apenas não processadas
     new_images = [img for img in images if img["id"] not in processed_ids]
-    
+
     if not new_images:
         return {
             "success": True,
@@ -601,21 +602,24 @@ def run_batch(folder_id: str = None, force_reprocess: bool = False) -> dict:
             "message": "Nenhuma imagem nova encontrada.",
         }
 
+    # Aplica limit se especificado
+    if limit > 0:
+        new_images = new_images[:limit]
+
     sheet_id = _ensure_sheet_exists()
-    rows = []
     success_ids = set()
     fail_ids = set()
+    last_error = None
 
     for img in new_images:
-        row = _process_single_image(img["id"], img["name"])
-        rows.append(row)
-        if row["STATUS"] in ("ERRO_DRIVE", "ERRO_OCR"):
-            fail_ids.add(img["id"])
-        else:
+        try:
+            row = _process_single_image(img["id"], img["name"])
+            _append_rows_to_sheet(sheet_id, [row])
             success_ids.add(img["id"])
-
-    if rows:
-        _append_rows_to_sheet(sheet_id, rows)
+        except Exception as e:
+            fail_ids.add(img["id"])
+            last_error = str(e)
+            print(f"Falha ao processar {img['name']}: {e}")
 
     _save_processed_ids(success_ids)
 
@@ -1198,7 +1202,7 @@ async def batch_process(request: Request, authorization: Optional[str] = Header(
     if AUTO_PROCESS_ENABLED and not folder_id:
         folder_id = DRIVE_FOLDER_ID
 
-    result = run_batch(folder_id=folder_id, force_reprocess=force)
+    # Suporta limit via query parameter: /batch/process?limit=1 limit = int(request.query_params.get("limit", 0)) if hasattr(request, 'query_params') else 0 result = run_batch(folder_id=folder_id, force_reprocess=force, limit=limit)
     result["requestId"] = request_id
     status_code = 200 if result.get("success") else 500
     return JSONResponse(status_code=status_code, content=result)
