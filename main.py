@@ -1,15 +1,12 @@
 import os
 import re
-import json
 import logging
 from datetime import datetime, timezone
-from typing import Optional
 
 import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 
 # ── Config ─────────────────────────────────────────────────────────────
 logger = logging.getLogger("ocr-api")
@@ -29,11 +26,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# ── Pydantic Models (request apenas) ────────────────────────────────────
-class OCRRequest(BaseModel):
-    image: str
-    filename: Optional[str] = "image.jpg"
 
 # ── Regex Patterns ─────────────────────────────────────────────────────
 DATE_RE = re.compile(
@@ -80,17 +72,6 @@ def _normalize_date(day, month, year, forced_year=None):
     if len(y) == 2:
         y = "20" + y if int(y) < 50 else "19" + y
     return "%02d/%02d/%s" % (d, m, y)
-
-def _normalize_uf(raw):
-    if not raw:
-        return ""
-    raw = raw.strip().upper()
-    if raw in UF_VALIDAS:
-        return raw
-    for uf in UF_VALIDAS:
-        if uf in raw:
-            return uf
-    return ""
 
 def _find_label_index(lines, labels):
     for i, line in enumerate(lines):
@@ -440,12 +421,32 @@ def health():
     }
 
 @app.post("/ocr")
-def ocr(request: OCRRequest):
+def ocr(request: dict = Body(...)):
     request_id = datetime.now().strftime("%Y%m%d%H%M%S%f")
     start_time = datetime.now()
 
+    has_image = "image" in request
+    image_val = request.get("image")
+    image_len = len(image_val) if isinstance(image_val, str) else 0
+    filename = request.get("filename", "image.jpg")
+    keys_enviadas = list(request.keys())
+
+    logger.info("OCR request %s: has_image=%s, image_len=%d, filename=%s, keys=%s",
+                 request_id, has_image, image_len, filename, keys_enviadas)
+
+    if not has_image or not image_val or not isinstance(image_val, str):
+        logger.error("OCR request %s: campo 'image' invalido ou ausente", request_id)
+        return JSONResponse(
+            status_code=422,
+            content={
+                "requestId": request_id,
+                "error": "VALIDATION_ERROR",
+                "message": "Campo 'image' (string base64) e obrigatorio"
+            }
+        )
+
     try:
-        raw_text = _call_ocr_provider(request.image, request.filename)
+        raw_text = _call_ocr_provider(image_val, filename)
         structured = parse_obito(raw_text)
 
         validation_errors = structured.pop("VALIDATION_ERRORS", [])
@@ -474,13 +475,13 @@ def ocr(request: OCRRequest):
             "processingTimeMs": processing_ms
         }
 
-        logger.info("OCR request %s: status=%s, erros=%s",
-                     request_id, status, validation_errors)
+        logger.info("OCR request %s: status=%s, erros=%s, warnings=%s",
+                     request_id, status, validation_errors, validation_warnings)
 
         return JSONResponse(content=response_data, status_code=200)
 
     except requests.exceptions.Timeout:
-        logger.error("Timeout do provider OCR")
+        logger.error("OCR request %s: timeout do provider OCR", request_id)
         return JSONResponse(
             status_code=504,
             content={
@@ -490,7 +491,7 @@ def ocr(request: OCRRequest):
             }
         )
     except requests.exceptions.RequestException as e:
-        logger.error("Erro no provider OCR: %s", str(e)[:200])
+        logger.error("OCR request %s: erro no provider: %s", request_id, str(e)[:200])
         return JSONResponse(
             status_code=502,
             content={
@@ -500,7 +501,7 @@ def ocr(request: OCRRequest):
             }
         )
     except ValueError as e:
-        logger.error("Falha no provider OCR: %s", str(e)[:200])
+        logger.error("OCR request %s: falha no OCR: %s", request_id, str(e)[:200])
         return JSONResponse(
             status_code=500,
             content={
@@ -510,13 +511,13 @@ def ocr(request: OCRRequest):
             }
         )
     except Exception as e:
-        logger.exception("Erro interno no OCR")
+        logger.exception("OCR request %s: erro interno", request_id)
         return JSONResponse(
             status_code=500,
             content={
                 "requestId": request_id,
                 "error": "INTERNAL_ERROR",
-                "message": "Erro interno: " + str(e)[:200]
+                "message": "Erro interno: " + str(e)[:500]
             }
         )
 
