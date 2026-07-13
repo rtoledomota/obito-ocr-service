@@ -1202,8 +1202,10 @@ async def batch_process(request: Request, authorization: Optional[str] = Header(
     if AUTO_PROCESS_ENABLED and not folder_id:
         folder_id = DRIVE_FOLDER_ID
 
-    # Suporta limit via query parameter: /batch/process?limit=1 limit = int(request.query_params.get("limit", 0)) if hasattr(request, 'query_params') else 0 result = run_batch(folder_id=folder_id, force_reprocess=force, limit=limit)
-    result["requestId"] = request_id
+    # Suporta limit via query parameter: /batch/process?limit=1
+    limit = int(request.query_params.get("limit", 0))
+    result = run_batch(folder_id=folder_id, force_reprocess=force, limit=limit)
+  result["requestId"] = request_id
     status_code = 200 if result.get("success") else 500
     return JSONResponse(status_code=status_code, content=result)
 
