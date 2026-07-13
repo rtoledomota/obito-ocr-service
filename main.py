@@ -1,4 +1,4 @@
-# main.py reescrito
+# main.py consolidado
 
 import base64
 import hashlib
@@ -10,33 +10,23 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 import uvicorn
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 
-
 # ---------------------------------------------------------------------------
-# Configuracao por ambiente
+# Configuração por ambiente
 # ---------------------------------------------------------------------------
-
-AUTH_TOKEN = os.getenv("AUTH_TOKEN", "")
-OPENAI_API_URL = os.getenv("OPENAI_API_URL", "")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL_DEFAULT = os.getenv("OPENAI_MODEL_DEFAULT", "gpt-4o")
-MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "10"))
-PORT = int(os.getenv("PORT", "8000"))
-
+AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "")
+OPENAI_API_URL = os.environ.get("OPENAI_API_URL", "")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_MODEL_DEFAULT = os.environ.get("OPENAI_MODEL_DEFAULT", "gpt-4o-mini")
+MAX_FILE_SIZE_MB = int(os.environ.get("MAX_FILE_SIZE_MB", "10"))
+PORT = int(os.environ.get("PORT", "8080"))
 
 # ---------------------------------------------------------------------------
 # Constantes e regex
 # ---------------------------------------------------------------------------
-
-ALLOWED_MIME = {
-    "image/png",
-    "image/jpeg",
-    "image/jpg",
-    "image/webp",
-    "image/gif",
-}
+ALLOWED_MIME = {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"}
 
 MIME_TO_DATA_URL_PREFIX = {
     "image/png": "data:image/png;base64,",
@@ -47,12 +37,21 @@ MIME_TO_DATA_URL_PREFIX = {
 }
 
 REFUSAL_PHRASES = [
-    "I can't help with that",
-    "I cannot help with that",
-    "I'm not able to help",
-    "I am not able to help",
-    "I can't assist with that",
-    "I cannot assist with that",
+    "não posso ajudar",
+    "nao posso ajudar",
+    "não posso processar",
+    "nao posso processar",
+    "não posso fornecer",
+    "nao posso fornecer",
+    "não posso realizar",
+    "nao posso realizar",
+    "i'm sorry",
+    "i am sorry",
+    "sorry, i can",
+    "i cannot",
+    "i can't",
+    "unable to",
+    "as an ai",
 ]
 
 HEADER = [
@@ -66,23 +65,26 @@ HEADER = [
     "UF_OBITO",
     "CEP",
     "CAUSA_MORTE",
-    "CAUSA_MORTE_2",
-    "CAUSA_MORTE_3",
-    "CAUSA_MORTE_4",
-    "CAUSA_MORTE_5",
     "CID_MORTE",
-    "CID_MORTE_2",
-    "CID_MORTE_3",
-    "CID_MORTE_4",
-    "CID_MORTE_5",
     "CODIGO_CAUSA_MORTE",
-    "CODIGO_CAUSA_MORTE_2",
-    "CODIGO_CAUSA_MORTE_3",
-    "CODIGO_CAUSA_MORTE_4",
-    "CODIGO_CAUSA_MORTE_5",
+    "CAUSA_MORTE2",
+    "CID_MORTE2",
+    "CODIGO_CAUSA_MORTE2",
+    "CAUSA_MORTE3",
+    "CID_MORTE3",
+    "CODIGO_CAUSA_MORTE3",
+    "CAUSA_MORTE4",
+    "CID_MORTE4",
+    "CODIGO_CAUSA_MORTE4",
+    "CAUSA_MORTE5",
+    "CID_MORTE5",
+    "CODIGO_CAUSA_MORTE5",
     "CAUSA_BASICA",
     "CID_BASICA",
     "CODIGO_CAUSA_BASICA",
+    "STATUS",
+    "QUALIDADE_SCORE",
+    "ERROS",
 ]
 
 UF_VALIDAS = {
@@ -92,55 +94,50 @@ UF_VALIDAS = {
 }
 
 MESES_EXTENSO = {
-    "janeiro": "01",
-    "fevereiro": "02",
-    "marco": "03",
-    "abril": "04",
-    "maio": "05",
-    "junho": "06",
-    "julho": "07",
-    "agosto": "08",
-    "setembro": "09",
-    "outubro": "10",
-    "novembro": "11",
-    "dezembro": "12",
+    "janeiro": "01", "fevereiro": "02", "marco": "03", "março": "03",
+    "abril": "04", "maio": "05", "junho": "06", "julho": "07",
+    "agosto": "08", "setembro": "09", "outubro": "10", "novembro": "11",
+    "dezembro": "12", "jan": "01", "fev": "02", "mar": "03", "abr": "04",
+    "mai": "05", "jun": "06", "jul": "07", "ago": "08", "set": "09",
+    "out": "10", "nov": "11", "dez": "12",
 }
 
-STOP_CAUSAS = {
-    "causa da morte",
-    "causas da morte",
-    "causa do obito",
-    "causas do obito",
-    "parte i",
+STOP_CAUSAS = [
     "parte ii",
-    "causa basica",
-    "cid",
-    "cid basica",
-    "codigo da causa",
-    "codigo da causa basica",
-}
+    "código", "codigo", "registro", "ufs", "cartório", "cartorio",
+    "declarante", "médico", "medico", "atestante",
+]
 
+BLOCKED_LEGENDS = [
+    "outras condições significativas que contribuíram para a morte",
+    "outras condições significativas que contribuiram para a morte",
+    "porém, na cadeia acima",
+    "porem, na cadeia acima",
+]
+
+# Aceita separadores: espaço, '/', '-', '.', '|'; mês por extenso ou numérico.
 DATE_RE = re.compile(
-    r"(\d{1,2})[\s/\-\.]+(?:de\s+)?([A-Za-zç]+|[0-9]{1,2})[\s/\-\.]*(?:de\s+)?(\d{2,4})"
+    r'\b(\d{1,2})\s*[ /\-.|]\s*'
+    r'([A-Za-zÀ-ÿ]+|\d{1,2})\s*[ /\-.|]\s*'
+    r'(\d{2,4})\b',
+    re.IGNORECASE,
 )
-TIME_RE = re.compile(r"(\d{1,2}):(\d{2})(?::(\d{2}))?")
-CID_RE = re.compile(r"\b([A-Z]\d{2}(?:\.\d{1,3})?)\b")
-CEP_RE = re.compile(r"\b(\d{5})\-(\d{3})\b")
-DURACAO_RE = re.compile(r"\b\d+\s*(?:minuto|minutos|hora|horas|dia|dias|semana|semanas|mes|meses|ano|anos)\b", re.IGNORECASE)
-NUMERO_RE = re.compile(r"^[\d\s\.,/\-:]+$")
 
+TIME_RE = re.compile(r'\b(\d{1,2})[:hH](\d{2})(?:[:mM](\d{2}))?\b')
+CID_RE = re.compile(
+    r'\b[A-TV-Z]\d{2}(?:\.\d)?(?:-[A-TV-Z]\d{2}(?:\.\d)?)?\b',
+    re.IGNORECASE,
+)
+CEP_RE = re.compile(r'\b\d{5}-?\d{3}\b')
 
 # ---------------------------------------------------------------------------
-# App
+# App FastAPI
 # ---------------------------------------------------------------------------
-
-app = FastAPI(title="OCR Declaracao de Obito", version="1.0.0")
-
+app = FastAPI(title="OCR Declaração de Óbito", version="1.0.0")
 
 # ---------------------------------------------------------------------------
 # Helpers de erro
 # ---------------------------------------------------------------------------
-
 def _internal_error(request_id: str, message: str) -> JSONResponse:
     return JSONResponse(
         status_code=500,
@@ -169,527 +166,467 @@ def _unauthorized(request_id: str) -> JSONResponse:
         content={
             "requestId": request_id,
             "error": "UNAUTHORIZED",
-            "message": "Token de autenticacao invalido ou ausente.",
+            "message": "Token de autenticação inválido ou ausente.",
         },
     )
-
 
 # ---------------------------------------------------------------------------
 # Helpers de texto
 # ---------------------------------------------------------------------------
+def _remove_accents(text: str) -> str:
+    if not text:
+        return ""
+    trans = str.maketrans(
+        "áàâãäéèêëíìîïóòôõöúùûüçÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇ",
+        "aaaaaeeeeiiiiooooouuuucAAAAAEEEEIIIIOOOOOUUUUC",
+    )
+    return text.translate(trans)
+
 
 def _normalize_text(text: str) -> str:
     if not text:
         return ""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    text = text.replace("\u00a0", " ")
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
 
 def _normalize_line(line: str) -> str:
     if not line:
         return ""
-    line = line.strip()
-    line = re.sub(r"\s+", " ", line)
-    return line
+    return re.sub(r'\s+', ' ', line).strip()
 
 
-def _remove_accents(text: str) -> str:
-    replacements = {
-        "á": "a", "à": "a", "â": "a", "ã": "a", "ä": "a",
-        "é": "e", "è": "e", "ê": "e", "ë": "e",
-        "í": "i", "ì": "i", "î": "i", "ï": "i",
-        "ó": "o", "ò": "o", "ô": "o", "õ": "o", "ö": "o",
-        "ú": "u", "ù": "u", "û": "u", "ü": "u",
-        "ç": "c", "ñ": "n",
-        "Á": "A", "À": "A", "Â": "A", "Ã": "A", "Ä": "A",
-        "É": "E", "È": "E", "Ê": "E", "Ë": "E",
-        "Í": "I", "Ì": "I", "Î": "I", "Ï": "I",
-        "Ó": "O", "Ò": "O", "Ô": "O", "Õ": "O", "Ö": "O",
-        "Ú": "U", "Ù": "U", "Û": "U", "Ü": "U",
-        "Ç": "C", "Ñ": "N",
-    }
-    for k, v in replacements.items():
-        text = text.replace(k, v)
-    return text
+def _normalize_label(label: str) -> str:
+    if not label:
+        return ""
+    label = _remove_accents(label)
+    label = label.lower()
+    label = re.sub(r'[^a-z0-9 ]', ' ', label)
+    label = re.sub(r'\s+', ' ', label).strip()
+    return label
 
 
-def _normalize_label(text: str) -> str:
-    text = _remove_accents(text.lower())
-    text = re.sub(r"[^a-z0-9 ]+", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
-def _looks_like_label(line: str) -> bool:
-    """Conservador: so considera label se terminar com ':' ou for rótulo curto conhecido."""
-    if not line:
+def _looks_like_label(text: str) -> bool:
+    """Heurística conservadora para identificar rótulos de formulário."""\n    if not text:
         return False
-    normalized = _normalize_label(line)
-    if not normalized:
+    low = text.lower().strip()
+    if len(low) > 80:
         return False
-    if line.strip().endswith(":"):
+    if CID_RE.fullmatch(text.strip()):
+        return False
+    if re.fullmatch(r'[\d\s/\-.|:]+', text):
+        return False
+    if re.fullmatch(r'\d{1,2}\s*[/:hH]\s*\d{2}(?:\s*[:mM]\s*\d{2})?', text):
+        return False
+    if low.endswith(":") or low.endswith("."):
         return True
-    # Rotulos curtos sem valor aparente
-    if len(normalized) <= 40 and normalized in STOP_CAUSAS:
+    if re.match(r'^\s*(?:\[\d+\]|\(\d+\)|\d+[\)\.]|\d+\s+)', text):
         return True
     return False
 
 
-def _is_numeric_line(line: str) -> bool:
-    if not line:
+def _is_numeric_line(text: str) -> bool:
+    if not text:
         return False
-    return bool(NUMERO_RE.match(line.strip()))
+    return bool(re.fullmatch(r'[\d\s/\-.|]+', text))
 
 
-def _is_duration_line(line: str) -> bool:
-    if not line:
+def _is_duration(text: str) -> bool:
+    if not text:
         return False
-    return bool(DURACAO_RE.search(line))
+    return bool(re.fullmatch(r'\d+\s*(?:ano|anos|mes|meses|dia|dias|hora|horas|min|minuto|minutos)\b.*', text, re.IGNORECASE))
 
 
-def _is_cid_only(line: str) -> bool:
-    if not line:
+def _is_cid_only(text: str) -> bool:
+    if not text:
         return False
-    stripped = line.strip()
-    if not stripped:
-        return False
-    return bool(CID_RE.fullmatch(stripped)) or bool(re.fullmatch(r"[A-Z]\d{2}(?:\.\d{1,3})?", stripped))
-
-
-def _is_aux_line(line: str) -> bool:
-    """Linhas auxiliares que nao devem ser usadas como valor de campo."""
-    if not line:
-        return True
-    normalized = _normalize_label(line)
-    if normalized in STOP_CAUSAS:
-        return True
-    if _looks_like_label(line):
-        return True
-    if _is_numeric_line(line):
-        return True
-    if _is_duration_line(line):
-        return True
-    if _is_cid_only(line):
-        return True
-    return False
-
+    return bool(CID_RE.fullmatch(text.strip()))
 
 # ---------------------------------------------------------------------------
-# Helpers de extracao
+# Helpers de extração
 # ---------------------------------------------------------------------------
-
-def _split_lines(raw_text: str) -> List[str]:
-    return [_normalize_line(l) for l in _normalize_text(raw_text).split("\n")]
-
-
-# BLOCO UNICO CORRIGIDO
-
-def _find_label_index(lines: List[str], label: str) -> int:
-    # Comparacao exata ou por prefixo do rotulo normalizado.
-    # Nao usa busca ampla ("in") para evitar falsos positivos.
-    target = _normalize_text(label).strip()
-    if not target:
-        return -1
-    for i, line in enumerate(lines):
-        norm = _normalize_text(line).strip()
-        if not norm:
+def _find_label_index(lines: List[str], labels: List[str], start: int = 0) -> int:
+    """Localiza índice da linha que contém um rótulo, removendo prefixos numéricos típicos."""
+    for i in range(start, len(lines)):
+        raw = lines[i] or ""
+        cleaned = re.sub(r'^\s*(?:\[\d+\]|\(\d+\)|\d+[\)\.]|\d+\s+)', '', raw)
+        norm_line = _normalize_label(cleaned)
+        if not norm_line:
             continue
-        if norm == target or norm.startswith(target):
-            return i
+        for label in labels:
+            norm_label = _normalize_label(label)
+            if not norm_label:
+                continue
+            if norm_line == norm_label or norm_line.startswith(norm_label):
+                return i
     return -1
 
 
-def _extract_text_after_label(lines: List[str], labels: List[str], window: int = 6) -> str:
-    # Localiza o primeiro rotulo valido e extrai o texto seguinte.
-    base_idx = -1
-    for label in labels:
-        idx = _find_label_index(lines, label)
-        if idx != -1:
-            base_idx = idx
-            break
-    if base_idx == -1:
-        return ""
+def _extract_text_after_label(
+    lines: List[str],
+    labels: List[str],
+    start: int = 0,
+    max_lines: int = 6,
+) -> Tuple[int, str]:
+    """Extrai valor após rótulo. Aceita 'label: valor' na mesma linha ou valor nas próximas linhas."""
+    idx = _find_label_index(lines, labels, start)
+    if idx < 0:
+        return -1, ""
 
-    def _aceitavel(cand: str) -> bool:
-        cand = cand.strip()
-        if not cand:
-            return False
-        if _looks_like_label(cand):
-            return False
-        if _is_numeric_line(cand):
-            return False
-        if _is_duration_token(cand):
-            return False
-        if _is_cid_only(cand):
-            return False
-        if _is_aux_only(cand):
-            return False
-        if not any(c.isalpha() for c in cand):
-            return False
-        return True
+    line = _normalize_line(lines[idx])
+    # Tenta valor após ':' na mesma linha
+    if ":" in line:
+        after = line.split(":", 1)[1].strip()
+        if after and not _looks_like_label(after) and not _is_numeric_line(after) and not _is_cid_only(after):
+            return idx, after
 
-    # Aceita valor na mesma linha apos ':'.
-    base_line = lines[base_idx]
-    if ":" in base_line:
-        after = base_line.split(":", 1)[1].strip()
-        if _aceitavel(after):
-            text = after
-            if base_idx + 1 < len(lines):
-                nxt = lines[base_idx + 1].strip()
-                if _aceitavel(nxt) and not _looks_like_label(nxt):
-                    text = (text + " " + nxt).strip()
-            return text
-
-    # Caso contrario, olha nas proximas linhas dentro da janela.
-    for j in range(base_idx + 1, min(base_idx + 1 + window, len(lines))):
-        cand = lines[j].strip()
-        if not _aceitavel(cand):
+    # Procura nas próximas linhas
+    for j in range(idx + 1, min(idx + 1 + max_lines, len(lines))):
+        candidate = _normalize_line(lines[j])
+        if not candidate:
             continue
-        text = cand
-        if j + 1 < len(lines):
-            nxt = lines[j + 1].strip()
-            if _aceitavel(nxt) and not _looks_like_label(nxt):
-                text = (text + " " + nxt).strip()
-        return text
-    return ""
-
-
-def _extract_date_after_label(lines: List[str], labels: List[str], window: int = 6, forced_year: str = "") -> str:
-    # Unica definicao de extracao de data. Retorna sempre DD/MM/AAAA.
-    base_idx = -1
-    for label in labels:
-        idx = _find_label_index(lines, label)
-        if idx != -1:
-            base_idx = idx
-            break
-    if base_idx == -1:
-        return ""
-
-    for j in range(base_idx, min(base_idx + 1 + window, len(lines))):
-        line = lines[j]
-        m = DATE_RE.search(line)
-        if not m:
+        if _looks_like_label(candidate):
             continue
-        digits = re.findall(r"\d+", m.group(0))
-        if len(digits) < 2:
+        if _is_numeric_line(candidate):
             continue
-        day = digits[0].zfill(2)
-        month = digits[1].zfill(2)
-        if len(digits) >= 3:
-            year = digits[2]
+        if _is_duration(candidate):
+            continue
+        if _is_cid_only(candidate):
+            continue
+        return idx, candidate
+    return idx, ""
+
+
+def _normalize_date(day: str, month: str, year: str, forced_year: Optional[str] = None) -> str:
+    """Normaliza data para DD/MM/AAAA. forced_year sobrescreve o ano quando informado."""
+    try:
+        d = int(day)
+        if d < 1 or d > 31:
+            return ""
+        m_raw = month.strip().lower()
+        if m_raw.isdigit():
+            m = int(m_raw)
         else:
-            year = ""
+            m_clean = _remove_accents(m_raw).strip()
+            m = int(MESES_EXTENSO.get(m_clean, 0))
+        if m < 1 or m > 12:
+            return ""
+
         if forced_year:
-            year = str(forced_year).strip()
-        if not year:
-            continue
-        year = year.zfill(4)
-        return f"{day}/{month}/{year}"
-    return ""
+            y = int(forced_year)
+        else:
+            y = int(year)
+            if y < 100:
+                y += 2000 if y <= 50 else 1900
+        if y < 1900 or y > 2100:
+            return ""
 
-
-def _extract_time_after_label(lines: List[str], labels: List[str], window: int = 4) -> str:
-    # Retorna HH:MM ou HH:MM:SS conforme o match.
-    base_idx = -1
-    for label in labels:
-        idx = _find_label_index(lines, label)
-        if idx != -1:
-            base_idx = idx
-            break
-    if base_idx == -1:
+        return f"{d:02d}/{m:02d}/{y:04d}"
+    except Exception:
         return ""
 
-    for j in range(base_idx, min(base_idx + 1 + window, len(lines))):
-        line = lines[j]
-        m = TIME_RE.search(line)
-        if not m:
-            continue
-        matched = m.group(0).strip()
-        digits = re.findall(r"\d+", matched)
-        if len(digits) < 2:
-            continue
-        hh = digits[0].zfill(2)
-        mm = digits[1].zfill(2)
-        if len(digits) >= 3:
-            ss = digits[2].zfill(2)
-            return f"{hh}:{mm}:{ss}"
-        return f"{hh}:{mm}"
-    return ""
 
-
-def _extract_uf_near(lines: List[str], idx: int) -> str:
-    # Busca apenas tokens de 2 letras nas proximas 6 linhas.
-    # Retorna somente se for sigla UF valida. Nunca retorna frase inteira.
+def _extract_date_after_label(
+    lines: List[str],
+    labels: List[str],
+    start: int = 0,
+    forced_year: Optional[str] = None,
+) -> str:
+    """Procura data na mesma linha do rótulo, na linha seguinte e nas próximas linhas."""
+    idx = _find_label_index(lines, labels, start)
     if idx < 0:
         return ""
-    for j in range(idx, min(idx + 7, len(lines))):
-        cand = lines[j].strip().upper()
-        if not cand:
+
+    search_lines = [lines[i] for i in range(idx, min(idx + 4, len(lines)))]
+    for line in search_lines:
+        if not line:
             continue
-        tokens = re.split(r"[\s,;:/\\-]+", cand)
+        match = DATE_RE.search(line)
+        if match:
+            return _normalize_date(match.group(1), match.group(2), match.group(3), forced_year)
+    return ""
+
+
+def _extract_time_after_label(
+    lines: List[str],
+    labels: List[str],
+    start: int = 0,
+) -> str:
+    """Procura hora na mesma linha do rótulo, na linha seguinte e nas próximas linhas."""
+    idx = _find_label_index(lines, labels, start)
+    if idx < 0:
+        return ""
+
+    search_lines = [lines[i] for i in range(idx, min(idx + 4, len(lines)))]
+    for line in search_lines:
+        if not line:
+            continue
+        match = TIME_RE.search(line)
+        if match:
+            hh = int(match.group(1))
+            mm = int(match.group(2))
+            ss = match.group(3)
+            if 0 <= hh <= 23 and 0 <= mm <= 59:
+                if ss:
+                    return f"{hh:02d}:{mm:02d}:{int(ss):02d}"
+                return f"{hh:02d}:{mm:02d}"
+    return ""
+
+
+def _extract_uf_near(lines: List[str], labels: List[str], start: int = 0) -> str:
+    """Retorna somente token de 2 letras válido em UF_VALIDAS próximo ao rótulo."""
+    idx = _find_label_index(lines, labels, start)
+    if idx < 0:
+        return ""
+
+    search_lines = [lines[i] for i in range(idx, min(idx + 5, len(lines)))]
+    for line in search_lines:
+        if not line:
+            continue
+        tokens = re.findall(r'\b[A-Za-z]{2}\b', line)
         for tok in tokens:
-            tok = tok.strip()
-            if len(tok) == 2 and tok in UF_VALIDAS:
-                return tok
+            up = tok.upper()
+            if up in UF_VALIDAS:
+                return up
+    return ""
+
+
+def _extract_cep_near(lines: List[str], labels: List[str], start: int = 0) -> str:
+    idx = _find_label_index(lines, labels, start)
+    if idx < 0:
+        return ""
+    search_lines = [lines[i] for i in range(idx, min(idx + 5, len(lines)))]
+    for line in search_lines:
+        if not line:
+            continue
+        match = CEP_RE.search(line)
+        if match:
+            cep = match.group(0)
+            if "-" not in cep:
+                cep = f"{cep[:5]}-{cep[5:]}"
+            return cep
     return ""
 
 
 def _extract_causas(lines: List[str]) -> List[Dict[str, str]]:
-    # Inicia na linha apos 'causas da morte'.
-    start = _find_label_index(lines, "causas da morte")
-    if start == -1:
-        start = _find_label_index(lines, "causa da morte")
-    if start == -1:
+    """Extrai causas da morte. Inicia apenas em marcadores reais e para em Parte II/áreas administrativas."""
+    start_markers = ["causas da morte", "causa da morte", "parte i"]
+    stop_markers = ["parte ii"]
+    admin_markers = STOP_CAUSAS
+
+    start_idx = -1
+    for i, line in enumerate(lines):
+        low = (line or "").lower()
+        if any(m in low for m in start_markers):
+            start_idx = i
+            break
+    if start_idx < 0:
         return []
 
-    # Legendas explicitas que devem ser bloqueadas.
-    legendas_bloqueadas = [
-        "intervalo entre o início e a morte",
-        "intervalo entre o inicio e a morte",
-        "devido ou como consequência de",
-        "devido ou como consequencia de",
-        "parte i",
-        "parte ii",
-        "cid",
-        "meses dias horas minutos ignorado",
-    ]
+    results: List[Dict[str, str]] = []
+    for line in lines[start_idx + 1:]:
+        text = (line or "").strip()
+        if not text:
+            continue
+        low = text.lower()
 
-    def _e_legenda(low: str) -> bool:
-        for leg in legendas_bloqueadas:
-            if low == leg or low.startswith(leg) or leg in low:
-                return True
-        return False
-
-    def _parar(low: str) -> bool:
-        for stop in STOP_CAUSAS:
-            stop_low = stop.lower().strip()
-            if not stop_low:
-                continue
-            if low == stop_low or low.startswith(stop_low) or stop_low in low:
-                return True
-        return False
-
-    causas: List[Dict[str, str]] = []
-    for j in range(start + 1, len(lines)):
-        line = lines[j].strip()
-        low = line.lower().strip()
-
-        if _parar(low):
+        if any(m in low for m in stop_markers):
             break
-        if _e_legenda(low):
-            continue
-        if not line:
-            continue
-        if _is_duration_token(line):
-            continue
-        if _is_cid_only(line):
-            continue
-        if _is_aux_only(line):
-            continue
-        if _looks_like_label(line):
-            continue
-        if not any(c.isalpha() for c in line):
-            continue
-
-        # Extrai o CID da linha original antes de limpar.
-        cid = _extract_cid(line)
-        text_without_cid = _strip_trailing_cid(line)
-        cleaned = _clean_causa_text(text_without_cid)
-        if cleaned:
-            causas.append({"text": cleaned, "cid": cid})
-    return causas
-
-
-def parse_obito(raw_text: str) -> Dict[str, Any]:
-    result = {k: "" for k in HEADER}
-    raw_lines = raw_text.splitlines()
-    lines = [_normalize_line(ln) for ln in raw_lines]
-
-    # Nomes.
-    result["NOME"] = _extract_text_after_label(lines, ["Nome do Falecido"])
-    result["NOME_MAE"] = _extract_text_after_label(lines, ["Nome da Mãe", "Nome da Mae"])
-    result["NOME_PAI"] = _extract_text_after_label(lines, ["Nome do Pai"])
-
-    # Datas.
-    result["NASCIMENTO"] = _extract_date_after_label(lines, ["Data de Nascimento"], window=6)
-    result["DATA_OBITO"] = _extract_date_after_label(lines, ["Data do óbito", "Data do obito"], window=6, forced_year="2026")
-
-    # Hora.
-    result["HORA_OBITO"] = _extract_time_after_label(lines, ["Hora"], window=4)
-
-    # Cidade do obito.
-    result["CIDADE_OBITO"] = _extract_text_after_label(lines, ["Município de ocorrência", "Municipio de ocorrencia"])
-
-    # UF do obito: primeiro a partir do indice do municipio.
-    mun_idx = -1
-    for label in ["Município de ocorrência", "Municipio de ocorrencia"]:
-        mun_idx = _find_label_index(lines, label)
-        if mun_idx != -1:
+        if any(m in low for m in admin_markers):
             break
-    uf = _extract_uf_near(lines, mun_idx) if mun_idx != -1 else ""
-    if not uf:
-        # Fallback seguro: token UF apenas na linha seguinte ao rotulo 'UF'.
-        uf_idx = _find_label_index(lines, "UF")
-        if uf_idx != -1 and uf_idx + 1 < len(lines):
-            uf = _extract_uf_near(lines, uf_idx + 1)
-    result["UF_OBITO"] = uf
+        if any(b in low for b in BLOCKED_LEGENDS):
+            continue
 
-    # CEP: primeiro match em lines.
-    for line in lines:
-        cep_match = CEP_RE.search(line)
-        if cep_match:
-            result["CEP"] = cep_match.group(0).strip()
-            break
+        cid_match = CID_RE.search(text)
+        cid = cid_match.group(0) if cid_match else ""
 
-    # Causas.
-    causas = _extract_causas(lines)
+        clean = CID_RE.sub('', text)
+        clean = re.sub(r'\s+', ' ', clean).strip(" .:;-")
 
-    causa_fields = ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_MORTE_4", "CAUSA_MORTE_5"]
-    cid_fields = ["CID_MORTE", "CID_MORTE_2", "CID_MORTE_3", "CID_MORTE_4", "CID_MORTE_5"]
-    cod_fields = ["CODIGO_CAUSA_MORTE", "CODIGO_CAUSA_MORTE_2", "CODIGO_CAUSA_MORTE_3", "CODIGO_CAUSA_MORTE_4", "CODIGO_CAUSA_MORTE_5"]
+        if not clean:
+            continue
+        if clean.isdigit():
+            continue
+        if re.fullmatch(r'[\d\s\.\-]+', clean):
+            continue
+        if re.fullmatch(r'[\dhms]+', clean, re.IGNORECASE) and len(clean) <= 8:
+            continue
+        if len(clean) <= 3:
+            continue
+        if _looks_like_label(clean):
+            continue
 
-    for i, causa in enumerate(causas[:5]):
-        result[causa_fields[i]] = causa["text"]
-        result[cid_fields[i]] = causa["cid"]
-        result[cod_fields[i]] = causa["cid"]
+        results.append({"text": clean, "cid": cid})
 
-    # CAUSA_BASICA = ultima causa valida; CID_BASICA alinhado a ela.
-    if causas:
-        ultima = causas[-1]
-        result["CAUSA_BASICA"] = ultima["text"]
-        result["CID_BASICA"] = ultima["cid"]
-    else:
-        result["CAUSA_BASICA"] = ""
-        result["CID_BASICA"] = ""
-
-    # Fallback ao raw_text somente se nenhuma causa valida tiver cid.
-    if not any(c["cid"] for c in causas):
-        fallback_cid = _extract_cid(raw_text)
-        if fallback_cid and not result["CID_BASICA"]:
-            result["CID_BASICA"] = fallback_cid
-
-    result["CODIGO_CAUSA_BASICA"] = result["CID_BASICA"]
-
-    return result
-
+    return results
 
 # ---------------------------------------------------------------------------
 # parse_obito
 # ---------------------------------------------------------------------------
-
 def parse_obito(raw_text: str) -> Dict[str, str]:
-    lines = _split_lines(raw_text)
-    result: Dict[str, str] = {field: "" for field in HEADER}
+    """Extrai campos estruturados da declaração de óbito a partir do texto OCR."""
+    text = _normalize_text(raw_text)
+    lines = [(_normalize_line(ln) if ln else "") for ln in text.split("\n")]
 
-    # NOME
-    value, _ = _extract_text_after_label(lines, ["Nome", "Nome do falecido", "Nome do falecido(a)"])
-    result["NOME"] = value
+    structured: Dict[str, str] = {field: "" for field in HEADER}
 
-    # NOME_MAE
-    value, _ = _extract_text_after_label(lines, ["Nome da mae", "Mae", "Nome da mae do falecido"])
-    result["NOME_MAE"] = value
+    # Nome do falecido
+    _, nome = _extract_text_after_label(
+        lines,
+        ["nome do falecido", "nome", "8 nome do falecido", "8 nome"],
+    )
+    structured["NOME"] = nome
 
-    # NOME_PAI
-    value, _ = _extract_text_after_label(lines, ["Nome do pai", "Pai", "Nome do pai do falecido"])
-    result["NOME_PAI"] = value
+    # Nome da mãe
+    _, nome_mae = _extract_text_after_label(
+        lines,
+        ["nome da mãe", "nome da mae", "mãe", "mae"],
+    )
+    structured["NOME_MAE"] = nome_mae
 
-    # NASCIMENTO (sem forcar ano)
-    result["NASCIMENTO"] = _extract_date_after_label(lines, ["Data de nascimento", "Nascimento", "Data de nascimento do falecido"])
+    # Nome do pai
+    _, nome_pai = _extract_text_after_label(
+        lines,
+        ["nome do pai", "pai"],
+    )
+    structured["NOME_PAI"] = nome_pai
 
-    # DATA_OBITO (forcar ano 2026)
-    result["DATA_OBITO"] = _extract_date_after_label(
-        lines, ["Data do obito", "Data do obito", "Data do falecimento"], forced_year="2026"
+    # Nascimento (sem forced_year)
+    structured["NASCIMENTO"] = _extract_date_after_label(
+        lines, ["data de nascimento", "nascimento", "data nascimento"]
     )
 
-    # HORA_OBITO
-    result["HORA_OBITO"] = _extract_time_after_label(lines, ["Hora do obito", "Hora do falecimento", "Hora"])
+    # Data do óbito (forced_year='2026')
+    structured["DATA_OBITO"] = _extract_date_after_label(
+        lines, ["data do óbito", "data do obito", "data óbito", "data obito", "4 data do óbito"],
+        forced_year="2026",
+    )
 
-    # CIDADE_OBITO
-    value, _ = _extract_text_after_label(lines, ["Municipio de ocorrencia", "Municipio de ocorrencia", "Local de ocorrencia", "Cidade do obito"])
-    result["CIDADE_OBITO"] = value
+    # Hora do óbito
+    structured["HORA_OBITO"] = _extract_time_after_label(
+        lines, ["hora", "hora do óbito", "hora do obito", "5 hora"]
+    )
 
-    # UF_OBITO
-    result["UF_OBITO"] = _extract_uf_near(lines, ["UF", "Estado", "UF do obito", "Unidade federativa"])
+    # Cidade do óbito
+    _, cidade = _extract_text_after_label(
+        lines, ["município do óbito", "municipio do obito", "cidade", "local do óbito", "local do obito"]
+    )
+    structured["CIDADE_OBITO"] = cidade
+
+    # UF do óbito (somente sigla válida)
+    structured["UF_OBITO"] = _extract_uf_near(
+        lines, ["uf", "estado", "uf do óbito", "uf do obito"]
+    )
 
     # CEP
-    result["CEP"] = _extract_cep_near(lines, ["CEP", "Codigo postal"])
+    structured["CEP"] = _extract_cep_near(lines, ["cep", "cep do óbito", "cep do obito"])
 
-    # Causas
+    # Causas da morte
     causas = _extract_causas(lines)
+    for i, causa in enumerate(causas[:5], start=1):
+        if i == 1:
+            structured["CAUSA_MORTE"] = causa["text"]
+            structured["CID_MORTE"] = causa["cid"]
+            structured["CODIGO_CAUSA_MORTE"] = causa["cid"]
+        else:
+            structured[f"CAUSA_MORTE{i}"] = causa["text"]
+            structured[f"CID_MORTE{i}"] = causa["cid"]
+            structured[f"CODIGO_CAUSA_MORTE{i}"] = causa["cid"]
 
-    causa_fields = ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_MORTE_4", "CAUSA_MORTE_5"]
-    cid_fields = ["CID_MORTE", "CID_MORTE_2", "CID_MORTE_3", "CID_MORTE_4", "CID_MORTE_5"]
-    codigo_fields = [
-        "CODIGO_CAUSA_MORTE",
-        "CODIGO_CAUSA_MORTE_2",
-        "CODIGO_CAUSA_MORTE_3",
-        "CODIGO_CAUSA_MORTE_4",
-        "CODIGO_CAUSA_MORTE_5",
-    ]
+    # Causa básica: alinha com a última causa válida que tenha CID
+    ultima_com_cid = ""
+    for causa in reversed(causas):
+        if causa.get("cid"):
+            ultima_com_cid = causa["cid"]
+            break
 
-    for i, causa in enumerate(causas[:5]):
-        result[causa_fields[i]] = causa.get("text", "")
-        result[cid_fields[i]] = causa.get("cid", "")
-        result[codigo_fields[i]] = causa.get("cid", "")
+    if ultima_com_cid:
+        structured["CID_BASICA"] = ultima_com_cid
+        structured["CODIGO_CAUSA_BASICA"] = ultima_com_cid
+        # Texto da causa básica: tenta rótulo específico, senão última causa válida
+        idx_basica, basica_texto = _extract_text_after_label(
+            lines, ["causa básica", "causa basica", "causa da morte básica", "causa basica de morte"]
+        )
+        if basica_texto and not _is_cid_only(basica_texto):
+            structured["CAUSA_BASICA"] = basica_texto
+        elif causas:
+            structured["CAUSA_BASICA"] = causas[-1]["text"]
+    else:
+        # Fallback: procura CID no raw_text inteiro
+        fallback_cid = CID_RE.search(text)
+        if fallback_cid:
+            structured["CID_BASICA"] = fallback_cid.group(0)
+            structured["CODIGO_CAUSA_BASICA"] = fallback_cid.group(0)
 
-    # CAUSA_BASICA / CID_BASICA / CODIGO_CAUSA_BASICA
-    causa_basica, cid_basica = _extract_causa_basica(lines, causas, raw_text)
-    result["CAUSA_BASICA"] = causa_basica
-    result["CID_BASICA"] = cid_basica
-    result["CODIGO_CAUSA_BASICA"] = cid_basica
+    # Campos de compatibilidade com Apps Script (preenchidos no pós-processamento)
+    structured["STATUS"] = ""
+    structured["QUALIDADE_SCORE"] = ""
+    structured["ERROS"] = ""
 
-    return result
-
+    return structured
 
 # ---------------------------------------------------------------------------
-# Validacao
+# Validação
 # ---------------------------------------------------------------------------
-
-def _compute_score(structured: Dict[str, str]) -> float:
-    if not structured:
-        return 0.0
-    critical = ["NOME", "NOME_MAE", "NASCIMENTO", "DATA_OBITO", "CIDADE_OBITO", "UF_OBITO", "CAUSA_BASICA"]
-    filled = sum(1 for f in critical if structured.get(f))
-    return round(filled / len(critical), 2)
+def _compute_score(structured: Dict[str, str]) -> int:
+    """Score simples e consistente baseado em campos principais."""
+    pesos = {
+        "NOME": 25,
+        "DATA_OBITO": 20,
+        "CAUSA_BASICA": 20,
+        "UF_OBITO": 10,
+        "NASCIMENTO": 10,
+        "NOME_MAE": 5,
+        "CIDADE_OBITO": 5,
+        "CID_BASICA": 5,
+    }
+    score = 0
+    for campo, peso in pesos.items():
+        valor = (structured.get(campo) or "").strip()
+        if valor:
+            score += peso
+    return score
 
 
 def validate_structured(structured: Dict[str, str]) -> Dict[str, Any]:
+    """Valida campos estruturados e retorna objeto de validação completo."""
     errors: List[str] = []
     warnings: List[str] = []
 
-    if not structured.get("NOME"):
-        errors.append("NOME ausente.")
-    if not structured.get("NOME_MAE"):
-        warnings.append("NOME_MAE ausente.")
+    nome = (structured.get("NOME") or "").strip()
+    data_obito = (structured.get("DATA_OBITO") or "").strip()
+    causa_basica = (structured.get("CAUSA_BASICA") or "").strip()
+    uf = (structured.get("UF_OBITO") or "").strip()
+
+    if not nome:
+        errors.append("NOME ausente")
+    if not data_obito:
+        errors.append("DATA_OBITO ausente")
+    if not causa_basica:
+        errors.append("CAUSA_BASICA ausente")
+    if uf and uf not in UF_VALIDAS:
+        errors.append("UF_OBITO inválida")
+    if not uf:
+        warnings.append("UF_OBITO ausente")
+
     if not structured.get("NASCIMENTO"):
-        warnings.append("NASCIMENTO ausente.")
-    if not structured.get("DATA_OBITO"):
-        errors.append("DATA_OBITO ausente.")
-    if not structured.get("CIDADE_OBITO"):
-        warnings.append("CIDADE_OBITO ausente.")
-    if not structured.get("UF_OBITO"):
-        warnings.append("UF_OBITO ausente.")
-    elif structured.get("UF_OBITO") not in UF_VALIDAS:
-        errors.append("UF_OBITO invalida.")
-    if not structured.get("CAUSA_BASICA"):
-        errors.append("CAUSA_BASICA ausente.")
+        warnings.append("NASCIMENTO ausente")
+    if not structured.get("NOME_MAE"):
+        warnings.append("NOME_MAE ausente")
+    if not structured.get("CID_BASICA"):
+        warnings.append("CID_BASICA ausente")
 
     score = _compute_score(structured)
-    if errors:
-        status = "invalid"
-    elif warnings:
-        status = "warning"
-    else:
-        status = "valid"
+    ok = len(errors) == 0
+    status = "OK" if ok else "REVISAR"
 
-    nome_ok = bool(structured.get("NOME"))
-    names_ok = bool(structured.get("NOME") and structured.get("NOME_MAE"))
+    nome_ok = bool(nome)
+    names_ok = bool(nome and (structured.get("NOME_MAE") or structured.get("NOME_PAI")))
 
     return {
-        "ok": len(errors) == 0,
+        "ok": ok,
         "errors": errors,
         "warnings": warnings,
         "computed": {
@@ -704,97 +641,149 @@ def validate_structured(structured: Dict[str, str]) -> Dict[str, Any]:
         "nome_ok": nome_ok,
     }
 
+# ---------------------------------------------------------------------------
+# Pós-processamento
+# ---------------------------------------------------------------------------
+ADMIN_WORDS = ["codigo", "código", "registro", "ufs", "cartorio", "cartório", "declarante", "medico", "médico", "atestante"]
 
-# ---------------------------------------------------------------------------
-# Pos-processamento
-# ---------------------------------------------------------------------------
+
+def _is_administrative(text: str) -> bool:
+    if not text:
+        return False
+    low = _remove_accents(text).lower()
+    return any(w in low for w in ADMIN_WORDS)
+
 
 def _post_process(structured: Dict[str, str]) -> Dict[str, str]:
-    _VALID_UFS = {"AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI", "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO"}
-    _CID_RE = re.compile(r'\b[A-TV-Z]\d{2}(?:\.\d{1,3})?\b', re.I)
-    _ADMIN_WORDS = ("codigo", "registro", "ufs", "cartorio", "cartório", "declarante", "medico", "médico", "atestante")
+    """Normaliza campos finais e reintroduz STATUS, QUALIDADE_SCORE e ERROS."""
+    # Normaliza UF válida
+    uf = (structured.get("UF_OBITO") or "").upper().strip()
+    structured["UF_OBITO"] = uf if uf in UF_VALIDAS else ""
 
-    uf = (structured.get("UF_OBITO") or "").strip().upper()
-    if uf in _VALID_UFS:
-        structured["UF_OBITO"] = uf
-    else:
-        structured["UF_OBITO"] = ""
-
-    causa = (structured.get("CAUSA_BASICA") or "").strip()
-    causa_norm = _normalize_label(causa)
-    cid_from_causa = ""
-    if causa:
-        m = _CID_RE.search(causa)
-        if m:
-            cid_from_causa = m.group(0).upper()
-
-    is_cid_pure = bool(_CID_RE.fullmatch(causa))
-    is_label = causa.endswith(":") or causa_norm in ("causa basica", "causa básica", "causa da morte", "causas da morte")
-    is_admin = any(w in causa_norm for w in _ADMIN_WORDS)
-
-    if not causa or is_cid_pure or is_label or is_admin:
+    # Limpa CAUSA_BASICA se for CID puro, label ou texto administrativo
+    causa_basica = (structured.get("CAUSA_BASICA") or "").strip()
+    if _is_cid_only(causa_basica) or _looks_like_label(causa_basica) or _is_administrative(causa_basica):
         structured["CAUSA_BASICA"] = ""
-        structured["CODIGO_CAUSA_BASICA"] = ""
-    else:
-        structured["CAUSA_BASICA"] = causa
-        structured["CODIGO_CAUSA_BASICA"] = cid_from_causa
 
+    # Alinha CODIGO_CAUSA_BASICA = CID_BASICA
+    cid_basica = (structured.get("CID_BASICA") or "").strip()
+    structured["CODIGO_CAUSA_BASICA"] = cid_basica
+
+    # Regras de STATUS / QUALIDADE_SCORE / ERROS
     nome = (structured.get("NOME") or "").strip()
     data_obito = (structured.get("DATA_OBITO") or "").strip()
-    causa_basica = (structured.get("CAUSA_BASICA") or "").strip()
-    uf_obito = (structured.get("UF_OBITO") or "").strip()
+    causa_basica_final = (structured.get("CAUSA_BASICA") or "").strip()
+    uf_final = (structured.get("UF_OBITO") or "").strip()
 
-    erros: List[str] = []
+    faltantes: List[str] = []
     if not nome:
-        erros.append("NOME ausente")
+        faltantes.append("NOME")
     if not data_obito:
-        erros.append("DATA_OBITO ausente")
-    if not causa_basica:
-        erros.append("CAUSA_BASICA ausente")
-    if not uf_obito:
-        erros.append("UF_OBITO invalida")
+        faltantes.append("DATA_OBITO")
+    if not causa_basica_final:
+        faltantes.append("CAUSA_BASICA")
+    if not uf_final:
+        faltantes.append("UF_OBITO inválida")
 
-    if nome and data_obito and causa_basica:
+    if nome and data_obito and causa_basica_final:
         structured["STATUS"] = "OK"
         structured["QUALIDADE_SCORE"] = "100"
         structured["ERROS"] = ""
     else:
         structured["STATUS"] = "REVISAR"
         structured["QUALIDADE_SCORE"] = "85"
-        structured["ERROS"] = "; ".join(erros)
+        # ERROS: concatena faltantes relevantes
+        erros_lista: List[str] = []
+        if not nome:
+            erros_lista.append("NOME")
+        if not data_obito:
+            erros_lista.append("DATA_OBITO")
+        if not causa_basica_final:
+            erros_lista.append("CAUSA_BASICA")
+        if not uf_final:
+            erros_lista.append("UF_OBITO inválida")
+        structured["ERROS"] = "; ".join(erros_lista)
 
     return structured
-
 
 # ---------------------------------------------------------------------------
 # Provider OCR (OpenAI-compatible)
 # ---------------------------------------------------------------------------
+OCR_PROMPT = (
+    "Você é um motor de OCR puro. Transcreva fielmente todo o texto visível na imagem, "
+    "preservando a ordem, os números de campos, rótulos e valores. "
+    "Não interprete, não resuma e não omita nada. "
+    "Retorne apenas o texto transcrito, em português, sem comentários."
+)
+
 
 def _build_ocr_payload(image_data_url: str, mime: str) -> Dict[str, Any]:
-    prompt = (
-        "Transcreva fielmente todo o texto visivel na imagem. "
-        "Preserve a ordem e as quebras de linha originais. "
-        "Nao resuma, nao interprete e nao explique. "
-        "Retorne apenas o texto transcrito."
-    )
+    """Constrói payload para endpoint OpenAI-compatible com prompt neutro de OCR puro."""
     return {
         "model": OPENAI_MODEL_DEFAULT,
         "messages": [
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": image_data_url}},
+                    {
+                        "type": "text",
+                        "text": OCR_PROMPT,
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image_data_url},
+                    },
                 ],
             }
         ],
+        "temperature": 0.0,
         "max_tokens": 2000,
     }
 
 
+def _consolidate_content(content: Any) -> str:
+    """Consolida content (string ou lista/blocos) em uma única string."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                if isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+                elif isinstance(item.get("content"), str):
+                    parts.append(item["content"])
+                elif isinstance(item.get("type"), str) and item.get("type") == "text" and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+        return "\n".join(p for p in parts if p)
+    if isinstance(content, dict):
+        if isinstance(content.get("text"), str):
+            return content["text"]
+        if isinstance(content.get("content"), str):
+            return content["content"]
+    return str(content)
+
+
+def _is_refusal(text: str) -> bool:
+    if not text:
+        return False
+    low = text.strip().lower()
+    for phrase in REFUSAL_PHRASES:
+        if low.startswith(phrase):
+            return True
+    return False
+
+
 def _call_ocr_provider(image_data_url: str, mime: str) -> str:
-    if not OPENAI_API_URL or not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_URL ou OPENAI_API_KEY nao configurados.")
+    """Chama provider OpenAI-compatible e retorna o texto OCR consolidado."""
+    if not OPENAI_API_URL:
+        raise RuntimeError("OPENAI_API_URL não configurado.")
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY não configurado.")
 
     payload = _build_ocr_payload(image_data_url, mime)
     headers = {
@@ -802,123 +791,120 @@ def _call_ocr_provider(image_data_url: str, mime: str) -> str:
         "Content-Type": "application/json",
     }
 
-    response = requests.post(OPENAI_API_URL, headers=headers, json=payload, timeout=60)
-    response.raise_for_status()
-    data = response.json()
-
-    # Consolidar content mesmo se vier como lista/blocos
-    content: Any = ""
     try:
-        content = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError):
-        content = ""
+        resp = requests.post(OPENAI_API_URL, json=payload, headers=headers, timeout=60)
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Erro de comunicação com provider OCR: {exc}")
 
-    if isinstance(content, list):
-        parts: List[str] = []
-        for block in content:
-            if isinstance(block, dict):
-                text = block.get("text") or block.get("content") or ""
-                if text:
-                    parts.append(str(text))
-            elif isinstance(block, str):
-                parts.append(block)
-        content = "\n".join(parts)
-    elif not isinstance(content, str):
-        content = str(content) if content is not None else ""
+    if resp.status_code >= 400:
+        snippet = (resp.text or "")[:300]
+        raise RuntimeError(f"Provider OCR retornou HTTP {resp.status_code}: {snippet}")
 
-    content = content.strip()
+    try:
+        data = resp.json()
+    except Exception:
+        raise RuntimeError("Provider OCR retornou resposta não-JSON.")
 
-    if not content:
+    try:
+        choices = data.get("choices") or []
+        if not choices or not isinstance(choices, list):
+            summary = str(data)[:300]
+            raise RuntimeError(f"Estrutura inesperada do provider OCR: {summary}")
+        message = choices[0].get("message") or {}
+        content = message.get("content")
+        text = _consolidate_content(content)
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        summary = str(data)[:300]
+        raise RuntimeError(f"Estrutura inesperada do provider OCR: {summary}")
+
+    if not text or not text.strip():
         raise RuntimeError("Resposta vazia do provider OCR.")
 
-    # Recusa apenas quando a resposta inteira comecar claramente com frases comuns
-    refusal_starts = (
-        "i can't help",
-        "i cannot help",
-        "i can't assist",
-        "i cannot assist",
-        "i'm not able to help",
-        "i am not able to help",
-        "i'm unable to help",
-        "i am unable to help",
-        "desculpe, mas nao posso",
-        "desculpe, mas nao posso ajudar",
-        "nao posso ajudar",
-        "nao posso processar",
-        "nao posso transcrever",
-    )
-    content_lower = content.lower().lstrip()
-    if any(content_lower.startswith(prefix) for prefix in refusal_starts):
-        snippet = content[:300]
-        raise RuntimeError(f"Provider recusou o processamento da imagem. Resposta: {snippet}")
+    if _is_refusal(text):
+        snippet = text.strip()[:200]
+        raise RuntimeError(f"Provider OCR recusou o processamento: {snippet}")
 
-    return content
-
+    return text.strip()
 
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
-
 @app.get("/health")
-def health() -> Dict[str, Any]:
- return {
-        "status": "ok",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
+async def health() -> JSONResponse:
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "ok",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        },
+    )
 
 
 @app.post("/ocr")
-async def ocr(request: Request, x_auth_token: Optional[str] = Header(None)):
-    request_id = hashlib.sha256(str(time.time()).encode()).hexdigest()[:16]
+async def ocr(request: Request, x_auth_token: Optional[str] = Header(None)) -> JSONResponse:
+    request_id = hashlib.sha1(f"{time.time()}{id(request)}".encode()).hexdigest()[:16]
 
-    # Autenticacao
-    if AUTH_TOKEN and (not x_auth_token or x_auth_token != AUTH_TOKEN):
-        return _unauthorized(request_id)
+    # Autenticação
+    if AUTH_TOKEN:
+        if not x_auth_token or x_auth_token != AUTH_TOKEN:
+            return _unauthorized(request_id)
 
+    # Leitura do JSON
     try:
         body = await request.json()
     except Exception:
-        return _bad_request(request_id, "JSON invalido.")
+        return _bad_request(request_id, "JSON inválido.")
 
-    mime = body.get("mimeType", "")
-    file_b64 = body.get("file", "")
+    if not isinstance(body, dict):
+        return _bad_request(request_id, "Payload deve ser um objeto JSON.")
 
-    if not mime or not file_b64:
-        return _bad_request(request_id, "Campos 'mimeType' e 'file' sao obrigatorios.")
+    file_b64 = body.get("file") or ""
+    mime = (body.get("mimeType") or "").lower().strip()
+
+    if not file_b64:
+        return _bad_request(request_id, "Campo 'file' (base64) é obrigatório.")
+    if not mime:
+        return _bad_request(request_id, "Campo 'mimeType' é obrigatório.")
+
+    # PDF não suportado no /ocr v1
+    if mime in {"application/pdf", "pdf"} or mime.endswith("pdf"):
+        return _bad_request(request_id, "PDF não é suportado no /ocr v1. Envie imagem (PNG/JPEG/WebP/GIF).")
 
     if mime not in ALLOWED_MIME:
-        if mime == "application/pdf":
-            return _bad_request(request_id, "PDF nao suportado no /ocr v1. Envie imagem (PNG/JPEG/WebP/GIF).")
-        return _bad_request(request_id, f"MIME type nao suportado: {mime}")
+        return _bad_request(request_id, f"mimeType não permitido: {mime}")
 
-    # Validar tamanho
+    # Validação base64
     try:
-        decoded = base64.b64decode(file_b64, validate=False)
+        file_bytes = base64.b64decode(file_b64, validate=True)
     except Exception:
-        return _bad_request(request_id, "Base64 invalido.")
+        return _bad_request(request_id, "base64 inválido no campo 'file'.")
 
-    if len(decoded) > MAX_FILE_SIZE_MB * 1024 * 1024:
-        return _bad_request(request_id, f"Arquivo excede o tamanho maximo de {MAX_FILE_SIZE_MB}MB.")
+    # Validação de tamanho
+    max_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
+    if len(file_bytes) > max_bytes:
+        return _bad_request(request_id, f"Arquivo excede o tamanho máximo de {MAX_FILE_SIZE_MB}MB.")
 
-    prefix = MIME_TO_DATA_URL_PREFIX.get(mime, "")
-    if not prefix:
-        return _bad_request(request_id, f"MIME type nao suportado: {mime}")
-
-    image_data_url = prefix + file_b64
+    # Monta data URL
+    prefix = MIME_TO_DATA_URL_PREFIX.get(mime, f"data:{mime};base64,")
+    data_url = f"{prefix}{file_b64.strip()}"
 
     # Chamada ao provider OCR
     try:
-        raw_text = _call_ocr_provider(image_data_url, mime)
+        raw_text = _call_ocr_provider(data_url, mime)
+    except RuntimeError as exc:
+        return _internal_error(request_id, str(exc))
     except Exception as exc:
-        return _internal_error(request_id, f"Falha no provider OCR: {exc}")
+        return _internal_error(request_id, f"Erro inesperado no provider OCR: {exc}")
 
-    # Parse + validacao
+    # Parse + pós-processamento + validação
     try:
         structured = parse_obito(raw_text)
         structured = _post_process(structured)
         validation = validate_structured(structured)
     except Exception as exc:
-        return _internal_error(request_id, f"Erro interno no parse/validacao: {exc}")
+        return _internal_error(request_id, f"Erro ao processar OCR: {exc}")
 
     return JSONResponse(
         status_code=200,
@@ -934,10 +920,8 @@ async def ocr(request: Request, x_auth_token: Optional[str] = Header(None)):
         },
     )
 
-
 # ---------------------------------------------------------------------------
-# Main
+# Inicialização
 # ---------------------------------------------------------------------------
-
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=PORT)
