@@ -33,6 +33,19 @@ import uvicorn
 import logging
 logger = logging.getLogger(__name__)
 
+def _format_date(raw: str) -> str:
+    """Remove espaços entre dígitos de datas: '2 0 0 5 1 9 2 9' -> '20/05/1929'"""
+    if not raw:
+        return raw
+    # Remove espaços entre dígitos
+    cleaned = re.sub(r'(?<=\d)\s+(?=\d)', '', raw)
+    # Se tem 8 dígitos seguidos, formata como dd/mm/aaaa
+    digits = re.sub(r'\D', '', cleaned)
+    if len(digits) == 8:
+        cleaned = f"{digits[:2]}/{digits[2:4]}/{digits[4:]}"
+    elif len(digits) == 6 and cleaned.count('/') == 0:
+        cleaned = f"{digits[:2]}/{digits[2:4]}/{digits[4:]}"
+    return cleaned
 # ---------------------------------------------------------------------------
 # Configuração
 # ---------------------------------------------------------------------------
@@ -520,8 +533,8 @@ def _process_single_image(file_id: str, file_name: str) -> dict:
         "QUALIDADE_SCORE": str(structured.get("QUALIDADE_SCORE", "")),
         "NOME": structured.get("NOME", ""),
         "NOME_MAE": structured.get("NOME_MAE", ""),
-        "NASCIMENTO": structured.get("NASCIMENTO", ""),
-        "DATA_OBITO": structured.get("DATA_OBITO", ""),
+        "NASCIMENTO": _format_date(structured.get("NASCIMENTO", "")),
+        "DATA_OBITO": _format_date(structured.get("DATA_OBITO", "")),
         "HORA_OBITO": structured.get("HORA_OBITO", ""),
         "CIDADE_OBITO": structured.get("CIDADE_OBITO", ""),
         "UF_OBITO": structured.get("UF_OBITO", ""),
@@ -580,13 +593,8 @@ def _ensure_sheet_exists() -> str:
     return sid
 
 def _get_sheet_name(sheet_id: str) -> str:
-    """Obtém o nome da primeira aba disponível na planilha."""
-    sheets = _get_sheets_service()
-    metadata = sheets.spreadsheets().get(spreadsheetId=sheet_id, fields="sheets.properties.title").execute()
-    titles = metadata.get("sheets", [])
-    if titles:
-        return titles[0]["properties"]["title"]
-    return "Auditoria"  # fallback
+    """Sempre retorna 'Auditoria' como aba de destino."""
+    return "Auditoria"
 
 def _append_rows_to_sheet(sheet_id: str, rows: List[dict]):
     """Appenda linhas de resultado na planilha."""
