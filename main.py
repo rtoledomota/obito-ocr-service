@@ -522,32 +522,52 @@ def _process_single_image(file_id: str, file_name: str) -> dict:
     return row
 
 def _ensure_sheet_exists() -> str:
-    """Cria a planilha se não existir, ou retorna o SHEET_ID configurado.
-    Garante que os cabeçalhos existam na primeira aba."""
+    """Cria a planilha se não existir, ou garante que a aba 'Auditoria' exista com cabeçalhos."""
+    sheets = _get_sheets_service()
+
     if SHEET_ID:
-        sid = SHEET_ID
-        # Verifica se já tem cabeçalhos na primeira linha
-        sheets = _get_sheets_service()
-        sheet_name = _get_sheet_name(sid)
-        range_name = f"{sheet_name}!A1:{chr(65 + len(AUDIT_COLUMNS) - 1)}1"
-        existing = sheets.spreadsheets().values().get(
-            spreadsheetId=sid,
-            range=range_name,
+        # Verifica se a aba 'Auditoria' já existe
+        metadata = sheets.spreadsheets().get(
+            spreadsheetId=SHEET_ID,
+            fields="sheets.properties.title",
         ).execute()
-        values = existing.get("values", [])
-        if not values or not values[0] or len(values[0]) < len(AUDIT_COLUMNS):
-            # Escreve cabeçalhos
+        tab_names = [s["properties"]["title"] for s in metadata.get("sheets", [])]
+
+        if "Auditoria" not in tab_names:
+            # Cria a aba
+            sheets.spreadsheets().batchUpdate(
+                spreadsheetId=SHEET_ID,
+                body={"requests": [{"addSheet": {"properties": {"title": "Auditoria"}}}]},
+            ).execute()
+            # Escreve cabeçalho
             headers = [[col for col in AUDIT_COLUMNS]]
             sheets.spreadsheets().values().update(
-                spreadsheetId=sid,
-                range=f"{sheet_name}!A1",
+                spreadsheetId=SHEET_ID,
+                range="Auditoria!A1",
                 valueInputOption="RAW",
                 body={"values": headers},
             ).execute()
-            logger.info(f"Cabeçalhos escritos na planilha existente: {sid}")
-        return sid
+            logger.info(f"Aba 'Auditoria' criada na planilha {SHEET_ID}")
+        else:
+            # Verifica se a primeira linha está vazia (cabeçalho ausente)
+            result = sheets.spreadsheets().values().get(
+                spreadsheetId=SHEET_ID,
+                range="Auditoria!A1:Z1",
+            ).execute()
+            values = result.get("values", [])
+            if not values or not values[0] or not values[0][0]:
+                headers = [[col for col in AUDIT_COLUMNS]]
+                sheets.spreadsheets().values().update(
+                    spreadsheetId=SHEET_ID,
+                    range="Auditoria!A1",
+                    valueInputOption="RAW",
+                    body={"values": headers},
+                ).execute()
+                logger.info(f"Cabeçalhos escritos na aba 'Auditoria' da planilha {SHEET_ID}")
 
-    sheets = _get_sheets_service()
+        return SHEET_ID
+
+    # Cria planilha nova (fluxo original)
     spreadsheet = {
         "properties": {"title": AUDIT_SHEET_TITLE},
         "sheets": [{"properties": {"title": "Auditoria"}}],
@@ -555,7 +575,6 @@ def _ensure_sheet_exists() -> str:
     sheet = sheets.spreadsheets().create(body=spreadsheet, fields="spreadsheetId").execute()
     sid = sheet.get("spreadsheetId")
 
-    # Escreve cabeçalho
     headers = [[col for col in AUDIT_COLUMNS]]
     sheets.spreadsheets().values().update(
         spreadsheetId=sid,
