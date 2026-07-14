@@ -712,29 +712,19 @@ def run_batch(folder_id: str = None, force_reprocess: bool = False, limit: int =
     fail_ids = set()
     last_error = None
 
-    for img in new_images:
-    # ✅ Pula se já está na planilha
-    if _is_filename_in_sheet(sheet_id, img["name"]):
-        print(f"{img['name']} já está na planilha, pulando...")
-        continue
-
-    try:
-        row = _process_single_image(img["id"], img["name"])
-        _append_rows_to_sheet(sheet_id, [row])
-        success_ids.add(img["id"])
-
-        import gc
-        gc.collect()
-
-    except Exception as e:
-        fail_ids.add(img["id"])
-        last_error = str(e)
-        print(f"Falha ao processar {img['name']}: {e}")
+        for img in new_images:
+        try:
+            row = _process_single_image(img["id"], img["name"])
+            _append_rows_to_sheet(sheet_id, [row])
+            success_ids.add(img["id"])
+            import gc
+            gc.collect()
+        except Exception as e:
+            fail_ids.add(img["id"])
+            last_error = str(e)
+            print(f"Falha ao processar {img['name']}: {e}")
 
     _save_processed_ids(success_ids)
-    if os.path.exists(local_path):
-       os.remove(local_path)
-
     return {
         "success": True,
         "total": len(images),
