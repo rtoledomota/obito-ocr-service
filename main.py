@@ -34,18 +34,54 @@ import logging
 logger = logging.getLogger(__name__)
 
 def _format_date(raw: str) -> str:
-    """Remove espaços entre dígitos de datas: '2 0 0 5 1 9 2 9' -> '20/05/1929'"""
+    """Formata data extraída, validando dia mês e ano com fallbacks."""
     if not raw:
         return raw
-    # Remove espaços entre dígitos
     cleaned = re.sub(r'(?<=\d)\s+(?=\d)', '', raw)
-    # Se tem 8 dígitos seguidos, formata como dd/mm/aaaa
     digits = re.sub(r'\D', '', cleaned)
+    if len(digits) < 6:
+        return raw
     if len(digits) == 8:
-        cleaned = f"{digits[:2]}/{digits[2:4]}/{digits[4:]}"
-    elif len(digits) == 6 and cleaned.count('/') == 0:
-        cleaned = f"{digits[:2]}/{digits[2:4]}/{digits[4:]}"
-    return cleaned
+        d, m, a = int(digits[:2]), int(digits[2:4]), int(digits[4:])
+    elif len(digits) == 6:
+        d, m, a = int(digits[:2]), int(digits[2:4]), int(digits[4:]) + 2000
+    else:
+        return raw
+    if d > 31 and m <= 12:
+        d, m = m, d
+    if d > 31:
+        d = min(d % 10, 31) if d % 10 <= 31 else 15
+    if m > 12:
+        m = m % 10 if m % 10 != 0 else 12
+    if a < 1900 or a > 2100:
+        if 0 <= a <= 30:
+            a += 2000
+        elif 31 <= a <= 99:
+            a += 1900
+        else:
+            a = max(1900, min(a, 2100))
+    return f"{d:02d}/{m:02d}/{a:04d}"
+
+def _get_existing_hashes(sheet_id: str) -> set:
+    """Lê todos os hashes já registrados na planilha para evitar reprocessamento."""
+    try:
+        sheets = _get_sheets_service()
+        sheet_name = _get_sheet_name(sheet_id)
+        result = sheets.spreadsheets().values().get(
+            spreadsheetId=sheet_id,
+            range=f"{sheet_name}!Q:Q",
+        ).execute()
+        values = result.get("values", [])
+        if not values:
+            return set()
+        hashes = set()
+        for row in values:
+            if row and row[0].strip() and row[0].strip() != "HASH_ARQUIVO":
+                hashes.add(row[0].strip())
+        return hashes
+    except Exception as e:
+        logger.warning(f"Não foi possível ler hashes existentes: {e}")
+        return set()
 # ---------------------------------------------------------------------------
 # Configuração
 # ---------------------------------------------------------------------------
@@ -642,10 +678,22 @@ def run_batch(folder_id: str = None, force_reprocess: bool = False, limit: int =
 
     processed_ids = set() if force_reprocess else _load_processed_ids()
     images = _list_images_in_folder(fid)
-
+    
+    # Carrega hashes já registrados na planilha para evitar duplicatas (persistente)
+    sheet_id = _ensure_sheet_exists()
+    existing_hashes = _get_existing_hashes(sheet_id)
+    
     # Filtra apenas não processadas
-    new_images = [img for img in images if img["id"] not in processed_ids]
-
+    new_images = []
+    for img in images:
+        if img["id"] in processed_ids:
+            continue
+        # Verifica pelo nome do arquivo na planilha (fallback após restart)
+        filename = img["name"]
+        if _is_filename_in_sheet(sheet_id, filename):
+            logger.info(f"{filename} já está na planilha, pulando...")
+            continue
+        new_images.append(img)
     if not new_images:
         return {
             "success": True,
@@ -685,7 +733,22 @@ def run_batch(folder_id: str = None, force_reprocess: bool = False, limit: int =
         "sheet_id": sheet_id,
         "message": f"{len(success_ids)} imagens processadas, {len(fail_ids)} falhas.",
     }
-
+def _is_filename_in_sheet(sheet_id: str, filename: str) -> bool:
+    """Verifica se o nome do arquivo já existe na coluna B da planilha."""
+    try:
+        sheets = _get_sheets_service()
+        sheet_name = _get_sheet_name(sheet_id)
+        result = sheets.spreadsheets().values().get(
+            spreadsheetId=sheet_id,
+            range=f"{sheet_name}!B:B",
+        ).execute()
+        values = result.get("values", [])
+        for row in values:
+            if row and row[0].strip() == filename:
+                return True
+        return False
+    except:
+        return False
 # ═══════════════════════════════════════════════════════════════════
 # Background Monitor (thread de polling)
 # ═══════════════════════════════════════════════════════════════════
