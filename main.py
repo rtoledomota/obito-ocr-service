@@ -287,50 +287,40 @@ def _is_noise_line(norm_line: str) -> bool:
 def _looks_like_label(norm_line: str) -> bool:
     return _is_noise_line(norm_line)
 
-def _normalize_date(value: str) -> str:
-    if not value:
+def _normalize_date(raw: str) -> str:
+    """Tenta converter data para DD/MM/AAAA. Retorna vazio se inválida."""
+    if not raw or not raw.strip():
         return ""
-    v = value.strip()
-    v = re.sub(r"[^0-9/\-\s]", " ", v)
-    v = re.sub(r"\s+", " ", v).strip()
-    m = re.match(r"^(\d{1,2})[\s/\-]+(\d{1,2})[\s/\-]+(\d{2,4})$", v)
-    if not m:
-        return value.strip()
-    d, mo, y = m.group(1), m.group(2), m.group(3)
-    if len(y) == 2:
-        y = "19" + y if int(y) > 30 else "20" + y
+    raw = raw.strip()
+    # Se já está no formato DD/MM/AAAA e é válida, retorna direto
     try:
-        dt.date(int(y), int(mo), int(d))
+        dt.datetime.strptime(raw, "%d/%m/%Y")
+        return raw
     except ValueError:
-        return value.strip()
-    return f"{int(d):02d}/{int(mo):02d}/{y}"
-
-def _normalize_hour(value: str) -> str:
-    if not value:
-        return ""
-    v = value.strip()
-    m = re.search(r"(\d{1,2})[:hH]+(\d{2})", v)
-    if m:
-        h = int(m.group(1))
-        mm = int(m.group(2))
-        if 0 <= h <= 23 and 0 <= mm <= 59:
-            return f"{h:02d}:{mm:02d}"
-    return v
-
-def _is_valid_hour(value: str) -> bool:
-    return bool(re.fullmatch(r"\d{2}:\d{2}", value or "")) and _normalize_hour(value) == value
-
-def _normalize_uf(value: str) -> str:
-    if not value:
-        return ""
-    v = value.strip().upper()
-    if v == "UF":
-        return ""
-    m = re.search(r"\b([A-Z]{2})\b", v)
-    if m and m.group(1) in UF_VALIDAS:
-        return m.group(1)
-    if v in UF_VALIDAS:
-        return v
+        pass
+    # Tenta vários formatos, priorizando DD/MM
+    for fmt in ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%m/%d/%Y", "%Y/%m/%d"):
+        try:
+            d = dt.datetime.strptime(raw, fmt)
+            # Valida: ano entre 1900 e ano atual + 1
+            if 1900 <= d.year <= dt.datetime.now().year + 1:
+                return d.strftime("%d/%m/%Y")
+        except ValueError:
+            continue
+    # Fallback: extrair números e montar
+    nums = re.findall(r"\d+", raw)
+    if len(nums) >= 3:
+        # Tenta interpretar como DD, MM, AAAA
+        for a, b in [(0, 1), (1, 0)]:  # tenta DD/MM e MM/DD
+            try:
+                dia, mes, ano = int(nums[a]), int(nums[b]), int(nums[-1])
+                if len(nums[-1]) == 2:
+                    ano += 2000 if ano < 50 else 1900
+                if 1 <= dia <= 31 and 1 <= mes <= 12 and 1900 <= ano <= dt.datetime.now().year + 1:
+                    d = dt.datetime(ano, mes, dia)
+                    return d.strftime("%d/%m/%Y")
+            except (ValueError, IndexError):
+                continue
     return ""
 
 def _normalize_cep(value: str) -> str:
