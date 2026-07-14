@@ -707,6 +707,8 @@ def run_batch(folder_id: str = None, force_reprocess: bool = False, limit: int =
     if limit > 0:
         new_images = new_images[:limit]
 
+    for img in new_images:   # ← CORRETO: no mesmo nível do `if limit > 0`
+
     sheet_id = _ensure_sheet_exists()
     success_ids = set()
     fail_ids = set()
