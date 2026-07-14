@@ -124,10 +124,23 @@ PROCESSED_IMAGES_LOG = "processed_images.log"  # arquivo local para evitar repro
 
 # Ordem das colunas na planilha de auditoria
 AUDIT_COLUMNS = [
-    "DATA_PROCESSAMENTO", "NOME_ARQUIVO", "STATUS", "QUALIDADE_SCORE",
-    "NOME", "NOME_MAE", "NASCIMENTO", "DATA_OBITO", "HORA_OBITO",
-    "CIDADE_OBITO", "UF_OBITO", "CAUSA_MORTE", "CAUSA_BASICA",
-    "CID_BASICA", "TIPO_OBITO", "ERROS", "HASH_ARQUIVO"
+    "DATA_PROCESSAMENTO",
+    "NOME_ARQUIVO",
+    "STATUS",
+    "QUALIDADE_SCORE",
+    "NOME",
+    "NOME_MAE",
+    "NASCIMENTO",
+    "DATA_OBITO",
+    "HORA_OBITO",
+    "CIDADE_OBITO",
+    "UF_OBITO",
+    "CAUSA_MORTE",
+    "CAUSA_BASICA",
+    "CID_BASICA",
+    "TIPO_OBITO",
+    "ERROS",
+    "HASH_ARQUIVO",
 ]
 
 # ---------------------------------------------------------------------------
