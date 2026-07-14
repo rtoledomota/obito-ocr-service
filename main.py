@@ -539,7 +539,6 @@ def _ensure_sheet_exists() -> str:
                 spreadsheetId=SHEET_ID,
                 body={"requests": [{"addSheet": {"properties": {"title": "Auditoria"}}}]},
             ).execute()
-            # Escreve cabeçalho
             headers = [[col for col in AUDIT_COLUMNS]]
             sheets.spreadsheets().values().update(
                 spreadsheetId=SHEET_ID,
@@ -548,33 +547,15 @@ def _ensure_sheet_exists() -> str:
                 body={"values": headers},
             ).execute()
             logger.info(f"Aba 'Auditoria' criada na planilha {SHEET_ID}")
-        else:
-            # Verifica se a primeira linha está vazia (cabeçalho ausente)
-            result = sheets.spreadsheets().values().get(
-                spreadsheetId=SHEET_ID,
-                range="Auditoria!A1:Z1",
-            ).execute()
-            values = result.get("values", [])
-            if not values or not values[0] or not values[0][0]:
-                headers = [[col for col in AUDIT_COLUMNS]]
-                sheets.spreadsheets().values().update(
-                    spreadsheetId=SHEET_ID,
-                    range="Auditoria!A1",
-                    valueInputOption="RAW",
-                    body={"values": headers},
-                ).execute()
-                logger.info(f"Cabeçalhos escritos na aba 'Auditoria' da planilha {SHEET_ID}")
-
         return SHEET_ID
 
-    # Cria planilha nova (fluxo original)
+    # Fluxo original para planilha nova
     spreadsheet = {
         "properties": {"title": AUDIT_SHEET_TITLE},
         "sheets": [{"properties": {"title": "Auditoria"}}],
     }
     sheet = sheets.spreadsheets().create(body=spreadsheet, fields="spreadsheetId").execute()
     sid = sheet.get("spreadsheetId")
-
     headers = [[col for col in AUDIT_COLUMNS]]
     sheets.spreadsheets().values().update(
         spreadsheetId=sid,
@@ -582,7 +563,6 @@ def _ensure_sheet_exists() -> str:
         valueInputOption="RAW",
         body={"values": headers},
     ).execute()
-
     logger.info(f"Nova planilha criada: {sid}")
     return sid
 
