@@ -709,12 +709,11 @@ def run_batch(folder_id: str = None, force_reprocess: bool = False, limit: int =
 
     for img in new_images:   # ← CORRETO: no mesmo nível do `if limit > 0`
 
-    sheet_id = _ensure_sheet_exists()
+        sheet_id = _ensure_sheet_exists()
     success_ids = set()
     fail_ids = set()
     last_error = None
-
-        for img in new_images:
+    for img in new_images:
         try:
             row = _process_single_image(img["id"], img["name"])
             _append_rows_to_sheet(sheet_id, [row])
