@@ -660,6 +660,15 @@ def _append_rows_to_sheet(sheet_id: str, rows: List[dict]):
         body={"values": values},
     ).execute()
 
+def _col_to_letter(col: int) -> str:
+    """Converte número de coluna 1-indexado para letra (1=A, 26=Z, 27=AA)."""
+    letters = ""
+    while col > 0:
+        col -= 1
+        letters = chr(ord('A') + col % 26) + letters
+        col //= 26
+    return letters
+  
 def _load_processed_ids() -> set:
     """Carrega IDs de imagens já processadas (para evitar repetição)."""
     if not os.path.exists(PROCESSED_IMAGES_LOG):
@@ -672,7 +681,42 @@ def _save_processed_ids(ids: set):
     with open(PROCESSED_IMAGES_LOG, "a") as f:
         for fid in ids:
             f.write(fid + "\n")
+def _ensure_columns_exist(sheet_id: str) -> None:
+    """Adiciona colunas faltantes no header da planilha."""
+    try:
+        sheets = _get_sheets_service()
+        sheet_name = _get_sheet_name(sheet_id)
+        # Lê o header atual
+        result = sheets.spreadsheets().values().get(
+            spreadsheetId=sheet_id,
+            range=f"{sheet_name}!A1:ZZ1",
+        ).execute()
+        values = result.get("values", [])
+        existing_cols = values[0] if values else []
 
+        # Descobre quais colunas da HEADER estão faltando
+        novas = [c for c in HEADER if c not in existing_cols]
+
+        if not novas:
+            return  # já está completo
+
+        # Adiciona as colunas faltantes no final
+        start_col = len(existing_cols) + 1  # 1-indexed
+        end_col = len(existing_cols) + len(novas)
+        start_col_letter = _col_to_letter(start_col)
+        end_col_letter = _col_to_letter(end_col)
+
+        body = {"values": [novas]}
+        sheets.spreadsheets().values().update(
+            spreadsheetId=sheet_id,
+            range=f"{sheet_name}!{start_col_letter}1:{end_col_letter}1",
+            valueInputOption="USER_ENTERED",
+            body=body,
+        ).execute()
+        logger.info(f"✅ {len(novas)} colunas adicionadas: {novas}")
+    except Exception as e:
+        logger.warning(f"Não foi possível adicionar colunas: {e}")
+      
 def run_batch(folder_id: str = None, force_reprocess: bool = False, limit: int = 0) -> dict:
     """
     Pipeline completo do lote:
@@ -691,6 +735,7 @@ def run_batch(folder_id: str = None, force_reprocess: bool = False, limit: int =
     
     # Carrega hashes já registrados na planilha para evitar duplicatas (persistente)
     sheet_id = _ensure_sheet_exists()
+    _ensure_columns_exist(sheet_id)
     # Carrega nomes e hashes existentes em UMA chamada
     existing_names, _ = _get_existing_data(sheet_id)
     # Filtra apenas não processadas
