@@ -713,13 +713,16 @@ def run_batch(folder_id: str = None, force_reprocess: bool = False, limit: int =
     last_error = None
 
     for img in new_images:
+    # ✅ Pula se já está na planilha
+    if _is_filename_in_sheet(sheet_id, img["name"]):
+        print(f"{img['name']} já está na planilha, pulando...")
+        continue
+
     try:
-        # ... processamento existente ...
         row = _process_single_image(img["id"], img["name"])
         _append_rows_to_sheet(sheet_id, [row])
         success_ids.add(img["id"])
 
-        # ✅ Libera memória após cada imagem
         import gc
         gc.collect()
 
