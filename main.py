@@ -63,26 +63,27 @@ def _format_date(raw: str) -> str:
             a = max(1900, min(a, 2100))
     return f"{d:02d}/{m:02d}/{a:04d}"
 
-def _get_existing_hashes(sheet_id: str) -> set:
-    """Lê todos os hashes já registrados na planilha para evitar reprocessamento."""
+def _get_existing_data(sheet_id: str) -> tuple:
+    """Lê todos os nomes e hashes da planilha em UMA chamada."""
     try:
         sheets = _get_sheets_service()
         sheet_name = _get_sheet_name(sheet_id)
         result = sheets.spreadsheets().values().get(
             spreadsheetId=sheet_id,
-            range=f"{sheet_name}!Q:Q",
+            range=f"{sheet_name}!B:Q",
         ).execute()
         values = result.get("values", [])
-        if not values:
-            return set()
+        names = set()
         hashes = set()
         for row in values:
-            if row and row[0].strip() and row[0].strip() != "HASH_ARQUIVO":
-                hashes.add(row[0].strip())
-        return hashes
+            if row and len(row) > 0 and row[0].strip() and row[0].strip() != "NOME_ARQUIVO":
+                names.add(row[0].strip())
+            if row and len(row) > 15 and row[15].strip() and row[15].strip() != "HASH_ARQUIVO":
+                hashes.add(row[15].strip())
+        return names, hashes
     except Exception as e:
-        logger.warning(f"Não foi possível ler hashes existentes: {e}")
-        return set()
+        logger.warning(f"Não foi possível ler dados existentes: {e}")
+        return set(), set()
 # ---------------------------------------------------------------------------
 # Configuração
 # ---------------------------------------------------------------------------
@@ -682,17 +683,15 @@ def run_batch(folder_id: str = None, force_reprocess: bool = False, limit: int =
     
     # Carrega hashes já registrados na planilha para evitar duplicatas (persistente)
     sheet_id = _ensure_sheet_exists()
-    existing_hashes = _get_existing_hashes(sheet_id)
-    
+    # Carrega nomes e hashes existentes em UMA chamada
+    existing_names, _ = _get_existing_data(sheet_id)
     # Filtra apenas não processadas
     new_images = []
     for img in images:
         if img["id"] in processed_ids:
             continue
-        # Verifica pelo nome do arquivo na planilha (fallback após restart)
-        filename = img["name"]
-        if _is_filename_in_sheet(sheet_id, filename):
-            logger.info(f"{filename} já está na planilha, pulando...")
+        if img["name"] in existing_names:
+            logger.info(f"{img['name']} já está na planilha, pulando...")
             continue
         new_images.append(img)
     if not new_images:
@@ -734,22 +733,6 @@ def run_batch(folder_id: str = None, force_reprocess: bool = False, limit: int =
         "sheet_id": sheet_id,
         "message": f"{len(success_ids)} imagens processadas, {len(fail_ids)} falhas.",
     }
-def _is_filename_in_sheet(sheet_id: str, filename: str) -> bool:
-    """Verifica se o nome do arquivo já existe na coluna B da planilha."""
-    try:
-        sheets = _get_sheets_service()
-        sheet_name = _get_sheet_name(sheet_id)
-        result = sheets.spreadsheets().values().get(
-            spreadsheetId=sheet_id,
-            range=f"{sheet_name}!B:B",
-        ).execute()
-        values = result.get("values", [])
-        for row in values:
-            if row and row[0].strip() == filename:
-                return True
-        return False
-    except:
-        return False
 # ═══════════════════════════════════════════════════════════════════
 # Background Monitor (thread de polling)
 # ═══════════════════════════════════════════════════════════════════
