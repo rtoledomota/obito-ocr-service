@@ -31,6 +31,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 import uvicorn
 import logging
+import gc
 logger = logging.getLogger(__name__)
 
 def _format_date(raw: str) -> str:
@@ -707,9 +708,7 @@ def run_batch(folder_id: str = None, force_reprocess: bool = False, limit: int =
     if limit > 0:
         new_images = new_images[:limit]
 
-    for img in new_images:   # ← CORRETO: no mesmo nível do `if limit > 0`
-
-        sheet_id = _ensure_sheet_exists()
+   
     success_ids = set()
     fail_ids = set()
     last_error = None
