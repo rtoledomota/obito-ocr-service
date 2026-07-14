@@ -712,7 +712,7 @@ def run_batch(folder_id: str = None, force_reprocess: bool = False, limit: int =
     fail_ids = set()
     last_error = None
 
-    ffor img in new_images:
+    for img in new_images:
     try:
         # ... processamento existente ...
         row = _process_single_image(img["id"], img["name"])
