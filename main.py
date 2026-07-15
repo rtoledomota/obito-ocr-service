@@ -1193,7 +1193,7 @@ def ocr_openai_compatible(
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     data_url = f"data:{mime_type};base64,{b64}"
 
-     prompt = (
+      prompt = (
         "Você é um especialista em OCR para Declarações de Óbito (DO) brasileiras do Ministério da Saúde. "
         "Extraia TODO o texto VISÍVEL no documento, incluindo dados impressos e manuscritos (letra cursiva). "
         "Preste atenção especial em:\n\n"
