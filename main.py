@@ -915,12 +915,16 @@ def _extract_causes(text: str) -> List[str]:
 # ---------------------------------------------------------------------------
 def parse_obito(text: str) -> Dict[str, Any]:
     """Constrói o dicionário estruturado a partir do texto OCR."""
-    structured: Dict[str, Any] = {k: "" for k in HEADER}
+       structured: Dict[str, Any] = {k: "" for k in HEADER}
+    print(f"[PARSE DEBUG] Texto OCR recebido (primeiros 1000 chars):", flush=True)
+    print(text[:1000], flush=True)
+    print(f"[PARSE DEBUG] --- fim debug ---", flush=True)
     structured["NOME"] = _find_block_value(
         text,
         ["Nome do Falecido", "Nome do falecido", "Nome do(a) Falecido(a)", "Nome do(a) falecido(a)"],
         stop_labels=["Nome da mãe", "Nome da mae", "Nome do pai", "Nome social", "Data"],
     )
+    print(f"[PARSE DEBUG] NOME extraído: '{structured['NOME']}'", flush=True)
     structured["NOME_SOCIAL"] = _find_block_value(
         text, ["Nome social", "Nome Social"],
         stop_labels=["Nome do falecido", "Nome da mãe", "Nome da mae", "Nome do pai"],
@@ -941,6 +945,10 @@ def parse_obito(text: str) -> Dict[str, Any]:
             stop_labels=["Data do óbito", "Data do obito", "Sexo", "Raça", "Raca"],
         )
     )
+    # --- DEBUG NASCIMENTO ---
+    _nasc = structured["NASCIMENTO"]
+    print(f"[PARSE DEBUG] NASCIMENTO extraído: '{_nasc}'", flush=True)
+    # --- fim debug ---
     structured["IDADE_ANOS"] = ""  # calculado após DATA_OBITO e NASCIMENTO
     structured["DATA_OBITO"] = _normalize_date(
         _find_block_value(text,
@@ -948,124 +956,7 @@ def parse_obito(text: str) -> Dict[str, Any]:
             stop_labels=["Hora", "Local do óbito", "Local do obito", "Município de ocorrência", "Municipio de ocorrencia"],
         )
     )
-    structured["HORA_OBITO"] = _find_hora_obito(text)
-    structured["DATA_ATESTADO"] = _normalize_date(
-        _find_block_value(text, ["Data do atestado", "Data de emissão", "Data da emissão"])
-    )
-    structured["LOCAL_OBITO"] = _find_block_value(
-        text, ["Local do óbito", "Local de óbito", "Local do obito", "Local de obito"],
-        stop_labels=["Município de ocorrência", "Municipio de ocorrencia", "UF"],
-    )
-    structured["CIDADE_OBITO"] = _find_block_value(
-        text,
-        ["Município de ocorrência", "Municipio de ocorrência", "Município de ocorrencia", "Municipio de ocorrencia"],
-        stop_labels=["UF", "Estado", "Data", "CEP", "Cep"],
-    )
-    structured["UF_OBITO"] = _find_uf_after(text, ["Município de ocorrência", "Municipio de ocorrencia"])
-    structured["LOGRADOURO"] = _find_block_value(text, ["Logradouro", "Endereço", "Endereco"], stop_labels=["Número", "Numero", "Complemento", "Bairro"])
-    structured["NUMERO"] = _find_block_value(text, ["Número", "Numero"], stop_labels=["Complemento", "Bairro"])
-    structured["COMPLEMENTO"] = _find_block_value(text, ["Complemento"], stop_labels=["Bairro", "Município", "Municipio"])
-    structured["BAIRRO"] = _find_block_value(text, ["Bairro"], stop_labels=["Município", "Municipio", "Cidade", "UF"])
-    structured["CIDADE"] = _find_block_value(text, ["Município", "Municipio", "Cidade"], stop_labels=["UF", "CEP", "Cep"])
-    structured["UF"] = _find_uf_after(text, ["Endereço", "Endereco", "Logradouro", "Bairro", "Município", "Municipio", "Cidade"])
-    structured["CEP"] = _normalize_cep(_find_block_value(text, ["CEP", "Cep"]))
-    structured["CIDADE_NASCIMENTO"] = _find_block_value(
-        text, ["Naturalidade", "Município de nascimento", "Municipio de nascimento", "Cidade de nascimento"],
-        stop_labels=["UF de nascimento", "Nacionalidade"],
-    )
-    structured["UF_NASCIMENTO"] = _find_uf_after(text, ["Naturalidade", "Município de nascimento", "Municipio de nascimento"])
-    structured["CPF"] = _find_block_value(text, ["CPF"])
-    structured["RG"] = _find_block_value(text, ["RG", "Registro Geral"])
-    structured["ORGAO_EMISSOR_RG"] = _find_block_value(text, ["Órgão emissor", "Orgao emissor", "Órgão expedidor", "Orgao expedidor"])
-    structured["SEXO"] = _find_block_value(text, ["Sexo"], stop_labels=["Raça", "Raca", "Cor"])
-    structured["RACA_COR"] = _find_block_value(text, ["Raça/Cor", "Raça", "Raca/Cor", "Raca", "Cor"])
-    structured["ESTADO_CIVIL"] = _find_block_value(text, ["Estado civil"])
-    structured["NACIONALIDADE"] = _find_block_value(text, ["Nacionalidade"])
-    structured["PROFISSAO"] = _find_block_value(text, ["Profissão", "Profissao", "Ocupação", "Ocupacao"])
-    # --- Causas (PATCH A APLICADO) ---
-    causes = _extract_causes(text)
-    if causes:
-        structured['CAUSA_MORTE'] = causes[0] if len(causes) >= 1 else ''
-        structured['CAUSA_MORTE_2'] = causes[1] if len(causes) >= 2 else ''
-        structured['CAUSA_MORTE_3'] = causes[2] if len(causes) >= 3 else ''
-        structured['CAUSA_MORTE_4'] = causes[3] if len(causes) >= 4 else ''
-        structured['CAUSA_MORTE_5'] = causes[4] if len(causes) >= 5 else ''
-        # CAUSA_BASICA = última causa realmente válida
-        validas = [c for c in causes if _causa_valida(c)]
-        structured['CAUSA_BASICA'] = validas[-1] if validas else ''
-    else:
-        for k in ('CAUSA_MORTE', 'CAUSA_MORTE_2', 'CAUSA_MORTE_3',
-                  'CAUSA_MORTE_4', 'CAUSA_MORTE_5', 'CAUSA_BASICA'):
-            structured[k] = ''
-    # --- CID_BASICA: extração por regex, sem inventar ---
-    cid_basica = ''
-    if structured.get('CAUSA_BASICA'):
-        cids = _CID_RE.findall(structured['CAUSA_BASICA'])
-        if cids:
-            cid_basica = cids[-1].upper()
-    if not cid_basica:
-        cids = _CID_RE.findall(text)
-        if cids:
-            cid_basica = cids[-1].upper()
-    structured['CID_BASICA'] = cid_basica
-    # --- NOVOS CAMPOS ---
-    # DO_NUMERO: número da declaração de óbito
-    structured["DO_NUMERO"] = _find_block_value(
-        text,
-        [r"D\.O\.", "DO nº", "DO Nº", "Nº DO", "Numero DO", "Número DO", "DO"],
-        stop_labels=["Nome", "Data", "Tipo"],
-    )
-    # Médico atestante
-    structured["MEDICO_ATESTANTE"] = _find_block_value(
-        text,
-        ["Médico atestante", "Medico atestante", "Nome do médico", "Nome do medico"],
-        stop_labels=["CRM", "Registro", "Assinatura"],
-    )
-    # CRM do médico
-    structured["CRM_MEDICO"] = _find_block_value(
-        text,
-        ["CRM", "C.R.M.", "C.R.M"],
-        stop_labels=["Assinatura", "Carimbo", "UF"],
-    )
-    # PARTE II: outras condições significativas
-    structured["PARTE_II"] = _find_block_value(
-        text,
-        ["Parte II", "Parte 2", "Outras condições significativas", "Outras condicoes significativas"],
-        stop_labels=["Oportunidade", "Notificado", "Providências", "Nome do auditor", "Nome do medico"],
-        max_distance=20,
-    )
-    # INTERVALO: tempo aproximado entre início da doença e a morte
-    structured["INTERVALO_DOENCA_MORTE"] = _find_block_value(
-        text,
-        ["Tempo aproximado", "Intervalo entre o início", "Intervalo entre o inicio"],
-        stop_labels=["Causas", "Parte", "Nome"],
-        max_distance=8,
-    )
-    # --- IDADE: calcular da DN + Data Óbito ---
-    idade_calc = ""
-    if structured.get("NASCIMENTO") and structured.get("DATA_OBITO"):
-        try:
-            dn = dt.datetime.strptime(structured["NASCIMENTO"], "%d/%m/%Y")
-            do = dt.datetime.strptime(structured["DATA_OBITO"], "%d/%m/%Y")
-            anos = do.year - dn.year - ((do.month, do.day) < (dn.month, dn.day))
-            if 0 <= anos <= 130:
-                idade_calc = str(anos)
-        except Exception:
-            pass
-    structured["IDADE_ANOS"] = idade_calc
-    # --- Tipo de óbito / assistido ---
-    structured["TIPO_OBITO"] = _find_block_value(text, ["Tipo de óbito", "Tipo de obito"])
-    structured["ASSISTIDO"] = _find_block_value(text, ["Assistido", "Foi assistido"])
-    structured["PROTOCOLO_TEV"] = _find_block_value(text, ["Protocolo TEV", "Protocolo"])
-    # --- Hashes e processamento ---
-    structured["HASH_CONTEUDO"] = _sha256_text(text)
-    structured["DATA_PROCESSAMENTO"] = dt.datetime.utcnow().isoformat() + "Z"
-    if structured["DATA_OBITO"]:
-        partes = structured["DATA_OBITO"].split("/")
-        if len(partes) == 3:
-            mes = partes[1].zfill(2)
-            structured["NOME_MES"] = MESES_PT.get(mes, "")
-    return structured
+    print(f"[PARSE DEBUG] DATA_OBITO extraído: '{structured['DATA_OBITO']}'", flush=True)
 
 # ---------------------------------------------------------------------------
 # Validação
