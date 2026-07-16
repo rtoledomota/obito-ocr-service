@@ -939,7 +939,7 @@ def parse_obito(text: str) -> Dict[str, Any]:
         stop_labels=["Nome da mãe", "Nome da mae", "Nome do pai", "Nome social", "Data"],
     )
     print(f"[PARSE DEBUG] NOME extraído: '{structured['NOME']}'", flush=True)
-      # Fallback inline para NOME (quando está na mesma linha do label)
+    # Fallback inline para NOME (quando está na mesma linha do label)
     if not structured["NOME"]:
         for label in ["Nome do Falecido", "Nome do falecido"]:
             for line in text.split('\n'):
@@ -975,9 +975,9 @@ def parse_obito(text: str) -> Dict[str, Any]:
     print(f"[PARSE DEBUG] NASCIMENTO extraído: '{_nasc}'", flush=True)
     # --- fim debug ---
     structured["IDADE_ANOS"] = ""  # calculado após DATA_OBITO e NASCIMENTO
-        _raw_data_obito = _find_block_value(text,
-        ["Data do óbito", "Data de óbito", "Data do obito", "Data de obito"],
-        stop_labels=["Hora", "Local do óbito", "Local do obito", "Município de ocorrência", "Municipio de ocorrencia"],
+    _raw_data_obito = _find_block_value(text,
+      ["Data do óbito", "Data de óbito", "Data do obito", "Data de obito"],
+      stop_labels=["Hora", "Local do óbito", "Local do obito", "Município de ocorrência", "Municipio de ocorrencia"],
     )
     # Se não achou no formato bloco, tenta inline na mesma linha
     if not _raw_data_obito:
