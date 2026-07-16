@@ -803,7 +803,8 @@ def _monitor_worker():
             if result.get("new", 0) > 0:
                 logger.info(f"Monitor: {result['message']}")
         except Exception as e:
-            logger.error(f"Erro no monitor: {e}")
+              print(f"[OCR ERROR] Exceção: {e}")
+        logger.error(f"Erro no OCR: {e}")
         _monitor_stop.wait(POLL_INTERVAL_MINUTES * 60)
 
 def start_monitor():
@@ -1234,6 +1235,9 @@ def ocr_openai_compatible(
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json",
     }
+      import os
+    print(f"[OCR DEBUG] Model: {model}, API Key set: {bool(os.getenv('OPENAI_API_KEY'))}")
+    print(f"[OCR DEBUG] Image size: {len(b64)} chars")
     try:
         resp = requests.post(OPENAI_API_URL, headers=headers, json=payload, timeout=120)
     except requests.RequestException as e:
