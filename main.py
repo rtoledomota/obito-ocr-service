@@ -1235,7 +1235,7 @@ def ocr_openai_compatible(
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json",
     }
-      import os
+      
     print(f"[OCR DEBUG] Model: {model}, API Key set: {bool(os.getenv('OPENAI_API_KEY'))}")
     print(f"[OCR DEBUG] Image size: {len(b64)} chars")
     try:
