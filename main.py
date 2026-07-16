@@ -15,23 +15,22 @@ import io
 import time
 import base64
 from threading import Thread, Event
-from typing import List, Optional
+from typing import List, Optional, Tuple, Any, Dict
 from datetime import datetime, timedelta
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 import json
-import base64
 import hashlib
 import unicodedata
 import datetime as dt
-from typing import Any, Dict, List, Optional, Tuple
 import requests
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 import uvicorn
 import logging
 import gc
+
 logger = logging.getLogger(__name__)
 
 def _format_date(raw: str) -> str:
@@ -84,6 +83,7 @@ def _get_existing_data(sheet_id: str) -> tuple:
     except Exception as e:
         logger.warning(f"Não foi possível ler dados existentes: {e}")
         return set(), set()
+
 # ---------------------------------------------------------------------------
 # Configuração
 # ---------------------------------------------------------------------------
@@ -166,6 +166,7 @@ LABEL_KEYWORDS = [
     'óbito atestado', 'obito atestado', 'outras condições', 'outras condicoes',
     'prováveis', 'provaveis',
 ]
+
 # ── Configuração Batch / Drive / Sheets ─────────────────────────────
 DRIVE_SERVICE_ACCOUNT_JSON = os.environ.get("DRIVE_SERVICE_ACCOUNT_JSON", "")
 SHEET_ID = os.environ.get("SHEET_ID", "")               # ID da planilha existente (ou vazio pra criar nova)
@@ -196,9 +197,9 @@ AUDIT_COLUMNS = [
     "HASH_ARQUIVO",
     'DO_NUMERO',
     'MEDICO_ATESTANTE',
-    'CRM_MEDICO', 
+    'CRM_MEDICO',
     'IDADE_ANOS',
-    'PARTE_II', 
+    'PARTE_II',
     'INTERVALO_DOENCA_MORTE'
 ]
 
@@ -261,7 +262,7 @@ def _normalize_lines(text: str) -> List[str]:
 
 def _strip_numeric_prefix(line: str) -> str:
     s = line.strip()
-    m = re.match(r'^(\d+\s*[\.\):\-]?\s*)(.*)$', s)
+    m = re.match(r'^(\d+\s*[\.\)\:\-]?\s*)(.*)$', s)
     if m and re.search(r'[A-Za-zÀ-ú]', m.group(2)):
         return m.group(2).strip()
     return s
@@ -330,6 +331,29 @@ def _normalize_cep(value: str) -> str:
     if len(digits) == 8:
         return f"{digits[:5]}-{digits[5:]}"
     return value.strip()
+
+def _normalize_hour(raw: str) -> str:
+    """Normaliza hora extraída para o formato HH:MM."""
+    if not raw or not raw.strip():
+        return ""
+    raw = raw.strip()
+    # Já está no formato HH:MM
+    if re.match(r'^\d{1,2}:\d{2}$', raw):
+        parts = raw.split(":")
+        return f"{int(parts[0]):02d}:{parts[1]}"
+    # Apenas dígitos: HHMM ou HMM
+    digits = re.sub(r'\D', '', raw)
+    if len(digits) == 4:
+        return f"{digits[:2]}:{digits[2:]}"
+    elif len(digits) == 3:
+        return f"0{digits[0]}:{digits[1:]}"
+    elif len(digits) in (1, 2):
+        return f"{int(digits):02d}:00"
+    return raw
+
+def _is_valid_hour(value: str) -> bool:
+    """Valida se a string está no formato HH:MM e representa uma hora válida."""
+    return _valid_hour(value)
 
 # ---------------------------------------------------------------------------
 # Parser: busca estrita por próxima linha
@@ -433,6 +457,7 @@ def _find_uf_after(
                 if _looks_like_label(cnorm):
                     break
     return ""
+
 # ═══════════════════════════════════════════════════════════════════
 # Módulo Batch: Google Drive / Sheets / Processamento em Lote
 # ═══════════════════════════════════════════════════════════════════
@@ -464,7 +489,6 @@ def _list_images_in_folder(folder_id: str, since: Optional[datetime] = None) -> 
     Se `since` for fornecido, retorna apenas arquivos modificados após aquela data.
     """
     drive = _get_drive_service()
-    
     # 1. Busca IMAGENS na pasta atual
     query = (
         f"'{folder_id}' in parents and "
@@ -491,7 +515,6 @@ def _list_images_in_folder(folder_id: str, since: Optional[datetime] = None) -> 
         page_token = resp.get("nextPageToken")
         if not page_token:
             break
-    
     # 2. Busca SUBPASTAS (recursão)
     folder_query = (
         f"'{folder_id}' in parents and "
@@ -513,7 +536,6 @@ def _list_images_in_folder(folder_id: str, since: Optional[datetime] = None) -> 
         page_token = folders_resp.get("nextPageToken")
         if not page_token:
             break
-    
     return files
 
 def _parse_rfc3339(ts: str) -> Optional[datetime]:
@@ -545,23 +567,18 @@ def _process_single_image(file_id: str, file_name: str) -> dict:
         image_bytes, mime_type = _download_image_bytes(file_id)
     except Exception as e:
         return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_DRIVE", "ERROS": str(e)}
-    
     try:
         raw_text, confidence = _ocr_image_from_bytes(image_bytes, mime_type)
     except Exception as e:
         return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_OCR", "ERROS": str(e)}
-    
     try:
         structured = parse_obito(raw_text)
     except Exception as e:
         structured = {k: "" for k in HEADER}
         structured["ERROS"] = f"Erro no parser: {e}"
-    
     structured["HASH_ARQUIVO"] = _sha256_bytes(image_bytes)
     structured["HASH_CONTEUDO"] = _sha256_text(raw_text)
-    
     validate_obito(structured)
-    
     row = {
         "DATA_PROCESSAMENTO": datetime.utcnow().strftime("%d/%m/%Y %H:%M:%S"),
         "NOME_ARQUIVO": file_name,
@@ -580,13 +597,18 @@ def _process_single_image(file_id: str, file_name: str) -> dict:
         "TIPO_OBITO": structured.get("TIPO_OBITO", ""),
         "ERROS": structured.get("ERROS", ""),
         "HASH_ARQUIVO": structured.get("HASH_ARQUIVO", ""),
+        "DO_NUMERO": structured.get("DO_NUMERO", ""),
+        "MEDICO_ATESTANTE": structured.get("MEDICO_ATESTANTE", ""),
+        "CRM_MEDICO": structured.get("CRM_MEDICO", ""),
+        "IDADE_ANOS": structured.get("IDADE_ANOS", ""),
+        "PARTE_II": structured.get("PARTE_II", ""),
+        "INTERVALO_DOENCA_MORTE": structured.get("INTERVALO_DOENCA_MORTE", ""),
     }
     return row
 
 def _ensure_sheet_exists() -> str:
     """Cria a planilha se não existir, ou garante que a aba 'Auditoria' exista com cabeçalhos."""
     sheets = _get_sheets_service()
-
     if SHEET_ID:
         # Verifica se a aba 'Auditoria' já existe
         metadata = sheets.spreadsheets().get(
@@ -594,7 +616,6 @@ def _ensure_sheet_exists() -> str:
             fields="sheets.properties.title",
         ).execute()
         tab_names = [s["properties"]["title"] for s in metadata.get("sheets", [])]
-
         if "Auditoria" not in tab_names:
             # Cria a aba
             sheets.spreadsheets().batchUpdate(
@@ -610,7 +631,6 @@ def _ensure_sheet_exists() -> str:
             ).execute()
             logger.info(f"Aba 'Auditoria' criada na planilha {SHEET_ID}")
         return SHEET_ID
-
     # Fluxo original para planilha nova
     spreadsheet = {
         "properties": {"title": AUDIT_SHEET_TITLE},
@@ -658,7 +678,7 @@ def _col_to_letter(col: int) -> str:
         letters = chr(ord('A') + col % 26) + letters
         col //= 26
     return letters
-  
+
 def _load_processed_ids() -> set:
     """Carrega IDs de imagens já processadas (para evitar repetição)."""
     if not os.path.exists(PROCESSED_IMAGES_LOG):
@@ -671,6 +691,7 @@ def _save_processed_ids(ids: set):
     with open(PROCESSED_IMAGES_LOG, "a") as f:
         for fid in ids:
             f.write(fid + "\n")
+
 def _ensure_columns_exist(sheet_id: str) -> None:
     """Adiciona colunas faltantes no header da planilha."""
     try:
@@ -683,19 +704,15 @@ def _ensure_columns_exist(sheet_id: str) -> None:
         ).execute()
         values = result.get("values", [])
         existing_cols = values[0] if values else []
-
         # Descobre quais colunas da HEADER estão faltando
         novas = [c for c in HEADER if c not in existing_cols]
-
         if not novas:
             return  # já está completo
-
         # Adiciona as colunas faltantes no final
         start_col = len(existing_cols) + 1  # 1-indexed
         end_col = len(existing_cols) + len(novas)
         start_col_letter = _col_to_letter(start_col)
         end_col_letter = _col_to_letter(end_col)
-
         body = {"values": [novas]}
         sheets.spreadsheets().values().update(
             spreadsheetId=sheet_id,
@@ -706,7 +723,7 @@ def _ensure_columns_exist(sheet_id: str) -> None:
         logger.info(f"✅ {len(novas)} colunas adicionadas: {novas}")
     except Exception as e:
         logger.warning(f"Não foi possível adicionar colunas: {e}")
-      
+
 def run_batch(folder_id: str = None, force_reprocess: bool = False, limit: int = 0) -> dict:
     """
     Pipeline completo do lote:
@@ -719,10 +736,8 @@ def run_batch(folder_id: str = None, force_reprocess: bool = False, limit: int =
     fid = folder_id or DRIVE_FOLDER_ID
     if not fid:
         return {"success": False, "error": "Nenhum DRIVE_FOLDER_ID configurado."}
-
     processed_ids = set() if force_reprocess else _load_processed_ids()
     images = _list_images_in_folder(fid)
-    
     # Carrega hashes já registrados na planilha para evitar duplicatas (persistente)
     sheet_id = _ensure_sheet_exists()
     _ensure_columns_exist(sheet_id)
@@ -745,12 +760,9 @@ def run_batch(folder_id: str = None, force_reprocess: bool = False, limit: int =
             "new": 0,
             "message": "Nenhuma imagem nova encontrada.",
         }
-
     # Aplica limit se especificado
     if limit > 0:
         new_images = new_images[:limit]
-
-   
     success_ids = set()
     fail_ids = set()
     last_error = None
@@ -765,7 +777,6 @@ def run_batch(folder_id: str = None, force_reprocess: bool = False, limit: int =
             fail_ids.add(img["id"])
             last_error = str(e)
             print(f"Falha ao processar {img['name']}: {e}")
-
     _save_processed_ids(success_ids)
     return {
         "success": True,
@@ -776,10 +787,10 @@ def run_batch(folder_id: str = None, force_reprocess: bool = False, limit: int =
         "sheet_id": sheet_id,
         "message": f"{len(success_ids)} imagens processadas, {len(fail_ids)} falhas.",
     }
+
 # ═══════════════════════════════════════════════════════════════════
 # Background Monitor (thread de polling)
 # ═══════════════════════════════════════════════════════════════════
-
 _monitor_thread: Optional[Thread] = None
 _monitor_stop = Event()
 
@@ -811,12 +822,10 @@ def stop_monitor():
     if _monitor_thread:
         _monitor_thread.join(timeout=10)
     logger.info("Monitor parado.")
+
 # ── Constantes para extração de causas ──────────────────────────────────
 _CAUSA_BASICA_BLACKLIST = [
     'outras condições significativas', 'outras condicoes significativas',
-    'nome do médico', 'nome do medico', 'crm',
-    'óbito atestado', 'obito atestado', 'medico', 'médico',
-     'outras condições significativas', 'outras condicoes significativas',
     'nome do médico', 'nome do medico', 'crm',
     'óbito atestado', 'obito atestado', 'medico', 'médico',
     'outras afecções', 'outras afeccoes',
@@ -871,10 +880,8 @@ def _extract_causes(text: str) -> List[str]:
     ignore_markers = [
         "parte i", "devido ou como consequência de", "devido a",
         "intervalo entre o início e a morte", "intervalo entre o inicio e a morte",
-        "cid", "meses dias horas minutos ignorado", "causas da morte", "causa da morte",
-        "parte i", "devido ou como consequência de", "devido a", "intervalo entre o início e a morte", 
-        "intervalo entre o inicio e a morte","cid", "meses dias horas minutos ignorado", "causas da morte",
-        "causa da morte", "outras afecções","outras afeccoes",
+        "cid", "meses dias horas minutos ignorado", "causas da morte",
+        "causa da morte", "outras afecções", "outras afeccoes",
     ]
     start_idx = -1
     for i, (norm, _) in enumerate(pairs):
@@ -974,7 +981,6 @@ def parse_obito(text: str) -> Dict[str, Any]:
     structured["ESTADO_CIVIL"] = _find_block_value(text, ["Estado civil"])
     structured["NACIONALIDADE"] = _find_block_value(text, ["Nacionalidade"])
     structured["PROFISSAO"] = _find_block_value(text, ["Profissão", "Profissao", "Ocupação", "Ocupacao"])
-
     # --- Causas (PATCH A APLICADO) ---
     causes = _extract_causes(text)
     if causes:
@@ -1001,7 +1007,6 @@ def parse_obito(text: str) -> Dict[str, Any]:
         if cids:
             cid_basica = cids[-1].upper()
     structured['CID_BASICA'] = cid_basica
-
     # --- NOVOS CAMPOS ---
     # DO_NUMERO: número da declaração de óbito
     structured["DO_NUMERO"] = _find_block_value(
@@ -1047,12 +1052,10 @@ def parse_obito(text: str) -> Dict[str, Any]:
         except Exception:
             pass
     structured["IDADE_ANOS"] = idade_calc
-
     # --- Tipo de óbito / assistido ---
     structured["TIPO_OBITO"] = _find_block_value(text, ["Tipo de óbito", "Tipo de obito"])
     structured["ASSISTIDO"] = _find_block_value(text, ["Assistido", "Foi assistido"])
     structured["PROTOCOLO_TEV"] = _find_block_value(text, ["Protocolo TEV", "Protocolo"])
-
     # --- Hashes e processamento ---
     structured["HASH_CONTEUDO"] = _sha256_text(text)
     structured["DATA_PROCESSAMENTO"] = dt.datetime.utcnow().isoformat() + "Z"
@@ -1111,12 +1114,10 @@ def validate_obito(structured: Dict[str, Any]) -> Dict[str, Any]:
     errors: List[str] = []
     warnings: List[str] = []
     computed: Dict[str, Any] = {}
-
     campos_criticos = ["NOME", "NOME_MAE", "NASCIMENTO", "DATA_OBITO", "CIDADE_OBITO", "UF_OBITO"]
     for campo in campos_criticos:
         if not structured.get(campo):
             errors.append(f"Campo crítico ausente: {campo}")
-
     if structured.get("NASCIMENTO") and not _valid_date(structured["NASCIMENTO"]):
         errors.append("NASCIMENTO com data inválida")
     if structured.get("DATA_OBITO") and not _valid_date(structured["DATA_OBITO"]):
@@ -1129,7 +1130,6 @@ def validate_obito(structured: Dict[str, Any]) -> Dict[str, Any]:
         warnings.append("UF do endereço inválida")
     if structured.get("CEP") and not _valid_cep(structured["CEP"]):
         warnings.append("CEP com formato inválido")
-
     age_err, idade = _age_coherence(
         structured.get("NASCIMENTO", ""), structured.get("DATA_OBITO", "")
     )
@@ -1138,16 +1138,13 @@ def validate_obito(structured: Dict[str, Any]) -> Dict[str, Any]:
         computed["idade_anos"] = None
     else:
         computed["idade_anos"] = idade
-
     structured["NOME_OK"] = "SIM" if structured.get("NOME") else "NAO"
     structured["NOMES_OK"] = "SIM" if (structured.get("NOME") and structured.get("NOME_MAE")) else "NAO"
-
     total_campos = len(HEADER)
     preenchidos = sum(1 for k in HEADER if structured.get(k))
     score = int((preenchidos / total_campos) * 100)
     score = max(0, score - len(errors) * 10)
     structured["QUALIDADE_SCORE"] = score
-
     # ── Regra operacional de STATUS ──
     if errors:
         status = 'REVISAR'
@@ -1156,9 +1153,7 @@ def validate_obito(structured: Dict[str, Any]) -> Dict[str, Any]:
     else:
         status = 'OK'
     structured['STATUS'] = status
-
     structured["ERROS"] = " | ".join(errors)
-
     validation = {
         "ok": len(errors) == 0,
         "errors": errors,
@@ -1189,40 +1184,38 @@ def ocr_openai_compatible(
         raise OCRProviderError("OPENAI_API_KEY não configurado.", 502)
     if not OPENAI_API_URL:
         raise OCRProviderError("OPENAI_API_URL não configurado.", 502)
-
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     data_url = f"data:{mime_type};base64,{b64}"
-
-  prompt = (
-  "Você é um especialista em OCR para Declarações de Óbito (DO) brasileiras do Ministério da Saúde. "
-  "Extraia TODO o texto VISÍVEL no documento, incluindo dados impressos e manuscritos (letra cursiva). "
-  "Preste atenção especial em:\n\n"
-  "1. DADOS DO FALECIDO (quadro superior):\n"
-  "   - Nome completo, Nome social, Nome da mãe, Nome do pai\n"
-  "   - Data de nascimento, Sexo, Raça/Cor, Estado civil, Nacionalidade, Profissão\n"
-  "   - Endereço completo: logradouro, número, complemento, bairro, município, UF, CEP\n"
-  "   - CPF, RG, Órgão emissor, Naturalidade (município e UF de nascimento)\n\n"
-  "2. DADOS DO ÓBITO (quadro do meio):\n"
-  "   - Data do óbito (dd/mm/aaaa), Hora, Local do óbito\n"
-  "   - Município de ocorrência, UF\n"
-  "   - Tipo de óbito, Assistido, Data do atestado\n\n"
-  "3. CAUSAS DA MORTE (Parte I - quadro maior):\n"
-  "   - Identifique as alíneas (a), (b), (c), (d), (e)\n"
-  "   - CAUSA_BASICA é a última causa listada na Parte I (a de baixo)\n"
-  "   - CIDs quando presentes\n\n"
-  "4. OUTRAS INFORMAÇÕES (Parte II / rodapé):\n"
-  "   - Outras condições significativas\n"
-  "   - Intervalo entre início da doença e morte\n"
-  "   - Número da DO (geralmente no canto superior direito ou código de barras)\n"
-  "   - Nome do médico atestante e CRM\n\n"
-  "REGRAS IMPORTANTES:\n"
-  "- Preserve a estrutura de linhas e a ordem dos campos\n"
-  "- Texto manuscrito em letra cursiva DEVE ser transcrito fielmente\n"
-  "- Se um campo estiver ilegível ou em branco, NÃO invente — omita\n"
-  "- NÃO resuma, traduza ou interprete — extraia o texto BRUTO\n"
-  "- Mantenha datas no formato em que aparecem (dd/mm/aaaa)\n"
-  "- Retorne APENAS o texto extraído, sem comentários, sem formatação extra"
-  )
+    prompt = (
+        "Você é um especialista em OCR para Declarações de Óbito (DO) brasileiras do Ministério da Saúde. "
+        "Extraia TODO o texto VISÍVEL no documento, incluindo dados impressos e manuscritos (letra cursiva). "
+        "Preste atenção especial em:\n\n"
+        "1. DADOS DO FALECIDO (quadro superior):\n"
+        "   - Nome completo, Nome social, Nome da mãe, Nome do pai\n"
+        "   - Data de nascimento, Sexo, Raça/Cor, Estado civil, Nacionalidade, Profissão\n"
+        "   - Endereço completo: logradouro, número, complemento, bairro, município, UF, CEP\n"
+        "   - CPF, RG, Órgão emissor, Naturalidade (município e UF de nascimento)\n\n"
+        "2. DADOS DO ÓBITO (quadro do meio):\n"
+        "   - Data do óbito (dd/mm/aaaa), Hora, Local do óbito\n"
+        "   - Município de ocorrência, UF\n"
+        "   - Tipo de óbito, Assistido, Data do atestado\n\n"
+        "3. CAUSAS DA MORTE (Parte I - quadro maior):\n"
+        "   - Identifique as alíneas (a), (b), (c), (d), (e)\n"
+        "   - CAUSA_BASICA é a última causa listada na Parte I (a de baixo)\n"
+        "   - CIDs quando presentes\n\n"
+        "4. OUTRAS INFORMAÇÕES (Parte II / rodapé):\n"
+        "   - Outras condições significativas\n"
+        "   - Intervalo entre início da doença e morte\n"
+        "   - Número da DO (geralmente no canto superior direito ou código de barras)\n"
+        "   - Nome do médico atestante e CRM\n\n"
+        "REGRAS IMPORTANTES:\n"
+        "- Preserve a estrutura de linhas e a ordem dos campos\n"
+        "- Texto manuscrito em letra cursiva DEVE ser transcrito fielmente\n"
+        "- Se um campo estiver ilegível ou em branco, NÃO invente — omita\n"
+        "- NÃO resuma, traduza ou interprete — extraia o texto BRUTO\n"
+        "- Mantenha datas no formato em que aparecem (dd/mm/aaaa)\n"
+        "- Retorne APENAS o texto extraído, sem comentários, sem formatação extra"
+    )
     payload = {
         "model": model,
         "messages": [
@@ -1241,35 +1234,28 @@ def ocr_openai_compatible(
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json",
     }
-
     try:
         resp = requests.post(OPENAI_API_URL, headers=headers, json=payload, timeout=120)
     except requests.RequestException as e:
         raise OCRProviderError(f"Falha de comunicação com provedor OCR: {e}", 502)
-
     if resp.status_code != 200:
         raise OCRProviderError(
             f"Provedor OCR retornou HTTP {resp.status_code}: {resp.text[:500]}", 502
         )
-
     try:
         data = resp.json()
     except Exception:
         raise OCRProviderError("Resposta do provedor OCR não é JSON válido.", 502)
-
     try:
         content = data["choices"][0]["message"]["content"]
     except Exception:
         raise OCRProviderError("Resposta do provedor OCR sem conteúdo esperado.", 502)
-
     if not isinstance(content, str) or not content.strip():
         raise OCRProviderError("Provedor OCR retornou conteúdo vazio.", 502)
-
     if _detect_refusal(content):
         raise OCRProviderError(
             "Provedor OCR recusou processar a imagem ou retornou texto inválido.", 502
         )
-
     confidence = 0.9
     try:
         usage = data.get("usage", {})
@@ -1277,7 +1263,6 @@ def ocr_openai_compatible(
             confidence = 0.92
     except Exception:
         pass
-
     return content.strip(), confidence
 
 # ---------------------------------------------------------------------------
@@ -1286,7 +1271,6 @@ def ocr_openai_compatible(
 @app.post("/ocr")
 async def ocr_endpoint(request: Request, authorization: Optional[str] = Header(None)):
     _check_auth(authorization)
-
     try:
         body = await request.json()
     except Exception:
@@ -1295,14 +1279,12 @@ async def ocr_endpoint(request: Request, authorization: Optional[str] = Header(N
             "message": "Corpo da requisição não é JSON válido.",
             "requestId": None,
         })
-
     request_id = body.get("requestId") or body.get("request_id") or None
     file_b64 = body.get("file")
     mime_type = body.get("mimeType") or body.get("mime_type")
     model = body.get("model") or OPENAI_MODEL_DEFAULT
     file_name = body.get("fileName") or body.get("file_name") or ""
     file_id = body.get("fileId") or body.get("file_id") or ""
-
     if not file_b64:
         return JSONResponse(status_code=400, content={
             "code": "MISSING_FILE",
@@ -1321,7 +1303,6 @@ async def ocr_endpoint(request: Request, authorization: Optional[str] = Header(N
             "message": "PDF não é suportado na versão 1. Envie imagem (PNG/JPG).",
             "requestId": request_id,
         })
-
     try:
         file_bytes = base64.b64decode(file_b64, validate=False)
     except Exception:
@@ -1330,16 +1311,13 @@ async def ocr_endpoint(request: Request, authorization: Optional[str] = Header(N
             "message": "Não foi possível decodificar o base64 de 'file'.",
             "requestId": request_id,
         })
-
     if len(file_bytes) > MAX_FILE_SIZE_BYTES:
         return JSONResponse(status_code=413, content={
             "code": "FILE_TOO_LARGE",
             "message": f"Arquivo excede o limite de {MAX_FILE_SIZE_MB} MB.",
             "requestId": request_id,
         })
-
     hash_arquivo = _sha256_bytes(file_bytes)
-
     try:
         raw_text, confidence = ocr_openai_compatible(file_bytes, mime_type, model)
     except OCRProviderError as e:
@@ -1352,21 +1330,17 @@ async def ocr_endpoint(request: Request, authorization: Optional[str] = Header(N
             "message": f"Erro inesperado no provedor OCR: {e}",
             "requestId": request_id,
         })
-
     try:
         structured = parse_obito(raw_text)
     except Exception as e:
         structured = {k: "" for k in HEADER}
         structured["ERROS"] = f"Erro no parser: {e}"
-
     structured["HASH_ARQUIVO"] = hash_arquivo
     structured["HASH_CONTEUDO"] = _sha256_text(raw_text)
-
     validation = validate_obito(structured)
     warnings = validation.get("warnings", [])
     if validation.get("errors"):
         warnings.extend([f"ERRO: {e}" for e in validation["errors"]])
-
     response = {
         "text": raw_text,
         "confidence": confidence,
@@ -1391,10 +1365,10 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     if "requestId" not in detail:
         detail["requestId"] = None
     return JSONResponse(status_code=exc.status_code, content=detail)
+
 # ═══════════════════════════════════════════════════════════════════
 # Endpoints Batch
 # ═══════════════════════════════════════════════════════════════════
-
 @app.post("/batch/process")
 async def batch_process(request: Request, authorization: Optional[str] = Header(None)):
     """Processa todas as imagens novas de uma pasta do Drive."""
@@ -1403,18 +1377,14 @@ async def batch_process(request: Request, authorization: Optional[str] = Header(
         body = await request.json()
     except Exception:
         body = {}
-
     folder_id = body.get("folderId") or body.get("folder_id") or None
     force = body.get("force_reprocess", body.get("force", False))
     request_id = body.get("requestId") or body.get("request_id") or None
-
     if AUTO_PROCESS_ENABLED and not folder_id:
         folder_id = DRIVE_FOLDER_ID
-
     # Suporta limit via query parameter: /batch/process?limit=1
     limit = int(request.query_params.get("limit", 0))
     result = run_batch(folder_id=folder_id, force_reprocess=force, limit=limit)
-
     result["requestId"] = request_id
     status_code = 200 if result.get("success") else 500
     return JSONResponse(status_code=status_code, content=result)
@@ -1462,14 +1432,15 @@ async def config_sheet(request: Request, authorization: Optional[str] = Header(N
         return JSONResponse(status_code=500, content={
             "success": False, "error": str(e),
         })
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 # ═══════════════════════════════════════════════════════════════════
 # Auto-start do monitor (se habilitado via env var)
 # ═══════════════════════════════════════════════════════════════════
-
 if AUTO_PROCESS_ENABLED and DRIVE_FOLDER_ID and DRIVE_SERVICE_ACCOUNT_JSON:
     start_monitor()
+
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=False)
