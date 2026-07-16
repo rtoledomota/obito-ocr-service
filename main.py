@@ -1256,7 +1256,7 @@ def ocr_openai_compatible(
         raise OCRProviderError("Resposta do provedor OCR sem conteúdo esperado.", 502)
     if not isinstance(content, str) or not content.strip():
         raise OCRProviderError("Provedor OCR retornou conteúdo vazio.", 502)
-          print(f"[OCR RESPOSTA BRUTA] (primeiros 500 chars): {content[:500]}", flush=True)
+    print(f"[OCR RESPOSTA BRUTA] (primeiros 500 chars): {content[:500]}", flush=True)            
     if _detect_refusal(content):
         raise OCRProviderError(...)
     if _detect_refusal(content):
