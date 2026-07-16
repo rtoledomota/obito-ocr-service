@@ -1012,7 +1012,7 @@ def parse_obito(text: str) -> Dict[str, Any]:
     # DO_NUMERO: número da declaração de óbito
     structured["DO_NUMERO"] = _find_block_value(
         text,
-        ["D\.O\.", "DO nº", "DO Nº", "Nº DO", "Numero DO", "Número DO", "DO "],
+        [r"D\.O\.", "DO nº", "DO Nº", "Nº DO", "Numero DO", "Número DO", "DO"],
         stop_labels=["Nome", "Data", "Tipo"],
     )
     # Médico atestante
