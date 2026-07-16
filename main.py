@@ -1126,7 +1126,6 @@ def ocr_openai_compatible(
     if _detect_refusal(content):
         print(f"[OCR] Modelo recusou: '{content[:200]}'", flush=True)
         return "", 0.0
-        )
     confidence = 0.9
     try:
         usage = data.get("usage", {})
