@@ -287,7 +287,21 @@ def _is_noise_line(norm_line: str) -> bool:
 
 def _looks_like_label(norm_line: str) -> bool:
     return _is_noise_line(norm_line)
-
+  
+def _normalize_date_ocr(raw: str) -> str:
+    """Normaliza data do OCR que pode vir nos formatos:
+    '31 05 2022', '31/05/2022', '31-05-2022', '31 05 2022 Hora 22:45' etc."""
+    if not raw:
+        return ""
+    # Remove texto após a data (ex: "Hora 22:45")
+    raw = re.sub(r'\s+Hora.*$', '', raw, flags=re.IGNORECASE)
+    # Troca separadores não-padrão (espaço, hífen) por /
+    raw = re.sub(r'[\s\-]+', '/', raw.strip())
+    # Valida se tem 3 partes numéricas
+    partes = raw.split('/')
+    if len(partes) == 3 and all(p.isdigit() for p in partes):
+        return raw
+    return ""
 def _normalize_date(raw: str) -> str:
     """Tenta converter data para DD/MM/AAAA. Retorna vazio se inválida."""
     if not raw or not raw.strip():
@@ -925,6 +939,17 @@ def parse_obito(text: str) -> Dict[str, Any]:
         stop_labels=["Nome da mãe", "Nome da mae", "Nome do pai", "Nome social", "Data"],
     )
     print(f"[PARSE DEBUG] NOME extraído: '{structured['NOME']}'", flush=True)
+      # Fallback inline para NOME (quando está na mesma linha do label)
+    if not structured["NOME"]:
+        for label in ["Nome do Falecido", "Nome do falecido"]:
+            for line in text.split('\n'):
+                if label.lower() in line.lower():
+                    resto = line[line.lower().index(label.lower()) + len(label):].strip()
+                    if resto and not any(kw in resto.lower() for kw in ['nome', 'data', 'hora']):
+                        structured["NOME"] = resto
+                        break
+            if structured["NOME"]:
+                break
     structured["NOME_SOCIAL"] = _find_block_value(
         text, ["Nome social", "Nome Social"],
         stop_labels=["Nome do falecido", "Nome da mãe", "Nome da mae", "Nome do pai"],
@@ -950,12 +975,23 @@ def parse_obito(text: str) -> Dict[str, Any]:
     print(f"[PARSE DEBUG] NASCIMENTO extraído: '{_nasc}'", flush=True)
     # --- fim debug ---
     structured["IDADE_ANOS"] = ""  # calculado após DATA_OBITO e NASCIMENTO
-    structured["DATA_OBITO"] = _normalize_date(
-        _find_block_value(text,
-            ["Data do óbito", "Data de óbito", "Data do obito", "Data de obito"],
-            stop_labels=["Hora", "Local do óbito", "Local do obito", "Município de ocorrência", "Municipio de ocorrencia"],
-        )
+        _raw_data_obito = _find_block_value(text,
+        ["Data do óbito", "Data de óbito", "Data do obito", "Data de obito"],
+        stop_labels=["Hora", "Local do óbito", "Local do obito", "Município de ocorrência", "Municipio de ocorrencia"],
     )
+    # Se não achou no formato bloco, tenta inline na mesma linha
+    if not _raw_data_obito:
+        for label in ["Data do óbito", "Data de óbito", "Data do obito", "Data de obito"]:
+            for line in text.split('\n'):
+                if label.lower() in line.lower():
+                    # Extrai o que vem depois do label
+                    resto = line[line.lower().index(label.lower()) + len(label):].strip()
+                    if resto:
+                        _raw_data_obito = resto
+                        break
+            if _raw_data_obito:
+                break
+    structured["DATA_OBITO"] = _normalize_date(_normalize_date_ocr(_raw_data_obito))
     print(f"[PARSE DEBUG] DATA_OBITO extraído: '{structured['DATA_OBITO']}'", flush=True)
     structured["HORA_OBITO"] = _find_hora_obito(text)
     structured["DATA_ATESTADO"] = _normalize_date(
