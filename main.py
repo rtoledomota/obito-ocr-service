@@ -915,7 +915,7 @@ def _extract_causes(text: str) -> List[str]:
 # ---------------------------------------------------------------------------
 def parse_obito(text: str) -> Dict[str, Any]:
     """Constrói o dicionário estruturado a partir do texto OCR."""
-       structured: Dict[str, Any] = {k: "" for k in HEADER}
+    structured: Dict[str, Any] = {k: "" for k in HEADER}
     print(f"[PARSE DEBUG] Texto OCR recebido (primeiros 1000 chars):", flush=True)
     print(text[:1000], flush=True)
     print(f"[PARSE DEBUG] --- fim debug ---", flush=True)
@@ -957,7 +957,6 @@ def parse_obito(text: str) -> Dict[str, Any]:
         )
     )
     print(f"[PARSE DEBUG] DATA_OBITO extraído: '{structured['DATA_OBITO']}'", flush=True)
-
 # ---------------------------------------------------------------------------
 # Validação
 # ---------------------------------------------------------------------------
