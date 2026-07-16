@@ -1078,34 +1078,10 @@ def ocr_openai_compatible(
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     data_url = f"data:{mime_type};base64,{b64}"
     prompt = (
-        "Você é um especialista em OCR para Declarações de Óbito (DO) brasileiras do Ministério da Saúde. "
-        "Extraia TODO o texto VISÍVEL no documento, incluindo dados impressos e manuscritos (letra cursiva). "
-        "Preste atenção especial em:\n\n"
-        "1. DADOS DO FALECIDO (quadro superior):\n"
-        "   - Nome completo, Nome social, Nome da mãe, Nome do pai\n"
-        "   - Data de nascimento, Sexo, Raça/Cor, Estado civil, Nacionalidade, Profissão\n"
-        "   - Endereço completo: logradouro, número, complemento, bairro, município, UF, CEP\n"
-        "   - CPF, RG, Órgão emissor, Naturalidade (município e UF de nascimento)\n\n"
-        "2. DADOS DO ÓBITO (quadro do meio):\n"
-        "   - Data do óbito (dd/mm/aaaa), Hora, Local do óbito\n"
-        "   - Município de ocorrência, UF\n"
-        "   - Tipo de óbito, Assistido, Data do atestado\n\n"
-        "3. CAUSAS DA MORTE (Parte I - quadro maior):\n"
-        "   - Identifique as alíneas (a), (b), (c), (d), (e)\n"
-        "   - CAUSA_BASICA é a última causa listada na Parte I (a de baixo)\n"
-        "   - CIDs quando presentes\n\n"
-        "4. OUTRAS INFORMAÇÕES (Parte II / rodapé):\n"
-        "   - Outras condições significativas\n"
-        "   - Intervalo entre início da doença e morte\n"
-        "   - Número da DO (geralmente no canto superior direito ou código de barras)\n"
-        "   - Nome do médico atestante e CRM\n\n"
-        "REGRAS IMPORTANTES:\n"
-        "- Preserve a estrutura de linhas e a ordem dos campos\n"
-        "- Texto manuscrito em letra cursiva DEVE ser transcrito fielmente\n"
-        "- Se um campo estiver ilegível ou em branco, NÃO invente — omita\n"
-        "- NÃO resuma, traduza ou interprete — extraia o texto BRUTO\n"
-        "- Mantenha datas no formato em que aparecem (dd/mm/aaaa)\n"
-        "- Retorne APENAS o texto extraído, sem comentários, sem formatação extra"
+        "Transcreva fielmente todo o texto visível neste documento oficial, "
+        "incluindo campos impressos e preenchidos manualmente. "
+        "Preserve a estrutura de linhas e a ordem dos campos. "
+        "Retorne APENAS o texto extraído, sem comentários ou formatação extra."
     )
     payload = {
         "model": model,
@@ -1149,9 +1125,9 @@ def ocr_openai_compatible(
     print(f"[OCR RESPOSTA BRUTA] (primeiros 500 chars): {content[:500]}", flush=True)            
     if _detect_refusal(content):
         raise OCRProviderError(...)
-    if _detect_refusal(content):
-        raise OCRProviderError(
-            "Provedor OCR recusou processar a imagem ou retornou texto inválido.", 502
+     if _detect_refusal(content):
+        print(f"[OCR] Modelo recusou: '{content[:200]}'", flush=True)
+        return "", 0.0
         )
     confidence = 0.9
     try:
