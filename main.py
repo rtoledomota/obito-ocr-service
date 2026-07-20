@@ -857,74 +857,7 @@ def root():
 def batch_process(request: BatchRequest):
     result = run_batch(limit=request.limit)
     return result
-@app.post("/batch/reprocess")
-def batch_reprocess(limit: int = 10):
-    """Reprocessa imagens ignorando a verificação de duplicatas."""
-    logger.info(f"Iniciando reprocessamento com limit={limit}")
 
-    from googleapiclient.http import MediaIoBaseDownload
-
-    drive = _get_drive_service()
-    query = (f"'{DRIVE_FOLDER_ID}' in parents and "
-             f"(mimeType contains 'image/' or mimeType='application/pdf')")
-
-    all_files = []
-    page_token = None
-    while True:
-        response = drive.files().list(
-            q=query,
-            spaces="drive",
-            fields="nextPageToken, files(id, name, mimeType, createdTime)",
-            pageToken=page_token,
-            orderBy="createdTime asc",
-        ).execute()
-        all_files.extend(response.get("files", []))
-        page_token = response.get("nextPageToken")
-        if not page_token:
-            break
-
-    total = len(all_files)
-    to_process = all_files[:limit]
-
-    processed_count = 0
-    failed_ids = []
-    rows_to_insert = []
-
-    for img in to_process:
-        file_id = img["id"]
-        file_name = img.get("name", "unknown")
-        row = _process_single_image(file_id, file_name)
-
-        if row.get("STATUS") == "OK":
-            processed_count += 1
-            rows_to_insert.append([row.get(h, "") for h in HEADER])
-        elif row.get("STATUS") == "REJEITADO":
-            logger.info(f"{file_name}: {row.get('ERROS', 'rejeitada')}")
-        else:
-            failed_ids.append(file_name)
-            rows_to_insert.append([row.get(h, "") for h in HEADER])
-
-    if rows_to_insert:
-        result = _append_rows_to_sheet(rows_to_insert)
-        if result:
-            logger.info(f"Inseridas {len(rows_to_insert)} linhas na planilha.")
-        else:
-            logger.error("Falha ao inserir linhas na planilha.")
-
-    msg = f"{processed_count} imagens processadas, {len(failed_ids)} falhas."
-    if failed_ids:
-        msg += f" IDs com falha: {', '.join(failed_ids[:5])}"
-
-    return {
-        "success": True,
-        "total": total,
-        "new": len(to_process),
-        "processed": processed_count,
-        "failed": len(failed_ids),
-        "sheet_id": SHEET_ID,
-        "message": msg,
-        "requestId": str(uuid.uuid4()),
-    }
 @app.post("/batch/reprocess")
 def batch_reprocess(limit: int = 10):
     """Reprocessa imagens ignorando verificação de duplicatas."""
