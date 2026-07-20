@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from collections import OrderedDict
 from typing import Optional
 from urllib.parse import urljoin
+import threading
 
 import requests
 from PIL import Image
@@ -11,6 +12,8 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 from googleapiclient.errors import HttpError
+from fastapi import FastAPI
+from pydantic import BaseModel
 
 # ── Config logger ────────────────────────────────────────────────
 logger = logging.getLogger("uvicorn")
@@ -41,7 +44,7 @@ HEADER = [
     "CID_BASICA", "CID_MORTE", "CID_MORTE_2", "CID_MORTE_3", "CID_MORTE_4", "CID_MORTE_5",
     "TIPO_OBITO", "ASSISTIDO", "DATA_ATESTADO",
     "NOMES_OK", "NOME_OK", "GARBAGE_CODES", "QTD_GARBAGE",
-    "PROTOCOLO_TE", "ERROS", "QUALIDADE_SCORE", "HASH_ARQUIVO",
+    "PROTOCOLO_TEV", "ERROS", "QUALIDADE_SCORE", "HASH_ARQUIVO",
     "HASH_CONTEUDO", "STATUS",
     "NOME_MES", "DATA_PROCESSAMENTO",
     "DO_NUMERO", "MEDICO_ATESTANTE", "CRM_MEDICO",
@@ -49,7 +52,6 @@ HEADER = [
     "PARTE_II", "INTERVALO_DOENCA_MORTE",
 ]
 
-import threading
 _lock = threading.Lock()
 
 # ── Funções de normalização de data ──────────────────────────────
@@ -58,21 +60,16 @@ def _normalize_date_ocr(raw: str) -> str:
     """Tenta extrair uma data no formato DD/MM/AAAA de uma string."""
     if not raw or not raw.strip():
         return ""
-
     raw = raw.strip().replace(" ", "/").replace("-", "/").replace(".", "/")
-
     partes = [p for p in raw.split("/") if p.strip()]
     if len(partes) != 3:
         return ""
-
     p1, p2, p3 = partes[0].strip(), partes[1].strip(), partes[2].strip()
     if not p1.isdigit() or not p2.isdigit() or not p3.isdigit():
         return ""
-
     d, m, y = int(p1), int(p2), int(p3)
     if len(p3) == 2:
         y += 2000 if y < 50 else 1900
-
     if 1 <= d <= 31 and 1 <= m <= 12 and 1900 <= y <= 2100:
         return f"{d:02d}/{m:02d}/{y}"
     return ""
@@ -83,10 +80,8 @@ def _normalize_date(raw: str) -> str:
         return ""
 
     raw = raw.strip()
-
     # Remove conteúdo entre parênteses: "(10:42)", "(hora aproximada)" etc.
     raw = re.sub(r'\([^)]*\)', '', raw).strip()
-
     # Troca separadores como ponto (23.10.2022) por barra
     raw = re.sub(r'[.\s]+', '/', raw)
 
@@ -163,7 +158,6 @@ def _extract_uf_ocorrencia(text: str) -> str:
             return uf_match.group(1).strip()
 
     # Tenta 2: fallback — pega o último UF do documento
-    # (ocorrência geralmente vem depois da residência)
     ufs = re.findall(r'(?<!Município\s.*)UF\s*[:\s]*([A-Z]{2})', text)
     if ufs:
         return ufs[-1].strip()
@@ -175,7 +169,7 @@ def _parse_parte_i(text: str) -> dict:
     Extrai a cadeia de causas da morte da Parte I da DO.
 
     Formato esperado (um diagnóstico por linha):
-      a) ou 1) ou I)   → CAUSA_MORTE (causa direta / causa básica)
+      a) ou 1) ou I)   → CAUSA_MORTE
       b) ou 2) ou II)  → CAUSA_MORTE_2
       c) ou 3) ou III) → CAUSA_MORTE_3
       d) ou 4) ou IV)  → CAUSA_MORTE_4
@@ -196,7 +190,7 @@ def _parse_parte_i(text: str) -> dict:
     if not parte_i_match:
         # Fallback: procura por "Causas da morte" seguido de linhas numeradas
         parte_i_match = re.search(
-            r'Causas?\s+da?\s+morte[:\s]*\n?(.*?)(?:PARTE\s+II|Outras condições|' +
+            r'Causas?\s+da?\s+morte[:\s]*\n?(.*?)(?:PARTE\s+II|Outras condições|'
             r'Nome do médico|CRM|$)',
             text, re.DOTALL | re.IGNORECASE
         )
@@ -212,7 +206,7 @@ def _parse_parte_i(text: str) -> dict:
     )
 
     if not linhas:
-        # Fallback: captura linhas com diagnóstico após numeração
+        # Fallback
         linhas = re.findall(
             r'(?:\d[\)\.]\s*|[a-dA-D][\)\.]\s*|I[\)\.]\s*|II[\)\.]\s*|III[\)\.]\s*|IV[\)\.]\s*)(.+)',
             parte_i_text
@@ -224,7 +218,6 @@ def _parse_parte_i(text: str) -> dict:
         linha = l.strip()
         if not linha or len(linha) < 3:
             continue
-        # Ignora linhas que são instruções do formulário
         if re.match(r'^(anote|preencher|não|nao|ignore|cid)', linha, re.IGNORECASE):
             continue
         causas.append(linha)
@@ -255,7 +248,6 @@ def _clean_field(value: str) -> str:
     if not value:
         return ""
 
-    # Remove trechos de instruções do formulário
     instructions = [
         r'ANOTE SOMENTE UM DIAGNÓSTICO POR LINHA',
         r'Não preencher este espaço',
@@ -268,14 +260,10 @@ def _clean_field(value: str) -> str:
     for instr in instructions:
         value = re.sub(instr, '', value, flags=re.IGNORECASE).strip()
 
-    # Se o valor é apenas números grandes (códigos que vazaram)
     if re.match(r'^\d{4,}$', value):
         return ""
 
-    # Remove códigos numéricos soltos grudados no final
-    # ex: "São Caetano do Sul350" → "São Caetano do Sul"
     value = re.sub(r'(\D)\d{3,}\s*$', r'\1', value).strip()
-
     return value.strip()
 
 # ── Google API ───────────────────────────────────────────────────
@@ -339,7 +327,6 @@ def _download_image_bytes(file_id):
     while not done:
         status, done = downloader.next_chunk()
 
-    # Obtém metadados para MIME type
     metadata = drive.files().get(fileId=file_id, fields="mimeType,name").execute()
     mime_type = metadata.get("mimeType", "image/jpeg")
     return fh.getvalue(), mime_type
@@ -347,7 +334,8 @@ def _download_image_bytes(file_id):
 def _list_new_images():
     """Lista imagens no Drive que ainda não foram processadas."""
     drive = _get_drive_service()
-    query = f"'{DRIVE_FOLDER_ID}' in parents and (mimeType contains 'image/' or mimeType='application/pdf')"
+    query = (f"'{DRIVE_FOLDER_ID}' in parents and "
+             f"(mimeType contains 'image/' or mimeType='application/pdf')")
     try:
         results = []
         page_token = None
@@ -478,7 +466,6 @@ def _find_block_value(text: str, labels: list, stop_labels: list = None) -> str:
                 # Tenta inline: se sobra algo depois do label
                 resto = line[idx + len(label):].strip().rstrip(":")
                 if resto:
-                    # Separa por dois pontos se houver
                     if ":" in resto:
                         resto = resto.split(":")[-1].strip()
                     if resto and not any(sl.lower() in resto.lower() for sl in stop_labels):
@@ -488,7 +475,6 @@ def _find_block_value(text: str, labels: list, stop_labels: list = None) -> str:
                 for j in range(i + 1, min(i + 5, len(lines))):
                     candidate = lines[j].strip()
                     if candidate and not any(sl.lower() in candidate.lower() for sl in stop_labels):
-                        # Verifica se não é outro label
                         if not re.match(r'^[A-ZÁÉÍÓÚÂÊÔÃÕÇ][a-záéíóúâêôãõç]+\s*\(', candidate):
                             return _clean_field(candidate)
     return ""
@@ -497,6 +483,7 @@ def _detect_obito_type(text: str) -> str:
     """Detecta o tipo de óbito no texto."""
     if re.search(r'(?<!Não\s)(Fetal|fetal)', text) and 'Não fetal' not in text:
         return "Fetal"
+    if re.search(r'Fatal|Não fetal|Não Fetal|Não\s+fetal', text, re.IGNORECASE):
         return "Fatal"
     # Verifica se há checkbox indicando tipo
     if re.search(r'X\s*Fetal', text) and not re.search(r'X\s*Não\s+fetal', text):
@@ -648,6 +635,7 @@ def parse_obito(text: str) -> dict:
 
     # ── Parte II ──────────────────────────────────────────────
     parte_ii_match = re.search(
+        r'PARTE\s+II[:\s]*\n?(.*?)(?:Outros episódios|Nome do médico|CRM|$)',
         text, re.DOTALL | re.IGNORECASE
     )
     if parte_ii_match:
@@ -674,7 +662,6 @@ def parse_obito(text: str) -> dict:
             structured[campo] = _clean_field(structured[campo])
 
     logger.debug(f"[PARSE DEBUG] structured final é None? {structured is None}")
-
     return structured
 
 # ── Validação ────────────────────────────────────────────────────
@@ -699,13 +686,11 @@ def validate_obito(structured: dict) -> None:
         if not structured.get(field):
             missing_critical.append(field)
 
-    # Garbage detection
     raw_text_for_garbage = structured.get("GARBAGE_CODES", "")
     qtd_garbage = 0
     if raw_text_for_garbage:
         qtd_garbage = len(raw_text_for_garbage)
 
-    # Quality score
     total_fields = len(CRITICAL_FIELDS)
     filled_fields = sum(1 for f in CRITICAL_FIELDS if structured.get(f))
     score = round((filled_fields / total_fields) * 100, 1) if total_fields > 0 else 0
@@ -820,14 +805,11 @@ def run_batch(limit: int = 10) -> dict:
             processed_count += 1
             rows_to_insert.append([row.get(h, "") for h in HEADER])
         elif row.get("STATUS") == "REJEITADO":
-            # Imagem rejeitada (não é DO) — não conta como falha
             logger.info(f"{file_name}: {row.get('ERROS', 'rejeitada')}")
         else:
             failed_ids.append(file_name)
-            # Mesmo com falha, insere registro na planilha
             rows_to_insert.append([row.get(h, "") for h in HEADER])
 
-    # Insere tudo no sheets
     if rows_to_insert:
         result = _append_rows_to_sheet(rows_to_insert)
         if result:
@@ -849,8 +831,8 @@ def run_batch(limit: int = 10) -> dict:
         "message": msg,
         "requestId": str(uuid.uuid4()),
     }
-    from fastapi import FastAPI
-from pydantic import BaseModel
+
+# ── FastAPI App ──────────────────────────────────────────────────
 
 app = FastAPI(title="Óbito OCR Service", version="2.0")
 
