@@ -18,8 +18,7 @@ from pydantic import BaseModel
 # ── Service account: criar arquivo a partir da env var ──────────
 SERVICE_ACCOUNT_JSON_ENV = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 if SERVICE_ACCOUNT_JSON_ENV:
-    os.makedirs("/etc/secrets", exist_ok=True)
-    sa_path = "/etc/secrets/service-account.json"
+    sa_path = "/tmp/service-account.json"
     with open(sa_path, "w") as f:
         f.write(SERVICE_ACCOUNT_JSON_ENV)
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = sa_path
