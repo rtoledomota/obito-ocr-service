@@ -339,7 +339,45 @@ def _download_image_bytes(file_id):
     metadata = drive.files().get(fileId=file_id, fields="mimeType,name").execute()
     mime_type = metadata.get("mimeType", "image/jpeg")
     return fh.getvalue(), mime_type
+def _list_all_files_recursive(folder_id: str, drive) -> list:
+    """Lista recursivamente todos os arquivos (imagens/PDFs) dentro de uma pasta e subpastas."""
+    files = []
+    page_token = None
 
+    query = (f"'{folder_id}' in parents and "
+             f"(mimeType contains 'image/' or mimeType='application/pdf') "
+             f"and trashed=false")
+    while True:
+        response = drive.files().list(
+            q=query,
+            spaces="drive",
+            fields="nextPageToken, files(id, name, mimeType, createdTime)",
+            pageToken=page_token,
+            orderBy="createdTime asc",
+        ).execute()
+        files.extend(response.get("files", []))
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+
+    page_token = None
+    query_folders = f"'{folder_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    while True:
+        response = drive.files().list(
+            q=query_folders,
+            spaces="drive",
+            fields="nextPageToken, files(id, name)",
+            pageToken=page_token,
+        ).execute()
+        subfolders = response.get("files", [])
+        for sub in subfolders:
+            logger.info(f"  → Explorando subpasta: {sub.get('name', 'unknown')} ({sub['id']})")
+            files.extend(_list_all_files_recursive(sub["id"], drive))
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+
+    return files
 def _list_new_images():
     """Lista imagens no Drive que ainda não foram processadas."""
     try:
@@ -849,23 +887,8 @@ def batch_reprocess(limit: int = 10):
     logger.info(f"Iniciando reprocessamento com limit={limit}")
     try:
         drive = _get_drive_service()
-        query = (f"'{DRIVE_FOLDER_ID}' in parents and "
-                 f"(mimeType contains 'image/' or mimeType='application/pdf')")
-
-        all_files = []
-        page_token = None
-        while True:
-            response = drive.files().list(
-                q=query,
-                spaces="drive",
-                fields="nextPageToken, files(id, name, mimeType, createdTime)",
-                pageToken=page_token,
-                orderBy="createdTime asc",
-            ).execute()
-            all_files.extend(response.get("files", []))
-            page_token = response.get("nextPageToken")
-            if not page_token:
-                break
+        logger.info(f"Reprocess: listando recursivamente da pasta {DRIVE_FOLDER_ID}...")
+        all_files = _list_all_files_recursive(DRIVE_FOLDER_ID, drive)
 
         total = len(all_files)
         to_process = all_files[:limit]
