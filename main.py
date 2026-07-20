@@ -350,7 +350,7 @@ def _ocr_image_from_bytes(image_bytes: bytes, mime_type: str = "image/jpeg") -> 
         "Não resuma, não interprete, não omita nada, apenas transcreva."
     )
     payload = {
-        "model": "gpt-4o-mini",
+        "model": "gpt-4o",
         "messages": [
             {
                 "role": "user",
