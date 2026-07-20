@@ -792,13 +792,13 @@ def _monitor_worker():
     """Thread que verifica periodicamente a pasta do Drive."""
     logger.info(f"Monitor iniciado: a cada {POLL_INTERVAL_MINUTES} minuto(s).")
     while not _monitor_stop.is_set():
-            try:
-        result = run_batch()
-        if result.get("new", 0) > 0:
-            logger.info(f"Monitor: {result['message']}")
-    except Exception as e:
-        print(f"[OCR ERROR] Exceção: {e}")
-        logger.error(f"Erro no OCR: {e}")
+        try:
+            result = run_batch()
+            if result.get("new", 0) > 0:
+                logger.info(f"Monitor: {result['message']}")
+        except Exception as e:
+            print(f"[OCR ERROR] Exceção: {e}")
+            logger.error(f"Erro no OCR: {e}")
     _monitor_stop.wait(POLL_INTERVAL_MINUTES * 60)
 
 def start_monitor():
