@@ -849,3 +849,19 @@ def run_batch(limit: int = 10) -> dict:
         "message": msg,
         "requestId": str(uuid.uuid4()),
     }
+    from fastapi import FastAPI
+from pydantic import BaseModel
+
+app = FastAPI(title="Óbito OCR Service", version="2.0")
+
+class BatchRequest(BaseModel):
+    limit: int = 10
+
+@app.get("/")
+def root():
+    return {"status": "running", "service": "Óbito OCR Service"}
+
+@app.post("/batch/process")
+def batch_process(request: BatchRequest):
+    result = run_batch(limit=request.limit)
+    return result
