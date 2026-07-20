@@ -340,12 +340,13 @@ def _ocr_image_from_bytes(image_bytes: bytes, mime_type: str = "image/jpeg") -> 
     import base64
     logger.info(f"[OCR DEBUG] Model: gpt-4o-mini, API Key set: {bool(os.getenv('OPENAI_API_KEY'))}")
     b64 = base64.b64encode(image_bytes).decode("utf-8")
-    logger.info(f"[OCR DEBUG] Image size: {len(b64)} chars")
     headers = {
         "Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}",
         "Content-Type": "application/json",
     }
     prompt_ocr = (
+        "Este é um documento público oficial (Declaração de Óbito) "
+        "para fins de auditoria interna hospitalar, sem divulgação externa. "
         "Transcreva exatamente todo o texto visível nesta imagem, "
         "preservando a estrutura, quebras de linha e formatação. "
         "Não resuma, não interprete, apenas transcreva."
@@ -370,28 +371,39 @@ def _ocr_image_from_bytes(image_bytes: bytes, mime_type: str = "image/jpeg") -> 
         "max_tokens": 4096,
     }
     api_url = os.getenv("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions")
-    logger.info(f"[OCR DEBUG] API URL: {api_url}")
-    try:
-        resp = requests.post(api_url, headers=headers, json=payload, timeout=120)
-        resp.raise_for_status()
-        data = resp.json()
-        if "choices" not in data or not data["choices"]:
-            logger.error(f"[OCR ERROR] Resposta inesperada: {data}")
+
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            resp = requests.post(api_url, headers=headers, json=payload, timeout=120)
+            if resp.status_code == 429:
+                wait = min(2 ** attempt * 5, 120)
+                logger.warning(f"[OCR] Rate limit (429), tentativa {attempt+1}/{max_retries}, aguardando {wait}s...")
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            if "choices" not in data or not data["choices"]:
+                logger.error(f"[OCR ERROR] Resposta inesperada: {data}")
+                return "", 0.0
+            texto = data["choices"][0].get("message", {}).get("content", "")
+            partes_ocr = texto.split("`" * 3)
+            texto_limpo = partes_ocr[2] if len(partes_ocr) >= 3 else texto
+            if not texto_limpo:
+                return "", 0.0
+            return texto_limpo, 1.0
+        except requests.exceptions.Timeout:
+            logger.error("[OCR ERROR] Timeout na requisição.")
             return "", 0.0
-        texto = data["choices"][0].get("message", {}).get("content", "")
-        partes_ocr = texto.split("`" * 3)
-        texto_limpo = partes_ocr[2] if len(partes_ocr) >= 3 else texto
-        logger.info(f"[OCR RESPOSTA BRUTA] (primeiros 500 chars): {texto_limpo[:500]}")
-        if not texto_limpo:
-            logger.warning("[OCR WARNING] Texto extraído está vazio.")
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries - 1 and resp is not None and resp.status_code == 429:
+                wait = min(2 ** attempt * 5, 120)
+                logger.warning(f"[OCR] Rate limit (429), tentativa {attempt+1}/{max_retries}, aguardando {wait}s...")
+                time.sleep(wait)
+                continue
+            logger.error(f"[OCR ERROR] Erro na requisição: {e}")
             return "", 0.0
-        return texto_limpo, 1.0
-    except requests.exceptions.Timeout:
-        logger.error("[OCR ERROR] Timeout na requisição.")
-        return "", 0.0
-    except requests.exceptions.RequestException as e:
-        logger.error(f"[OCR ERROR] Erro na requisição: {e}")
-        return "", 0.0
+    return "", 0.0
 
 # ── Parser da Declaração de Óbito ────────────────────────────────
 
@@ -626,6 +638,7 @@ def run_batch(limit: int = 10) -> dict:
         failed_ids = []
         rows_to_insert = []
         for img in to_process:
+            time.sleep(1)  # ← delay de 1s entre imagens para evitar rate limit
             file_id = img["id"]
             file_name = img.get("name", "unknown")
             row = _process_single_image(file_id, file_name)
@@ -684,6 +697,7 @@ def batch_reprocess(limit: int = 10):
         failed_ids = []
         rows_to_insert = []
         for img in to_process:
+            time.sleep(1)  # ← delay de 1s entre imagens para evitar rate limit
             file_id = img["id"]
             file_name = img.get("name", "unknown")
             row = _process_single_image(file_id, file_name)
