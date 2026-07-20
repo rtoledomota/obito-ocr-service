@@ -15,6 +15,10 @@ from googleapiclient.errors import HttpError
 from fastapi import FastAPI
 from pydantic import BaseModel
 
+# ── Config logger ────────────────────────────────────────────────
+logger = logging.getLogger("uvicorn")
+logger.setLevel(logging.INFO)
+
 # ── Service account: criar arquivo a partir da env var ──────────
 SERVICE_ACCOUNT_JSON_ENV = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 if SERVICE_ACCOUNT_JSON_ENV:
@@ -23,10 +27,6 @@ if SERVICE_ACCOUNT_JSON_ENV:
         f.write(SERVICE_ACCOUNT_JSON_ENV)
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = sa_path
     logger.info("Service account criada a partir da variável de ambiente.")
-
-# ── Config logger ────────────────────────────────────────────────
-logger = logging.getLogger("uvicorn")
-logger.setLevel(logging.INFO)
 
 # ── Constantes ───────────────────────────────────────────────────
 SCOPES = [
