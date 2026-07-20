@@ -33,35 +33,6 @@ import gc
 
 logger = logging.getLogger(__name__)
 
-def _format_date(raw: str) -> str:
-    """Formata data extraída, validando dia mês e ano com fallbacks."""
-    if not raw:
-        return raw
-    cleaned = re.sub(r'(?<=\d)\s+(?=\d)', '', raw)
-    digits = re.sub(r'\D', '', cleaned)
-    if len(digits) < 6:
-        return raw
-    if len(digits) == 8:
-        d, m, a = int(digits[:2]), int(digits[2:4]), int(digits[4:])
-    elif len(digits) == 6:
-        d, m, a = int(digits[:2]), int(digits[2:4]), int(digits[4:]) + 2000
-    else:
-        return raw
-    if d > 31 and m <= 12:
-        d, m = m, d
-    if d > 31:
-        d = min(d % 10, 31) if d % 10 <= 31 else 15
-    if m > 12:
-        m = m % 10 if m % 10 != 0 else 12
-    if a < 1900 or a > 2100:
-        if 0 <= a <= 30:
-            a += 2000
-        elif 31 <= a <= 99:
-            a += 1900
-        else:
-            a = max(1900, min(a, 2100))
-    return f"{d:02d}/{m:02d}/{a:04d}"
-
 def _get_existing_data(sheet_id: str) -> tuple:
     """Lê todos os nomes e hashes da planilha em UMA chamada."""
     try:
@@ -345,6 +316,15 @@ def _normalize_cep(value: str) -> str:
     if len(digits) == 8:
         return f"{digits[:5]}-{digits[5:]}"
     return value.strip()
+
+def _normalize_uf(value: str) -> str:
+    """Normaliza e valida sigla de UF."""
+    if not value:
+        return ""
+    uf = value.strip().upper()
+    if uf in UF_VALIDAS:
+        return uf
+    return ""
 
 def _normalize_hour(raw: str) -> str:
     """Normaliza hora extraída para o formato HH:MM."""
@@ -812,14 +792,14 @@ def _monitor_worker():
     """Thread que verifica periodicamente a pasta do Drive."""
     logger.info(f"Monitor iniciado: a cada {POLL_INTERVAL_MINUTES} minuto(s).")
     while not _monitor_stop.is_set():
-        try:
-            result = run_batch()
-            if result.get("new", 0) > 0:
-                logger.info(f"Monitor: {result['message']}")
-        except Exception as e:
-              print(f"[OCR ERROR] Exceção: {e}")
+            try:
+        result = run_batch()
+        if result.get("new", 0) > 0:
+            logger.info(f"Monitor: {result['message']}")
+    except Exception as e:
+        print(f"[OCR ERROR] Exceção: {e}")
         logger.error(f"Erro no OCR: {e}")
-        _monitor_stop.wait(POLL_INTERVAL_MINUTES * 60)
+    _monitor_stop.wait(POLL_INTERVAL_MINUTES * 60)
 
 def start_monitor():
     """Inicia a thread de monitoramento em background."""
@@ -1222,10 +1202,11 @@ def ocr_openai_compatible(
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     data_url = f"data:{mime_type};base64,{b64}"
     prompt = (
-        "Transcreva fielmente todo o texto visível neste documento oficial, "
-        "incluindo campos impressos e preenchidos manualmente. "
-        "Preserve a estrutura de linhas e a ordem dos campos. "
-        "Retorne APENAS o texto extraído, sem comentários ou formatação extra."
+        "Transcreva fielmente todo o texto visível neste documento oficial. "
+        "Mantenha cada campo em uma linha separada no formato 'label: valor'. "
+        "NÃO junte o label e o valor na mesma linha se estiverem em linhas separadas no documento. "
+        "Preserve a estrutura original de linhas e a ordem dos campos. "
+        "Retorne APENAS o texto extraído, sem comentários ou explicações."
     )
     payload = {
         "model": model,
