@@ -32,7 +32,161 @@ import logging
 import gc
 
 logger = logging.getLogger(__name__)
+# ── Novas funções auxiliares para melhoria da extração ─────────────
 
+def _is_valid_obito(ocr_text: str) -> bool:
+    """
+    Verifica se o texto extraído realmente contém uma Declaração de Óbito.
+    Filtra páginas em branco, cabeçalhos de lote, versos, etc.
+    """
+    if not ocr_text or len(ocr_text.strip()) < 50:
+        return False
+
+    keywords = [
+        "declaração de óbito", "atestado de óbito",
+        "nome do falecido", "causas da morte",
+        "parte i", "declaração de obito",
+        "tipo de óbito", "tipo de obito",
+    ]
+    text_lower = ocr_text.lower()
+    return any(k in text_lower for k in keywords)
+
+def _extract_uf_ocorrencia(text: str) -> str:
+    """
+    Extrai a UF do LOCAL DE OCORRÊNCIA DO ÓBITO, ignorando a UF da residência.
+
+    A DO tem duas seções com UF. A segunda (na ocorrência) é a que interessa.
+    Como fallback, usa o último UF encontrado no documento.
+    """
+    if not text:
+        return ""
+
+    # Tenta 1: encontra o bloco entre "Local de ocorrência" e a próxima seção
+    ocorrencia_match = re.search(
+        r'Local de ocorrência do óbito[:\s]*\n?(.*?)(?:III[\)\.\s]|PREENCHEMENTO|IV[\)\.\s]|$)',
+        text, re.DOTALL | re.IGNORECASE
+    )
+
+    if ocorrencia_match:
+        secao = ocorrencia_match.group(1)
+        uf_match = re.search(r'UF\s*[:\s]*([A-Z]{2})', secao)
+        if uf_match:
+            return uf_match.group(1).strip()
+
+    # Tenta 2: fallback — pega o último UF do documento
+    # (ocorrência geralmente vem depois da residência)
+    ufs = re.findall(r'(?<!Município\s.*)UF\s*[:\s]*([A-Z]{2})', text)
+    if ufs:
+        return ufs[-1].strip()
+
+    return ""
+
+def _parse_parte_i(text: str) -> dict:
+    """
+    Extrai a cadeia de causas da morte da Parte I da DO.
+
+    Formato esperado (um diagnóstico por linha):
+      a) ou 1) ou I)   → CAUSA_MORTE (causa direta / causa básica)
+      b) ou 2) ou II)  → CAUSA_MORTE_2
+      c) ou 3) ou III) → CAUSA_MORTE_3
+      d) ou 4) ou IV)  → CAUSA_MORTE_4
+    """
+    result = {
+        "CAUSA_MORTE": "",
+        "CAUSA_MORTE_2": "",
+        "CAUSA_MORTE_3": "",
+        "CAUSA_MORTE_4": "",
+        "CAUSA_BASICA": "",
+    }
+
+    # Encontra a seção PARTE I
+    parte_i_match = re.search(
+        r'PARTE\s+I[:\s]*\n?(.*?)(?:PARTE\s+II|Intervalo|PREENCHEMENTO|$)',
+        text, re.DOTALL | re.IGNORECASE
+    )
+    if not parte_i_match:
+        # Fallback: procura por "Causas da morte" seguido de linhas numeradas
+        parte_i_match = re.search(
+            r'Causas?\s+da?\s+morte[:\s]*\n?(.*?)(?:PARTE\s+II|Outras condições|Nome do médico|CRM|$)',
+            text, re.DOTALL | re.IGNORECASE
+        )
+    if not parte_i_match:
+        return result
+
+    parte_i_text = parte_i_match.group(1)
+
+    # Extrai linhas com numeração: a), b), 1), 2), I), II) etc.
+    linhas = re.findall(
+        r'^(?:\d+[\)\.]\s*|[a-dA-D][\)\.]\s*|[IVXivx]+[\)\.]\s*)(.+?)$',
+        parte_i_text, re.MULTILINE
+    )
+
+    if not linhas:
+        # Fallback: captura linhas com diagnóstico após numeração
+        linhas = re.findall(
+            r'(?:\d[\)\.]\s*|[a-dA-D][\)\.]\s*|I[\)\.]\s*|II[\)\.]\s*|III[\)\.]\s*|IV[\)\.]\s*)(.+)',
+            parte_i_text
+        )
+
+    # Remove ruídos comuns
+    causas = []
+    for l in linhas:
+        linha = l.strip()
+        if not linha or len(linha) < 3:
+            continue
+        # Ignora linhas que são instruções do formulário
+        if re.match(r'^(anote|preencher|não|nao|ignore|cid)', linha, re.IGNORECASE):
+            continue
+        causas.append(linha)
+
+    # Preenche os campos
+    for i, causa in enumerate(causas):
+        if i == 0:
+            result["CAUSA_MORTE"] = causa
+            result["CAUSA_BASICA"] = causa
+        elif i == 1:
+            result["CAUSA_MORTE_2"] = causa
+        elif i == 2:
+            result["CAUSA_MORTE_3"] = causa
+        elif i == 3:
+            result["CAUSA_MORTE_4"] = causa
+
+    # CAUSA_BASICA é a última causa válida na cadeia
+    if len(causas) > 1:
+        result["CAUSA_BASICA"] = causas[-1]
+
+    return result
+
+def _clean_field(value: str) -> str:
+    """
+    Remove resíduos de labels e instruções do formulário que vazam
+    para campos adjacentes durante o parsing.
+    """
+    if not value:
+        return ""
+
+    # Remove trechos de instruções do formulário
+    instructions = [
+        r'ANOTE SOMENTE UM DIAGNÓSTICO POR LINHA',
+        r'Não preencher este espaço',
+        r'PREENCHEMENTO EXCLUSIVO',
+        r'PREENCHEMENTO EXCLUSIVO PARA ÓBITOS FETAIS E DE ME',
+        r'Menores de 1 ano:',
+        r'Menos de 1 ano:',
+        r'Escolaridade\s*\([^)]*\)',
+    ]
+    for instr in instructions:
+        value = re.sub(instr, '', value, flags=re.IGNORECASE).strip()
+
+    # Se o valor é apenas números grandes (códigos que vazaram)
+    if re.match(r'^\d{4,}$', value):
+        return ""
+
+    # Remove códigos numéricos soltos grudados no final
+    # ex: "São Caetano do Sul350" → "São Caetano do Sul"
+    value = re.sub(r'(\D)\d{3,}\s*$', r'\1', value).strip()
+
+    return value.strip()
 def _get_existing_data(sheet_id: str) -> tuple:
     """Lê todos os nomes e hashes da planilha em UMA chamada."""
     try:
@@ -259,19 +413,47 @@ def _is_noise_line(norm_line: str) -> bool:
 def _looks_like_label(norm_line: str) -> bool:
     return _is_noise_line(norm_line)
   
-def _normalize_date_ocr(raw: str) -> str:
-    """Normaliza data do OCR que pode vir nos formatos:
-    '31 05 2022', '31/05/2022', '31-05-2022', '31 05 2022 Hora 22:45' etc."""
-    if not raw:
+def _normalize_date(raw: str) -> str:
+    """Tenta converter data para DD/MM/AAAA. Retorna vazio se inválida."""
+    if not raw or not raw.strip():
         return ""
-    # Remove texto após a data (ex: "Hora 22:45")
-    raw = re.sub(r'\s+Hora.*$', '', raw, flags=re.IGNORECASE)
-    # Troca separadores não-padrão (espaço, hífen) por /
-    raw = re.sub(r'[\s\-]+', '/', raw.strip())
-    # Valida se tem 3 partes numéricas
-    partes = raw.split('/')
-    if len(partes) == 3 and all(p.isdigit() for p in partes):
+
+    raw = raw.strip()
+
+    # Remove conteúdo entre parênteses: "(10:42)", "(hora aproximada)" etc.
+    raw = re.sub(r'\([^)]*\)', '', raw).strip()
+
+    # Se já está no formato DD/MM/AAAA e é válida, retorna direto
+    try:
+        dt.datetime.strptime(raw, "%d/%m/%Y")
         return raw
+    except ValueError:
+        pass
+
+    # Tenta vários formatos, priorizando DD/MM
+    for fmt in ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%m/%d/%Y", "%Y/%m/%d"):
+        try:
+            d = dt.datetime.strptime(raw, fmt)
+            # Valida: ano entre 1900 e ano atual + 1
+            if 1900 <= d.year <= dt.datetime.now().year + 1:
+                return d.strftime("%d/%m/%Y")
+        except ValueError:
+            continue
+
+    # Fallback: extrair números e montar
+    nums = re.findall(r"\d+", raw)
+    if len(nums) >= 3:
+        for a, b in [(0, 1), (1, 0)]:  # tenta DD/MM e MM/DD
+            try:
+                dia, mes, ano = int(nums[a]), int(nums[b]), int(nums[-1])
+                if len(nums[-1]) == 2:
+                    ano += 2000 if ano < 50 else 1900
+                if 1 <= dia <= 31 and 1 <= mes <= 12 and 1900 <= ano <= dt.datetime.now().year + 1:
+                    d = dt.datetime(ano, mes, dia)
+                    return d.strftime("%d/%m/%Y")
+            except (ValueError, IndexError):
+                continue
+
     return ""
 def _normalize_date(raw: str) -> str:
     """Tenta converter data para DD/MM/AAAA. Retorna vazio se inválida."""
@@ -561,18 +743,31 @@ def _process_single_image(file_id: str, file_name: str) -> dict:
         image_bytes, mime_type = _download_image_bytes(file_id)
     except Exception as e:
         return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_DRIVE", "ERROS": str(e)}
+
     try:
         raw_text, confidence = _ocr_image_from_bytes(image_bytes, mime_type)
     except Exception as e:
         return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_OCR", "ERROS": str(e)}
+
+    # ── [NOVO] Filtro de DO inválida ─────────────────────────
+    if not _is_valid_obito(raw_text):
+        logger.warning(f"{file_name}: texto não reconhecido como DO, pulando")
+        return {
+            "NOME_ARQUIVO": file_name,
+            "STATUS": "REJEITADO",
+            "ERROS": "Imagem não contém uma Declaração de Óbito válida"
+        }
+
     try:
         structured = parse_obito(raw_text)
     except Exception as e:
         structured = {k: "" for k in HEADER}
         structured["ERROS"] = f"Erro no parser: {e}"
+
     structured["HASH_ARQUIVO"] = _sha256_bytes(image_bytes)
     structured["HASH_CONTEUDO"] = _sha256_text(raw_text)
     validate_obito(structured)
+
     row = {
         "DATA_PROCESSAMENTO": datetime.utcnow().strftime("%d/%m/%Y %H:%M:%S"),
         "NOME_ARQUIVO": file_name,
@@ -971,7 +1166,9 @@ def parse_obito(text: str) -> Dict[str, Any]:
                         break
             if _raw_data_obito:
                 break
-    structured["DATA_OBITO"] = _normalize_date(_normalize_date_ocr(_raw_data_obito))
+        structured["DATA_OBITO"] = _normalize_date(
+        _normalize_date_ocr(_raw_data_obito)
+    )
     print(f"[PARSE DEBUG] DATA_OBITO extraído: '{structured['DATA_OBITO']}'", flush=True)
     structured["HORA_OBITO"] = _find_hora_obito(text)
     structured["DATA_ATESTADO"] = _normalize_date(
@@ -986,7 +1183,7 @@ def parse_obito(text: str) -> Dict[str, Any]:
         ["Município de ocorrência", "Municipio de ocorrência", "Município de ocorrencia", "Municipio de ocorrencia"],
         stop_labels=["UF", "Estado", "Data", "CEP", "Cep"],
     )
-    structured["UF_OBITO"] = _find_uf_after(text, ["Município de ocorrência", "Municipio de ocorrencia"])
+    structured["UF_OBITO"] = _extract_uf_ocorrencia(text)
     structured["LOGRADOURO"] = _find_block_value(text, ["Logradouro", "Endereço", "Endereco"], stop_labels=["Número", "Numero", "Complemento", "Bairro"])
     structured["NUMERO"] = _find_block_value(text, ["Número", "Numero"], stop_labels=["Complemento", "Bairro"])
     structured["COMPLEMENTO"] = _find_block_value(text, ["Complemento"], stop_labels=["Bairro", "Município", "Municipio"])
@@ -1058,6 +1255,17 @@ def parse_obito(text: str) -> Dict[str, Any]:
         stop_labels=["Causas", "Parte", "Nome"],
         max_distance=8,
     )
+      # ── Limpeza de resíduos em campos de texto ──────────────
+    text_fields = [
+        "NOME", "NOME_MAE", "NOME_PAI", "PROFISSAO",
+        "LOGRADOURO", "BAIRRO", "CIDADE", "CIDADE_OBITO",
+        "CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_MORTE_4",
+        "CAUSA_BASICA", "LOCAL_OBITO", "MEDICO_ATESTANTE",
+        "PARTE_II", "INTERVALO_DOENCA_MORTE"
+    ]
+    for campo in text_fields:
+        if campo in structured and structured[campo]:
+            structured[campo] = _clean_field(structured[campo])
     idade_calc = ""
     if structured.get("NASCIMENTO") and structured.get("DATA_OBITO"):
         try:
