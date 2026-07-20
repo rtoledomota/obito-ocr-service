@@ -440,8 +440,7 @@ def _ocr_image_from_bytes(image_bytes: bytes, mime_type: str = "image/jpeg") -> 
             return "", 0.0
 
         texto = data["choices"][0].get("message", {}).get("content", "")
-        partes_ocr = texto.split("
-```")
+        partes_ocr = texto.split("`" * 3)
         texto_limpo = partes_ocr[2] if len(partes_ocr) >= 3 else texto
 
         logger.info(f"[OCR RESPOSTA BRUTA] (primeiros 500 chars): {texto_limpo[:500]}")
