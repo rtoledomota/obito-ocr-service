@@ -26,7 +26,7 @@ if SERVICE_ACCOUNT_JSON_ENV:
     with open(sa_path, "w") as f:
         f.write(SERVICE_ACCOUNT_JSON_ENV)
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = sa_path
-    logger.info("Service account criada a partir da variável de ambiente.")
+    logger.info("Service account criada a partir da var de ambiente.")
 
 # ── Constantes ───────────────────────────────────────────────────
 SCOPES = [
@@ -34,7 +34,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 SHEET_ID = os.getenv("SHEET_ID", "1ETms0jR61Idqxbfr0nBdTXJGOHeGWFBomQGIZHPUJTM")
-DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID", "17fR3HfUbFVL_fFqK_yeKFrrZNM_rSB8H")
+DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID", "1iwc59VnBEhjuYtW-OoOYg-UKioQ81ZfN")
 SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "./service-account.json")
 
 # Cabeçalhos da planilha (primeira linha)
@@ -66,7 +66,6 @@ _lock = threading.Lock()
 # ── Funções de normalização de data ──────────────────────────────
 
 def _normalize_date_ocr(raw: str) -> str:
-    """Tenta extrair uma data no formato DD/MM/AAAA de uma string."""
     if not raw or not raw.strip():
         return ""
     raw = raw.strip().replace(" ", "/").replace("-", "/").replace(".", "/")
@@ -84,24 +83,16 @@ def _normalize_date_ocr(raw: str) -> str:
     return ""
 
 def _normalize_date(raw: str) -> str:
-    """Tenta converter data para DD/MM/AAAA. Retorna vazio se inválida."""
     if not raw or not raw.strip():
         return ""
-
     raw = raw.strip()
-    # Remove conteúdo entre parênteses: "(10:42)", "(hora aproximada)" etc.
     raw = re.sub(r'\([^)]*\)', '', raw).strip()
-    # Troca separadores como ponto (23.10.2022) por barra
     raw = re.sub(r'[.\s]+', '/', raw)
-
-    # Se já está no formato DD/MM/AAAA e é válida, retorna direto
     try:
         dt_obj = datetime.strptime(raw, "%d/%m/%Y")
         return raw
     except ValueError:
         pass
-
-    # Tenta vários formatos, priorizando DD/MM
     for fmt in ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%m/%d/%Y", "%Y/%m/%d"):
         try:
             dt_obj = datetime.strptime(raw, fmt)
@@ -109,8 +100,6 @@ def _normalize_date(raw: str) -> str:
                 return dt_obj.strftime("%d/%m/%Y")
         except ValueError:
             continue
-
-    # Fallback: extrair números e montar
     nums = re.findall(r"\d+", raw)
     if len(nums) >= 3:
         for a, b in [(0, 1), (1, 0)]:
@@ -119,23 +108,16 @@ def _normalize_date(raw: str) -> str:
                 if len(nums[-1]) == 2:
                     ano += 2000 if ano < 50 else 1900
                 if 1 <= dia <= 31 and 1 <= mes <= 12 and 1900 <= ano <= datetime.now().year + 1:
-                    dt_obj = datetime(ano, mes, dia)
-                    return dt_obj.strftime("%d/%m/%Y")
+                    return datetime(ano, mes, dia).strftime("%d/%m/%Y")
             except (ValueError, IndexError):
                 continue
-
     return ""
 
 # ── Funções de validação de DO e limpeza de campos ───────────────
 
 def _is_valid_obito(ocr_text: str) -> bool:
-    """
-    Verifica se o texto extraído realmente contém uma Declaração de Óbito.
-    Filtra páginas em branco, cabeçalhos de lote, versos, etc.
-    """
     if not ocr_text or len(ocr_text.strip()) < 50:
         return False
-
     keywords = [
         "declaração de óbito", "atestado de óbito",
         "nome do falecido", "causas da morte",
@@ -146,58 +128,32 @@ def _is_valid_obito(ocr_text: str) -> bool:
     return any(k in text_lower for k in keywords)
 
 def _extract_uf_ocorrencia(text: str) -> str:
-    """
-    Extrai a UF do LOCAL DE OCORRÊNCIA DO ÓBITO, ignorando a UF da residência.
-    A DO tem duas seções com UF. A segunda (na ocorrência) é a que interessa.
-    Como fallback, usa o último UF encontrado no documento.
-    """
     if not text:
         return ""
-
-    # Tenta 1: encontra o bloco entre "Local de ocorrência" e a próxima seção
     ocorrencia_match = re.search(
         r'Local de ocorrência do óbito[:\s]*\n?(.*?)(?:III[\)\.\s]|PREENCHEMENTO|IV[\)\.\s]|$)',
         text, re.DOTALL | re.IGNORECASE
     )
-
     if ocorrencia_match:
         secao = ocorrencia_match.group(1)
         uf_match = re.search(r'UF\s*[:\s]*([A-Z]{2})', secao)
         if uf_match:
             return uf_match.group(1).strip()
-
-    # Tenta 2: fallback — pega o último UF do documento
     ufs = re.findall(r'(?<!Município\s.*)UF\s*[:\s]*([A-Z]{2})', text)
     if ufs:
         return ufs[-1].strip()
-
     return ""
 
 def _parse_parte_i(text: str) -> dict:
-    """
-    Extrai a cadeia de causas da morte da Parte I da DO.
-
-    Formato esperado (um diagnóstico por linha):
-      a) ou 1) ou I)   → CAUSA_MORTE
-      b) ou 2) ou II)  → CAUSA_MORTE_2
-      c) ou 3) ou III) → CAUSA_MORTE_3
-      d) ou 4) ou IV)  → CAUSA_MORTE_4
-    """
     result = {
-        "CAUSA_MORTE": "",
-        "CAUSA_MORTE_2": "",
-        "CAUSA_MORTE_3": "",
-        "CAUSA_MORTE_4": "",
-        "CAUSA_BASICA": "",
+        "CAUSA_MORTE": "", "CAUSA_MORTE_2": "", "CAUSA_MORTE_3": "",
+        "CAUSA_MORTE_4": "", "CAUSA_BASICA": "",
     }
-
-    # Encontra a seção PARTE I
     parte_i_match = re.search(
         r'PARTE\s+I[:\s]*\n?(.*?)(?:PARTE\s+II|Intervalo|PREENCHEMENTO|$)',
         text, re.DOTALL | re.IGNORECASE
     )
     if not parte_i_match:
-        # Fallback: procura por "Causas da morte" seguido de linhas numeradas
         parte_i_match = re.search(
             r'Causas?\s+da?\s+morte[:\s]*\n?(.*?)(?:PARTE\s+II|Outras condições|'
             r'Nome do médico|CRM|$)',
@@ -205,23 +161,16 @@ def _parse_parte_i(text: str) -> dict:
         )
     if not parte_i_match:
         return result
-
     parte_i_text = parte_i_match.group(1)
-
-    # Extrai linhas com numeração: a), b), 1), 2), I), II) etc.
     linhas = re.findall(
         r'^(?:\d+[\)\.]\s*|[a-dA-D][\)\.]\s*|[IVXivx]+[\)\.]\s*)(.+?)$',
         parte_i_text, re.MULTILINE
     )
-
     if not linhas:
-        # Fallback
         linhas = re.findall(
             r'(?:\d[\)\.]\s*|[a-dA-D][\)\.]\s*|I[\)\.]\s*|II[\)\.]\s*|III[\)\.]\s*|IV[\)\.]\s*)(.+)',
             parte_i_text
         )
-
-    # Remove ruídos comuns
     causas = []
     for l in linhas:
         linha = l.strip()
@@ -230,8 +179,6 @@ def _parse_parte_i(text: str) -> dict:
         if re.match(r'^(anote|preencher|não|nao|ignore|cid)', linha, re.IGNORECASE):
             continue
         causas.append(linha)
-
-    # Preenche os campos
     for i, causa in enumerate(causas):
         if i == 0:
             result["CAUSA_MORTE"] = causa
@@ -242,43 +189,31 @@ def _parse_parte_i(text: str) -> dict:
             result["CAUSA_MORTE_3"] = causa
         elif i == 3:
             result["CAUSA_MORTE_4"] = causa
-
-    # CAUSA_BASICA é a última causa válida na cadeia
     if len(causas) > 1:
         result["CAUSA_BASICA"] = causas[-1]
-
     return result
 
 def _clean_field(value: str) -> str:
-    """
-    Remove resíduos de labels e instruções do formulário que vazam
-    para campos adjacentes durante o parsing.
-    """
     if not value:
         return ""
-
     instructions = [
         r'ANOTE SOMENTE UM DIAGNÓSTICO POR LINHA',
         r'Não preencher este espaço',
         r'PREENCHEMENTO EXCLUSIVO',
         r'PREENCHEMENTO EXCLUSIVO PARA ÓBITOS FETAIS E DE ME',
-        r'Menores de 1 ano:',
-        r'Menos de 1 ano:',
+        r'Menores de 1 ano:', r'Menos de 1 ano:',
         r'Escolaridade\s*\([^)]*\)',
     ]
     for instr in instructions:
         value = re.sub(instr, '', value, flags=re.IGNORECASE).strip()
-
     if re.match(r'^\d{4,}$', value):
         return ""
-
     value = re.sub(r'(\D)\d{3,}\s*$', r'\1', value).strip()
     return value.strip()
 
 # ── Google API ───────────────────────────────────────────────────
 
 def _get_credentials():
-    """Obtém credenciais da service account."""
     return service_account.Credentials.from_service_account_file(
         SERVICE_ACCOUNT_FILE, scopes=SCOPES
     )
@@ -292,7 +227,6 @@ def _get_sheets_service():
     return build("sheets", "v4", credentials=creds)
 
 def _get_existing_data():
-    """Retorna {hash_arquivo: row_number} para evitar duplicatas."""
     mapping = {}
     try:
         sheets = _get_sheets_service()
@@ -310,7 +244,6 @@ def _get_existing_data():
     return mapping
 
 def _append_rows_to_sheet(rows):
-    """Appende linhas à planilha."""
     try:
         sheets = _get_sheets_service()
         body = {"values": rows}
@@ -327,7 +260,6 @@ def _append_rows_to_sheet(rows):
         return None
 
 def _download_image_bytes(file_id):
-    """Download de arquivo do Drive. Retorna (bytes, mime_type)."""
     drive = _get_drive_service()
     request = drive.files().get_media(fileId=file_id)
     fh = io.BytesIO()
@@ -335,15 +267,16 @@ def _download_image_bytes(file_id):
     done = False
     while not done:
         status, done = downloader.next_chunk()
-
     metadata = drive.files().get(fileId=file_id, fields="mimeType,name").execute()
     mime_type = metadata.get("mimeType", "image/jpeg")
     return fh.getvalue(), mime_type
+
+# ── Busca recursiva em subpastas ─────────────────────────────────
+
 def _list_all_files_recursive(folder_id: str, drive) -> list:
     """Lista recursivamente todos os arquivos (imagens/PDFs) dentro de uma pasta e subpastas."""
     files = []
     page_token = None
-
     query = (f"'{folder_id}' in parents and "
              f"(mimeType contains 'image/' or mimeType='application/pdf') "
              f"and trashed=false")
@@ -359,7 +292,6 @@ def _list_all_files_recursive(folder_id: str, drive) -> list:
         page_token = response.get("nextPageToken")
         if not page_token:
             break
-
     page_token = None
     query_folders = f"'{folder_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
     while True:
@@ -376,20 +308,18 @@ def _list_all_files_recursive(folder_id: str, drive) -> list:
         page_token = response.get("nextPageToken")
         if not page_token:
             break
-
     return files
+
 def _list_new_images():
-    """Lista imagens no Drive que ainda não foram processadas."""
+    """Lista imagens no Drive (incluindo subpastas) que ainda não foram processadas."""
     try:
         drive = _get_drive_service()
-logger.info(f"Reprocess: listando recursivamente da pasta {DRIVE_FOLDER_ID}...")
-all_files = _list_all_files_recursive(DRIVE_FOLDER_ID, drive)
-        logger.info(f"Total de arquivos na pasta: {len(results)}")
-
+        logger.info(f"Listando arquivos recursivamente a partir da pasta {DRIVE_FOLDER_ID}...")
+        all_files = _list_all_files_recursive(DRIVE_FOLDER_ID, drive)
+        logger.info(f"Total de arquivos encontrados (incluindo subpastas): {len(all_files)}")
         existing = _get_existing_data()
         logger.info(f"Registros existentes na planilha: {len(existing)}")
-
-        new_files = [f for f in results if f["id"] not in existing]
+        new_files = [f for f in all_files if f["id"] not in existing]
         logger.info(f"Arquivos novos: {len(new_files)}")
         return new_files
     except Exception as e:
@@ -407,27 +337,19 @@ def _sha256_text(text: str) -> str:
 # ── OCR ──────────────────────────────────────────────────────────
 
 def _ocr_image_from_bytes(image_bytes: bytes, mime_type: str = "image/jpeg") -> tuple:
-    """
-    Envia imagem para API OpenAI-compatible e retorna (texto_extraído, confiança).
-    """
     import base64
-
     logger.info(f"[OCR DEBUG] Model: gpt-4o-mini, API Key set: {bool(os.getenv('OPENAI_API_KEY'))}")
-
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     logger.info(f"[OCR DEBUG] Image size: {len(b64)} chars")
-
     headers = {
         "Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}",
         "Content-Type": "application/json",
     }
-
     prompt_ocr = (
         "Transcreva exatamente todo o texto visível nesta imagem, "
         "preservando a estrutura, quebras de linha e formatação. "
         "Não resuma, não interprete, apenas transcreva."
     )
-
     payload = {
         "model": "gpt-4o-mini",
         "messages": [
@@ -447,31 +369,23 @@ def _ocr_image_from_bytes(image_bytes: bytes, mime_type: str = "image/jpeg") -> 
         ],
         "max_tokens": 4096,
     }
-
     api_url = os.getenv("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions")
     logger.info(f"[OCR DEBUG] API URL: {api_url}")
-
     try:
         resp = requests.post(api_url, headers=headers, json=payload, timeout=120)
         resp.raise_for_status()
         data = resp.json()
-
         if "choices" not in data or not data["choices"]:
             logger.error(f"[OCR ERROR] Resposta inesperada: {data}")
             return "", 0.0
-
         texto = data["choices"][0].get("message", {}).get("content", "")
         partes_ocr = texto.split("`" * 3)
         texto_limpo = partes_ocr[2] if len(partes_ocr) >= 3 else texto
-
         logger.info(f"[OCR RESPOSTA BRUTA] (primeiros 500 chars): {texto_limpo[:500]}")
-
         if not texto_limpo:
             logger.warning("[OCR WARNING] Texto extraído está vazio.")
             return "", 0.0
-
         return texto_limpo, 1.0
-
     except requests.exceptions.Timeout:
         logger.error("[OCR ERROR] Timeout na requisição.")
         return "", 0.0
@@ -488,7 +402,6 @@ MONTHS_PT = {
 }
 
 def _find_block_value(text: str, labels: list, stop_labels: list = None) -> str:
-    """Busca o valor de um campo que está na linha seguinte ao label."""
     if stop_labels is None:
         stop_labels = []
     lines = text.split("\n")
@@ -496,15 +409,12 @@ def _find_block_value(text: str, labels: list, stop_labels: list = None) -> str:
         for label in labels:
             idx = line.lower().find(label.lower())
             if idx != -1:
-                # Tenta inline: se sobra algo depois do label
                 resto = line[idx + len(label):].strip().rstrip(":")
                 if resto:
                     if ":" in resto:
                         resto = resto.split(":")[-1].strip()
                     if resto and not any(sl.lower() in resto.lower() for sl in stop_labels):
                         return _clean_field(resto)
-
-                # Tenta bloco: próxima linha não vazia
                 for j in range(i + 1, min(i + 5, len(lines))):
                     candidate = lines[j].strip()
                     if candidate and not any(sl.lower() in candidate.lower() for sl in stop_labels):
@@ -513,12 +423,10 @@ def _find_block_value(text: str, labels: list, stop_labels: list = None) -> str:
     return ""
 
 def _detect_obito_type(text: str) -> str:
-    """Detecta o tipo de óbito no texto."""
     if re.search(r'(?<!Não\s)(Fetal|fetal)', text) and 'Não fetal' not in text:
         return "Fetal"
     if re.search(r'Fatal|Não fetal|Não Fetal|Não\s+fetal', text, re.IGNORECASE):
         return "Fatal"
-    # Verifica se há checkbox indicando tipo
     if re.search(r'X\s*Fetal', text) and not re.search(r'X\s*Não\s+fetal', text):
         return "Fetal"
     if re.search(r'X\s*(Nao|Não)\s+fetal', text, re.IGNORECASE):
@@ -526,45 +434,24 @@ def _detect_obito_type(text: str) -> str:
     return ""
 
 def parse_obito(text: str) -> dict:
-    """
-    Parseia o texto completo extraído da Declaração de Óbito.
-    Retorna dict com campos estruturados.
-    """
     structured = {k: "" for k in HEADER}
-
-    # ── Nome do Falecido ──────────────────────────────────────
     structured["NOME"] = _find_block_value(text, [
-        "Nome do Falecido", "Nome do falecido", "Nome do Falecido",
-        "Falecido", "Nome",
+        "Nome do Falecido", "Nome do falecido", "Falecido", "Nome",
     ], stop_labels=["Nome do Pai", "Nome da Mãe", "Nome do pai", "Nome da mãe"])
-
-    logger.debug(f"[PARSE DEBUG] NOME extraído: '{structured['NOME']}'")
-
-    # ── Nome da Mãe ───────────────────────────────────────────
     structured["NOME_MAE"] = _find_block_value(text, [
         "Nome da Mãe", "Nome da mãe", "Nome da Mae", "Nome da mae",
     ], stop_labels=["Nome do Pai", "Nome do pai", "Endereço", "Logradouro"])
-
-    # ── Nome do Pai ───────────────────────────────────────────
     structured["NOME_PAI"] = _find_block_value(text, [
         "Nome do Pai", "Nome do pai",
     ], stop_labels=["Nome da Mãe", "Nome da mãe", "Endereço", "Logradouro"])
-
-    # ── Data de Nascimento ────────────────────────────────────
     _raw_nasc = _find_block_value(text, [
-        "Data de nascimento", "Data de Nascimento",
-        "Nascimento", "Nasc.",
+        "Data de nascimento", "Data de Nascimento", "Nascimento", "Nasc.",
     ], stop_labels=["Data do óbito", "Data do obito", "Idade"])
     structured["NASCIMENTO"] = _normalize_date(_normalize_date_ocr(_raw_nasc))
-    logger.debug(f"[PARSE DEBUG] NASCIMENTO extraído: '{structured['NASCIMENTO']}'")
-
-    # ── Data do Óbito ─────────────────────────────────────────
     _raw_data_obito = _find_block_value(text, [
         "Data do óbito", "Data de óbito", "Data do obito", "Data de obito",
     ], stop_labels=["Hora", "Local do óbito", "Local do obito",
                     "Município de ocorrência", "Municipio de ocorrencia"])
-
-    # Se não achou no formato bloco, tenta inline na mesma linha
     if not _raw_data_obito:
         for label in ["Data do óbito", "Data de óbito", "Data do obito", "Data de obito"]:
             for line in text.split('\n'):
@@ -575,98 +462,51 @@ def parse_obito(text: str) -> dict:
                         break
             if _raw_data_obito:
                 break
-
-    # ✅ FORA DO IF — sempre executado
-    structured["DATA_OBITO"] = _normalize_date(
-        _normalize_date_ocr(_raw_data_obito)
-    )
-    logger.debug(f"[PARSE DEBUG] DATA_OBITO extraído: '{structured['DATA_OBITO']}'")
-
-    # ── Hora do Óbito ─────────────────────────────────────────
+    structured["DATA_OBITO"] = _normalize_date(_normalize_date_ocr(_raw_data_obito))
     _raw_hora = _find_block_value(text, [
         "Hora do óbito", "Hora do obito", "Hora",
-    ], stop_labels=["Data do óbito", "Data do obito",
-                    "Local do óbito", "Local do obito"])
+    ], stop_labels=["Data do óbito", "Data do obito", "Local do óbito", "Local do obito"])
     if _raw_hora:
         h_match = re.search(r'(\d{1,2})[:\s]*(\d{2})', _raw_hora)
         if h_match:
             structured["HORA_OBITO"] = f"{h_match.group(1).zfill(2)}:{h_match.group(2)}"
-
-    # ── Sexo ──────────────────────────────────────────────────
     sexo_map = {"MASCULINO": "M", "FEMININO": "F", "M": "M", "F": "F"}
     _raw_sexo = _find_block_value(text, ["Sexo", "SEXO"])
     if _raw_sexo and _raw_sexo.upper() in sexo_map:
         structured["SEXO"] = sexo_map[_raw_sexo.upper()]
-
-    # ── Raça/Cor ──────────────────────────────────────────────
-    structured["RACA_COR"] = _find_block_value(text, [
-        "Raça/Cor", "Raça", "Cor", "Raca/Cor", "Raca",
-    ])
-
-    # ── Estado Civil ──────────────────────────────────────────
-    structured["ESTADO_CIVIL"] = _find_block_value(text, [
-        "Situação conjugal", "Estado civil", "Estado Civil",
-    ])
-
-    # ── Escolaridade ──────────────────────────────────────────
-    structured["ESCOLARIDADE"] = _find_block_value(text, [
-        "Escolaridade", "Escolaridade (última série concluída)",
-    ])
-
-    # ── Profissão ─────────────────────────────────────────────
-    structured["PROFISSAO"] = _find_block_value(text, [
-        "Ocupação habitual", "Profissão", "Ocupacao habitual", "Ocupação",
-    ])
-
-    # ── Residência ────────────────────────────────────────────
-    structured["LOGRADOURO"] = _find_block_value(text, [
-        "Logradouro", "Endereço", "Endereco",
-    ])
+    structured["RACA_COR"] = _find_block_value(text, ["Raça/Cor", "Raça", "Cor", "Raca/Cor", "Raca"])
+    structured["ESTADO_CIVIL"] = _find_block_value(text, ["Situação conjugal", "Estado civil", "Estado Civil"])
+    structured["ESCOLARIDADE"] = _find_block_value(text, ["Escolaridade", "Escolaridade (última série concluída)"])
+    structured["PROFISSAO"] = _find_block_value(text, ["Ocupação habitual", "Profissão", "Ocupacao habitual", "Ocupação"])
+    structured["LOGRADOURO"] = _find_block_value(text, ["Logradouro", "Endereço", "Endereco"])
     structured["NUMERO"] = _find_block_value(text, ["Número", "Numero"])
     structured["COMPLEMENTO"] = _find_block_value(text, ["Complemento"])
     structured["BAIRRO"] = _find_block_value(text, ["Bairro", "Bairro/Distrito"])
-    structured["CIDADE"] = _find_block_value(text, [
-        "Município de residência", "Municipio de residencia",
-        "Município de Residência",
-    ])
+    structured["CIDADE"] = _find_block_value(text, ["Município de residência", "Municipio de residencia", "Município de Residência"])
     structured["UF"] = _find_block_value(text, ["UF"], stop_labels=["Local de ocorrência"])
     structured["CEP"] = _find_block_value(text, ["CEP"])
-
-    # ── Local de Ocorrência ───────────────────────────────────
     structured["LOCAL_OBITO"] = _find_block_value(text, [
         "Local de ocorrência do óbito", "Local de ocorrência",
-        "Local do óbito", "Local do obito",
-        "Local de ocorrencia do obito",
+        "Local do óbito", "Local do obito", "Local de ocorrencia do obito",
     ])
     structured["CIDADE_OBITO"] = _find_block_value(text, [
-        "Município de ocorrência", "Municipio de ocorrencia",
-        "Município de Ocorrência",
+        "Município de ocorrência", "Municipio de ocorrencia", "Município de Ocorrência",
     ])
     structured["UF_OBITO"] = _extract_uf_ocorrencia(text)
-
-    # ── Tipo de Óbito ─────────────────────────────────────────
     structured["TIPO_OBITO"] = _detect_obito_type(text)
-
-    # ── Causas da Morte (Parte I) ─────────────────────────────
     causas = _parse_parte_i(text)
     structured["CAUSA_MORTE"] = causas.get("CAUSA_MORTE", "")
     structured["CAUSA_MORTE_2"] = causas.get("CAUSA_MORTE_2", "")
     structured["CAUSA_MORTE_3"] = causas.get("CAUSA_MORTE_3", "")
     structured["CAUSA_MORTE_4"] = causas.get("CAUSA_MORTE_4", "")
     structured["CAUSA_BASICA"] = causas.get("CAUSA_BASICA", "")
-
-    # ── Médico Atestante ──────────────────────────────────────
     structured["MEDICO_ATESTANTE"] = _find_block_value(text, [
         "Médico", "Medico", "Nome do Médico", "Nome do medico",
     ], stop_labels=["CRM"])
     structured["CRM_MEDICO"] = _find_block_value(text, ["CRM"])
-
-    # ── Número da DO ──────────────────────────────────────────
     do_match = re.search(r'Declaração\s+de\s+Óbito\s+(\d+(?:-\d+)?)', text, re.IGNORECASE)
     if do_match:
         structured["DO_NUMERO"] = do_match.group(1)
-
-    # ── Parte II ──────────────────────────────────────────────
     parte_ii_match = re.search(
         r'PARTE\s+II[:\s]*\n?(.*?)(?:Outros episódios|Nome do médico|CRM|$)',
         text, re.DOTALL | re.IGNORECASE
@@ -674,15 +514,11 @@ def parse_obito(text: str) -> dict:
     if parte_ii_match:
         structured["PARTE_II"] = _clean_field(parte_ii_match.group(1).strip()[:200])
         structured["INTERVALO_DOENCA_MORTE"] = structured["PARTE_II"]
-
-    # ── Idade ─────────────────────────────────────────────────
     idade_raw = _find_block_value(text, ["Idade", "IDADE"])
     if idade_raw:
         nums = re.findall(r'\d+', idade_raw)
         if nums:
             structured["IDADE_ANOS"] = nums[0]
-
-    # ── Limpeza de resíduos em campos de texto ────────────────
     text_fields = [
         "NOME", "NOME_MAE", "NOME_PAI", "PROFISSAO",
         "LOGRADOURO", "BAIRRO", "CIDADE", "CIDADE_OBITO",
@@ -693,8 +529,6 @@ def parse_obito(text: str) -> dict:
     for campo in text_fields:
         if campo in structured and structured[campo]:
             structured[campo] = _clean_field(structured[campo])
-
-    logger.debug(f"[PARSE DEBUG] structured final é None? {structured is None}")
     return structured
 
 # ── Validação ────────────────────────────────────────────────────
@@ -702,40 +536,23 @@ def parse_obito(text: str) -> dict:
 CRITICAL_FIELDS = ["NOME", "NOME_MAE", "NASCIMENTO", "DATA_OBITO",
                    "CIDADE_OBITO", "UF_OBITO", "CAUSA_MORTE"]
 
-GARBAGE_KEYWORDS = [
-    "ANOTE SOMENTE UM DIAGNÓSTICO POR LINHA",
-    "PREENCHEMENTO EXCLUSIVO PARA ÓBITOS",
-    "Não preencher este espaço",
-    "Menores de 1 ano",
-    "Cartão SUS",
-    "Código CBO",
-    "Código:",
-]
-
 def validate_obito(structured: dict) -> None:
-    """Valida campos extraídos e calcula score de qualidade."""
     missing_critical = []
     for field in CRITICAL_FIELDS:
         if not structured.get(field):
             missing_critical.append(field)
-
     raw_text_for_garbage = structured.get("GARBAGE_CODES", "")
     qtd_garbage = 0
     if raw_text_for_garbage:
         qtd_garbage = len(raw_text_for_garbage)
-
     total_fields = len(CRITICAL_FIELDS)
     filled_fields = sum(1 for f in CRITICAL_FIELDS if structured.get(f))
     score = round((filled_fields / total_fields) * 100, 1) if total_fields > 0 else 0
-
     structured["QUALIDADE_SCORE"] = str(score)
     structured["QTD_GARBAGE"] = str(qtd_garbage)
-
     if missing_critical:
         structured["STATUS"] = "REVISAR"
-        structured["ERROS"] = " | ".join(
-            f"Campo crítico ausente: {f}" for f in missing_critical
-        )
+        structured["ERROS"] = " | ".join(f"Campo crítico ausente: {f}" for f in missing_critical)
     else:
         structured["STATUS"] = "OK"
         structured["ERROS"] = ""
@@ -743,39 +560,26 @@ def validate_obito(structured: dict) -> None:
 # ── Processamento Individual ─────────────────────────────────────
 
 def _process_single_image(file_id: str, file_name: str) -> dict:
-    """Pipeline completo para uma imagem: baixar → OCR → parse → validar."""
     logger.info(f"Processando: {file_name} ({file_id})")
     try:
         image_bytes, mime_type = _download_image_bytes(file_id)
     except Exception as e:
-        return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_DRIVE",
-                "ERROS": str(e)}
-
+        return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_DRIVE", "ERROS": str(e)}
     try:
         raw_text, confidence = _ocr_image_from_bytes(image_bytes, mime_type)
     except Exception as e:
-        return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_OCR",
-                "ERROS": str(e)}
-
-    # ── Filtro de DO inválida ─────────────────────────────
+        return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_OCR", "ERROS": str(e)}
     if not _is_valid_obito(raw_text):
         logger.warning(f"{file_name}: texto não reconhecido como DO, pulando")
-        return {
-            "NOME_ARQUIVO": file_name,
-            "STATUS": "REJEITADO",
-            "ERROS": "Imagem não contém uma Declaração de Óbito válida"
-        }
-
+        return {"NOME_ARQUIVO": file_name, "STATUS": "REJEITADO", "ERROS": "Imagem não contém uma Declaração de Óbito válida"}
     try:
         structured = parse_obito(raw_text)
     except Exception as e:
         structured = {k: "" for k in HEADER}
         structured["ERROS"] = f"Erro no parser: {e}"
-
     structured["HASH_ARQUIVO"] = _sha256_bytes(image_bytes)
     structured["HASH_CONTEUDO"] = _sha256_text(raw_text)
     validate_obito(structured)
-
     row = {
         "DATA_PROCESSAMENTO": datetime.utcnow().strftime("%d/%m/%Y %H:%M:%S"),
         "NOME_ARQUIVO": file_name,
@@ -806,64 +610,50 @@ def _process_single_image(file_id: str, file_name: str) -> dict:
 # ── Batch ────────────────────────────────────────────────────────
 
 def run_batch(limit: int = 10) -> dict:
-    """Processa lote de imagens do Drive."""
     logger.info(f"Iniciando batch com limit={limit}")
-
-    all_images = _list_new_images()
-    if not all_images:
+    try:
+        all_images = _list_new_images()
+        if not all_images:
+            return {
+                "success": True, "total": 0, "new": 0, "processed": 0,
+                "failed": 0, "sheet_id": SHEET_ID,
+                "message": "Nenhuma imagem nova para processar.",
+                "requestId": str(uuid.uuid4()),
+            }
+        total = len(all_images)
+        to_process = all_images[:limit]
+        processed_count = 0
+        failed_ids = []
+        rows_to_insert = []
+        for img in to_process:
+            file_id = img["id"]
+            file_name = img.get("name", "unknown")
+            row = _process_single_image(file_id, file_name)
+            if row.get("STATUS") == "OK":
+                processed_count += 1
+                rows_to_insert.append([row.get(h, "") for h in HEADER])
+            elif row.get("STATUS") == "REJEITADO":
+                logger.info(f"{file_name}: {row.get('ERROS', 'rejeitada')}")
+            else:
+                failed_ids.append(file_name)
+                rows_to_insert.append([row.get(h, "") for h in HEADER])
+        if rows_to_insert:
+            result = _append_rows_to_sheet(rows_to_insert)
+            if result:
+                logger.info(f"Inseridas {len(rows_to_insert)} linhas na planilha.")
+            else:
+                logger.error("Falha ao inserir linhas na planilha.")
+        msg = f"{processed_count} imagens processadas, {len(failed_ids)} falhas."
+        if failed_ids:
+            msg += f" IDs com falha: {', '.join(failed_ids[:5])}"
         return {
-            "success": True,
-            "total": 0,
-            "new": 0,
-            "processed": 0,
-            "failed": 0,
-            "sheet_id": SHEET_ID,
-            "message": "Nenhuma imagem nova para processar.",
-            "requestId": str(uuid.uuid4()),
+            "success": True, "total": total, "new": len(to_process),
+            "processed": processed_count, "failed": len(failed_ids),
+            "sheet_id": SHEET_ID, "message": msg, "requestId": str(uuid.uuid4()),
         }
-
-    total = len(all_images)
-    to_process = all_images[:limit]
-
-    processed_count = 0
-    failed_ids = []
-    rows_to_insert = []
-
-    for img in to_process:
-        file_id = img["id"]
-        file_name = img.get("name", "unknown")
-        row = _process_single_image(file_id, file_name)
-
-        if row.get("STATUS") == "OK":
-            processed_count += 1
-            rows_to_insert.append([row.get(h, "") for h in HEADER])
-        elif row.get("STATUS") == "REJEITADO":
-            logger.info(f"{file_name}: {row.get('ERROS', 'rejeitada')}")
-        else:
-            failed_ids.append(file_name)
-            rows_to_insert.append([row.get(h, "") for h in HEADER])
-
-    if rows_to_insert:
-        result = _append_rows_to_sheet(rows_to_insert)
-        if result:
-            logger.info(f"Inseridas {len(rows_to_insert)} linhas na planilha.")
-        else:
-            logger.error("Falha ao inserir linhas na planilha.")
-
-    msg = f"{processed_count} imagens processadas, {len(failed_ids)} falhas."
-    if failed_ids:
-        msg += f" IDs com falha: {', '.join(failed_ids[:5])}"
-
-    return {
-        "success": True,
-        "total": total,
-        "new": len(to_process),
-        "processed": processed_count,
-        "failed": len(failed_ids),
-        "sheet_id": SHEET_ID,
-        "message": msg,
-        "requestId": str(uuid.uuid4()),
-    }
+    except Exception as e:
+        logger.error(f"Erro no batch: {e}", exc_info=True)
+        return {"success": False, "error": str(e), "message": "Erro interno no batch"}
 
 # ── FastAPI App ──────────────────────────────────────────────────
 
@@ -878,30 +668,25 @@ def root():
 
 @app.post("/batch/process")
 def batch_process(request: BatchRequest):
-    result = run_batch(limit=request.limit)
-    return result
+    return run_batch(limit=request.limit)
 
 @app.post("/batch/reprocess")
 def batch_reprocess(limit: int = 10):
-    """Reprocessa imagens ignorando verificação de duplicatas."""
+    """Reprocessa imagens ignorando verificação de duplicatas (busca recursiva em subpastas)."""
     logger.info(f"Iniciando reprocessamento com limit={limit}")
     try:
         drive = _get_drive_service()
         logger.info(f"Reprocess: listando recursivamente da pasta {DRIVE_FOLDER_ID}...")
         all_files = _list_all_files_recursive(DRIVE_FOLDER_ID, drive)
-
         total = len(all_files)
         to_process = all_files[:limit]
-
         processed_count = 0
         failed_ids = []
         rows_to_insert = []
-
         for img in to_process:
             file_id = img["id"]
             file_name = img.get("name", "unknown")
             row = _process_single_image(file_id, file_name)
-
             if row.get("STATUS") == "OK":
                 processed_count += 1
                 rows_to_insert.append([row.get(h, "") for h in HEADER])
@@ -910,33 +695,20 @@ def batch_reprocess(limit: int = 10):
             else:
                 failed_ids.append(file_name)
                 rows_to_insert.append([row.get(h, "") for h in HEADER])
-
         if rows_to_insert:
             result = _append_rows_to_sheet(rows_to_insert)
             if result:
                 logger.info(f"Inseridas {len(rows_to_insert)} linhas na planilha.")
             else:
                 logger.error("Falha ao inserir linhas na planilha.")
-
         msg = f"{processed_count} imagens processadas, {len(failed_ids)} falhas."
         if failed_ids:
             msg += f" IDs com falha: {', '.join(failed_ids[:5])}"
-
         return {
-            "success": True,
-            "total": total,
-            "new": len(to_process),
-            "processed": processed_count,
-            "failed": len(failed_ids),
-            "sheet_id": SHEET_ID,
-            "message": msg,
-            "requestId": str(uuid.uuid4()),
+            "success": True, "total": total, "new": len(to_process),
+            "processed": processed_count, "failed": len(failed_ids),
+            "sheet_id": SHEET_ID, "message": msg, "requestId": str(uuid.uuid4()),
         }
-
     except Exception as e:
         logger.error(f"Erro no reprocessamento: {e}", exc_info=True)
-        return {
-            "success": False,
-            "error": str(e),
-            "message": "Erro interno no reprocessamento",
-        }
+        return {"success": False, "error": str(e), "message": "Erro interno no reprocessamento"}
