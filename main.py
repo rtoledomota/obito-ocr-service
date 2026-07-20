@@ -579,8 +579,8 @@ def _process_single_image(file_id: str, file_name: str) -> dict:
         return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_DRIVE", "ERROS": str(e)}
     try:
         raw_text, confidence = _ocr_image_from_bytes(image_bytes, mime_type)
-        if raw_text:
-            logger.info(f"[OCR RESPONSE] {file_name}: primeiros 300 chars: {raw_text[:300]}")
+          if raw_text:
+            logger.info(f"[OCR RESPONSE] {file_name}: primeiros 500 chars: {raw_text[:500]}")
         else:
             logger.warning(f"[OCR RESPONSE] {file_name}: texto vazio retornado")
     except Exception as e:
