@@ -338,7 +338,7 @@ def _sha256_text(text: str) -> str:
 
 def _ocr_image_from_bytes(image_bytes: bytes, mime_type: str = "image/jpeg") -> tuple:
     import base64
-    logger.info(f"[OCR DEBUG] Model: gpt-4o-mini, API Key set: {bool(os.getenv('OPENAI_API_KEY'))}")
+    logger.info(f"[OCR DEBUG] Model: gpt-4o, API Key set: {bool(os.getenv('OPENAI_API_KEY'))}")
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     headers = {
         "Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}",
