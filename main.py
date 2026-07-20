@@ -345,9 +345,9 @@ def _ocr_image_from_bytes(image_bytes: bytes, mime_type: str = "image/jpeg") -> 
         "Content-Type": "application/json",
     }
     prompt_ocr = (
-        "Transcreva exatamente todo o texto visível nesta imagem, "
-        "preservando a estrutura, quebras de linha e formatação original. "
-        "Não resuma, não interprete, não omita nada, apenas transcreva."
+        "Read all the text visible in this image exactly as written. "
+        "Preserve the original structure, line breaks and formatting. "
+        "Do not summarize, interpret or omit anything. Just transcribe."
     )
     payload = {
         "model": "gpt-4o",
