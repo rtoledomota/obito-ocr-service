@@ -344,22 +344,8 @@ def _list_new_images():
     """Lista imagens no Drive que ainda não foram processadas."""
     try:
         drive = _get_drive_service()
-        query = (f"'{DRIVE_FOLDER_ID}' in parents and "
-                 f"(mimeType contains 'image/' or mimeType='application/pdf')")
-        results = []
-        page_token = None
-        while True:
-            response = drive.files().list(
-                q=query,
-                spaces="drive",
-                fields="nextPageToken, files(id, name, mimeType, createdTime)",
-                pageToken=page_token,
-                orderBy="createdTime asc",
-            ).execute()
-            results.extend(response.get("files", []))
-            page_token = response.get("nextPageToken")
-            if not page_token:
-                break
+logger.info(f"Reprocess: listando recursivamente da pasta {DRIVE_FOLDER_ID}...")
+all_files = _list_all_files_recursive(DRIVE_FOLDER_ID, drive)
         logger.info(f"Total de arquivos na pasta: {len(results)}")
 
         existing = _get_existing_data()
