@@ -344,12 +344,10 @@ def _ocr_image_from_bytes(image_bytes: bytes, mime_type: str = "image/jpeg") -> 
         "Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}",
         "Content-Type": "application/json",
     }
-    prompt_ocr = (
-        "Este é um documento público oficial (Declaração de Óbito) "
-        "para fins de auditoria interna hospitalar, sem divulgação externa. "
+        prompt_ocr = (
         "Transcreva exatamente todo o texto visível nesta imagem, "
-        "preservando a estrutura, quebras de linha e formatação. "
-        "Não resuma, não interprete, apenas transcreva."
+        "preservando a estrutura, quebras de linha e formatação original. "
+        "Não resuma, não interprete, não omita nada, apenas transcreva."
     )
     payload = {
         "model": "gpt-4o-mini",
