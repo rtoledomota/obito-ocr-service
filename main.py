@@ -577,14 +577,14 @@ def _process_single_image(file_id: str, file_name: str) -> dict:
         image_bytes, mime_type = _download_image_bytes(file_id)
     except Exception as e:
         return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_DRIVE", "ERROS": str(e)}
-    try:
+        try:
         raw_text, confidence = _ocr_image_from_bytes(image_bytes, mime_type)
-          if raw_text:
+        # ── ADICIONE ESTAS 3 LINHAS AQUI ──
+        if raw_text:
             logger.info(f"[OCR RESPONSE] {file_name}: primeiros 500 chars: {raw_text[:500]}")
         else:
             logger.warning(f"[OCR RESPONSE] {file_name}: texto vazio retornado")
-    except Exception as e:
-        return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_OCR", "ERROS": str(e)}
+        # ── FIM DAS 3 LINHAS ──
     except Exception as e:
         return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_OCR", "ERROS": str(e)}
     if not _is_valid_obito(raw_text):
