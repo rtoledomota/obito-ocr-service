@@ -15,6 +15,16 @@ from googleapiclient.errors import HttpError
 from fastapi import FastAPI
 from pydantic import BaseModel
 
+# ── Service account: criar arquivo a partir da env var ──────────
+SERVICE_ACCOUNT_JSON_ENV = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+if SERVICE_ACCOUNT_JSON_ENV:
+    os.makedirs("/etc/secrets", exist_ok=True)
+    sa_path = "/etc/secrets/service-account.json"
+    with open(sa_path, "w") as f:
+        f.write(SERVICE_ACCOUNT_JSON_ENV)
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = sa_path
+    logger.info("Service account criada a partir da variável de ambiente.")
+
 # ── Config logger ────────────────────────────────────────────────
 logger = logging.getLogger("uvicorn")
 logger.setLevel(logging.INFO)
@@ -333,10 +343,10 @@ def _download_image_bytes(file_id):
 
 def _list_new_images():
     """Lista imagens no Drive que ainda não foram processadas."""
-    drive = _get_drive_service()
-    query = (f"'{DRIVE_FOLDER_ID}' in parents and "
-             f"(mimeType contains 'image/' or mimeType='application/pdf')")
     try:
+        drive = _get_drive_service()
+        query = (f"'{DRIVE_FOLDER_ID}' in parents and "
+                 f"(mimeType contains 'image/' or mimeType='application/pdf')")
         results = []
         page_token = None
         while True:
