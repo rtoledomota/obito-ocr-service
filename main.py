@@ -338,20 +338,20 @@ def _sha256_text(text: str) -> str:
 
 def _ocr_image_from_bytes(image_bytes: bytes, mime_type: str = "image/jpeg") -> tuple:
     """OCR usando Google Cloud Vision API (sem restrições de conteúdo)."""
-    import base64
     try:
         from google.cloud import vision
     except ImportError:
-        logger.error("[OCR] google-cloud-vision não instalado. Instale com: pip install google-cloud-vision")
+        logger.error("[OCR] google-cloud-vision não instalado.")
         return "", 0.0
 
-    logger.info(f"[OCR VISION] Iniciando OCR via Google Cloud Vision...")
+    logger.info(f"[OCR VISION] Iniciando OCR...")
 
     try:
         client = vision.ImageAnnotatorClient()
     except Exception as e:
         logger.error(f"[OCR] Erro ao criar cliente Vision: {e}")
-        return "", 0.0
+        logger.info("[OCR] Tentando criar cliente com credenciais padrão...")
+        client = vision.ImageAnnotatorClient()
 
     image = vision.Image(content=image_bytes)
 
@@ -366,7 +366,6 @@ def _ocr_image_from_bytes(image_bytes: bytes, mime_type: str = "image/jpeg") -> 
             logger.warning("[OCR] Nenhum texto encontrado na imagem.")
             return "", 0.0
 
-        # O primeiro elemento contém todo o texto detectado
         full_text = texts[0].description
         logger.info(f"[OCR VISION] Texto extraído: {len(full_text)} caracteres")
         return full_text, 1.0
