@@ -231,7 +231,7 @@ def _get_existing_data():
     try:
         sheets = _get_sheets_service()
         result = sheets.spreadsheets().values().get(
-            spreadsheetId=SHEET_ID, range="A:A"
+            spreadsheetId=SHEET_ID, range="Auditoria!A:A"  
         ).execute()
         values = result.get("values", [])
         for i, row in enumerate(values):
@@ -249,7 +249,7 @@ def _append_rows_to_sheet(rows):
         body = {"values": rows}
         result = sheets.spreadsheets().values().append(
             spreadsheetId=SHEET_ID,
-            range="A:A",
+            range="Auditoria!A:A",
             valueInputOption="USER_ENTERED",
             insertDataOption="INSERT_ROWS",
             body=body,
@@ -337,71 +337,43 @@ def _sha256_text(text: str) -> str:
 # ── OCR ──────────────────────────────────────────────────────────
 
 def _ocr_image_from_bytes(image_bytes: bytes, mime_type: str = "image/jpeg") -> tuple:
+    """OCR usando Google Cloud Vision API (sem restrições de conteúdo)."""
     import base64
-    logger.info(f"[OCR DEBUG] Model: gpt-4o, API Key set: {bool(os.getenv('OPENAI_API_KEY'))}")
-    b64 = base64.b64encode(image_bytes).decode("utf-8")
-    headers = {
-        "Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}",
-        "Content-Type": "application/json",
-    }
-    prompt_ocr = (
-        "Read all the text visible in this image exactly as written. "
-        "Preserve the original structure, line breaks and formatting. "
-        "Do not summarize, interpret or omit anything. Just transcribe."
-    )
-    payload = {
-        "model": "gpt-4o",
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt_ocr},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{mime_type};base64,{b64}",
-                            "detail": "high",
-                        },
-                    },
-                ],
-            }
-        ],
-        "max_tokens": 4096,
-    }
-    api_url = os.getenv("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions")
+    try:
+        from google.cloud import vision
+    except ImportError:
+        logger.error("[OCR] google-cloud-vision não instalado. Instale com: pip install google-cloud-vision")
+        return "", 0.0
 
-    max_retries = 5
-    for attempt in range(max_retries):
-        try:
-            resp = requests.post(api_url, headers=headers, json=payload, timeout=120)
-            if resp.status_code == 429:
-                wait = min(2 ** attempt * 5, 120)
-                logger.warning(f"[OCR] Rate limit (429), tentativa {attempt+1}/{max_retries}, aguardando {wait}s...")
-                time.sleep(wait)
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-            if "choices" not in data or not data["choices"]:
-                logger.error(f"[OCR ERROR] Resposta inesperada: {data}")
-                return "", 0.0
-            texto = data["choices"][0].get("message", {}).get("content", "")
-            partes_ocr = texto.split("`" * 3)
-            texto_limpo = partes_ocr[2] if len(partes_ocr) >= 3 else texto
-            if not texto_limpo:
-                return "", 0.0
-            return texto_limpo, 1.0
-        except requests.exceptions.Timeout:
-            logger.error("[OCR ERROR] Timeout na requisição.")
+    logger.info(f"[OCR VISION] Iniciando OCR via Google Cloud Vision...")
+
+    try:
+        client = vision.ImageAnnotatorClient()
+    except Exception as e:
+        logger.error(f"[OCR] Erro ao criar cliente Vision: {e}")
+        return "", 0.0
+
+    image = vision.Image(content=image_bytes)
+
+    try:
+        response = client.text_detection(image=image)
+        if response.error.message:
+            logger.error(f"[OCR] Erro da API Vision: {response.error.message}")
             return "", 0.0
-        except requests.exceptions.RequestException as e:
-            if attempt < max_retries - 1 and resp is not None and resp.status_code == 429:
-                wait = min(2 ** attempt * 5, 120)
-                logger.warning(f"[OCR] Rate limit (429), tentativa {attempt+1}/{max_retries}, aguardando {wait}s...")
-                time.sleep(wait)
-                continue
-            logger.error(f"[OCR ERROR] Erro na requisição: {e}")
+
+        texts = response.text_annotations
+        if not texts:
+            logger.warning("[OCR] Nenhum texto encontrado na imagem.")
             return "", 0.0
-    return "", 0.0
+
+        # O primeiro elemento contém todo o texto detectado
+        full_text = texts[0].description
+        logger.info(f"[OCR VISION] Texto extraído: {len(full_text)} caracteres")
+        return full_text, 1.0
+
+    except Exception as e:
+        logger.error(f"[OCR] Erro na requisição Vision: {e}")
+        return "", 0.0
 
 # ── Parser da Declaração de Óbito ────────────────────────────────
 
