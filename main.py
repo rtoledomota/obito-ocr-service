@@ -221,6 +221,102 @@ def _clean_field(value: str) -> str:
     value = re.sub(r'(\D)\d{3,}\s*$', r'\1', value).strip()
     return value.strip()
 
+def _parse_do_form(lines: list) -> dict:
+    """Parse DO form using field numbers (1-7) instead of text labels."""
+    # Mapeamento: número do campo → nome do campo no structured
+    field_map = {
+        1: "TIPO_OBITO",
+        2: "DATA_HORA_OBITO",
+        3: "CARTAO_SUS",
+        4: "NATURALIDADE",
+        5: "NOME",
+        6: "NOME_PAI",
+        7: "NOME_MAE",
+    }
+    
+    # Coletar valores pós-numeração
+    field_values = {}
+    current_field = None
+    current_lines = []
+    
+    # Primeira passada: identificar blocos numerados
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        
+        # Verifica se começa com número de campo (1 a 7 seguido de texto)
+        m = re.match(r'^(\d{1,2})\s+[A-Za-zÀ-ÿ]', line)
+        if m:
+            # Salva bloco anterior
+            if current_field and current_lines:
+                field_values[current_field] = "\n".join(current_lines)
+            
+            num = int(m.group(1))
+            if num in field_map:
+                current_field = num
+                current_lines = []
+                continue
+        
+        # Se não é início de campo, adiciona ao bloco atual
+        if current_field:
+            current_lines.append(line)
+    
+    # Salva último bloco
+    if current_field and current_lines:
+        field_values[current_field] = "\n".join(current_lines)
+    
+    # Segunda passada: extrair valores específicos
+    result = {}
+    
+    # Campo 2: Data e Hora
+    if 2 in field_values:
+        text = field_values[2]
+        # Procura padrão DDMMYYYY
+        date_match = re.search(r'(\d{2})(\d{2})(\d{4})', text)
+        if date_match:
+            d, m, y = date_match.group(1), date_match.group(2), date_match.group(3)
+            if 1 <= int(d) <= 31 and 1 <= int(m) <= 12:
+                result["DATA_OBITO"] = f"{d}/{m}/{y}"
+        # Procura hora
+        hour_match = re.search(r'(\d{1,2}):(\d{2})', text)
+        if hour_match:
+            h, mi = hour_match.group(1), hour_match.group(2)
+            if int(h) <= 23 and int(mi) <= 59:
+                result["HORA_OBITO"] = f"{h.zfill(2)}:{mi}"
+    
+    # Campo 5: Nome do Falecido (pula linhas curtas/ruído)
+    if 5 in field_values:
+        text = field_values[5]
+        lines_f = text.strip().split("\n")
+        nome = ""
+        for l in lines_f:
+            l = l.strip().rstrip("|.")
+            if len(l) > 5 and not re.match(r'^\d+\s+[A-Z]', l):
+                nome += " " + l
+        nome = nome.strip()
+        if len(nome) > 5:
+            result["NOME"] = nome
+    
+    # Campo 6: Nome do Pai
+    if 6 in field_values:
+        pai = _clean_field(field_values[6])
+        if pai and len(pai) > 3:
+            result["NOME_PAI"] = pai
+    
+    # Campo 7: Nome da Mãe
+    if 7 in field_values:
+        mae = _clean_field(field_values[7])
+        if mae and len(mae) > 3:
+            result["NOME_MAE"] = mae
+    
+    # Campo 3: Cartão SUS
+    if 3 in field_values:
+        sus = re.sub(r'[^0-9]', '', field_values[3])[:15]
+        if len(sus) >= 10:
+            result["CARTAO_SUS"] = sus
+    
+    return result
 # ── Google API ───────────────────────────────────────────────────
 
 def _get_credentials():
@@ -455,6 +551,13 @@ def _detect_obito_type(text: str) -> str:
     return ""
 
 def parse_obito(text: str) -> dict:
+    
+    # Tenta parser por numeração de campos (mais robusto para DO)
+numbered = _parse_do_form(text.split("\n"))
+    if numbered.get("NOME"):
+    # Se achou nome pelo número, usa esses dados
+    for k, v in numbered.items():
+        structured[k] = v
     structured = {k: "" for k in HEADER}
         structured["NOME"] = _find_block_value(text, [
         "Nome do Falecido", "Nome do falecido", "Falecido", "Nome",
