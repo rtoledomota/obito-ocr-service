@@ -337,41 +337,48 @@ def _sha256_text(text: str) -> str:
 # ── OCR ──────────────────────────────────────────────────────────
 
 def _ocr_image_from_bytes(image_bytes: bytes, mime_type: str = "image/jpeg") -> tuple:
-    """OCR usando Google Cloud Vision API (sem restrições de conteúdo)."""
+    """OCR usando Google Cloud Vision REST API via API Key (sem restrições de conteúdo)."""
+    import base64
+    import requests
+
+    api_key = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+    # Se a variável contém uma API Key (começa com AIza), usa direto
+    if not api_key.startswith("AIza"):
+        api_key = "AIzaSyB-45eklgCjDOI9XXTqNRFkZtQmCOywgYM"
+
+    logger.info(f"[OCR VISION] Iniciando OCR via REST API...")
+
+    # Codificar imagem em base64
+    img_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
+    # Montar requisição REST
+    url = f"https://vision.googleapis.com/v1/images:annotate?key={api_key}"
+    payload = {
+        "requests": [{
+            "image": {"content": img_b64},
+            "features": [{"type": "TEXT_DETECTION"}]
+        }]
+    }
+
     try:
-        from google.cloud import vision
-    except ImportError:
-        logger.error("[OCR] google-cloud-vision não instalado.")
-        return "", 0.0
+        response = requests.post(url, json=payload, timeout=60)
+        result = response.json()
 
-    logger.info(f"[OCR VISION] Iniciando OCR...")
-
-    try:
-        client = vision.ImageAnnotatorClient()
-    except Exception as e:
-        logger.error(f"[OCR] Erro ao criar cliente Vision: {e}")
-        logger.info("[OCR] Tentando criar cliente com credenciais padrão...")
-        client = vision.ImageAnnotatorClient()
-
-    image = vision.Image(content=image_bytes)
-
-    try:
-        response = client.text_detection(image=image)
-        if response.error.message:
-            logger.error(f"[OCR] Erro da API Vision: {response.error.message}")
+        if response.status_code != 200:
+            logger.error(f"[OCR] Erro HTTP {response.status_code}: {result.get('error', {}).get('message', '')}")
             return "", 0.0
 
-        texts = response.text_annotations
-        if not texts:
+        annotations = result.get("responses", [{}])[0].get("textAnnotations", [])
+        if not annotations:
             logger.warning("[OCR] Nenhum texto encontrado na imagem.")
             return "", 0.0
 
-        full_text = texts[0].description
+        full_text = annotations[0].get("description", "")
         logger.info(f"[OCR VISION] Texto extraído: {len(full_text)} caracteres")
         return full_text, 1.0
 
     except Exception as e:
-        logger.error(f"[OCR] Erro na requisição Vision: {e}")
+        logger.error(f"[OCR] Erro na requisição Vision REST: {e}")
         return "", 0.0
 
 # ── Parser da Declaração de Óbito ────────────────────────────────
