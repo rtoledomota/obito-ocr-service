@@ -71,6 +71,16 @@ def _normalize_date_ocr(raw: str) -> str:
     raw = raw.strip().replace(" ", "/").replace("-", "/").replace(".", "/")
     partes = [p for p in raw.split("/") if p.strip()]
     if len(partes) != 3:
+        # Tenta DDMMYYYY sem separador: ex "07052026"
+        nums = re.findall(r"\d+", raw)
+        for n in nums:
+            if len(n) == 8:
+                # DD/MM/YYYY ou MM/DD/YYYY
+                d, m, a = int(n[0:2]), int(n[2:4]), int(n[4:8])
+                if 1 <= d <= 31 and 1 <= m <= 12 and 1900 <= a <= 2100:
+                    return f"{d:02d}/{m:02d}/{a}"
+                if 1 <= m <= 31 and 1 <= d <= 12 and 1900 <= a <= 2100:
+                    return f"{m:02d}/{d:02d}/{a}"
         return ""
     p1, p2, p3 = partes[0].strip(), partes[1].strip(), partes[2].strip()
     if not p1.isdigit() or not p2.isdigit() or not p3.isdigit():
@@ -393,21 +403,44 @@ def _find_block_value(text: str, labels: list, stop_labels: list = None) -> str:
     if stop_labels is None:
         stop_labels = []
     lines = text.split("\n")
+    
     for i, line in enumerate(lines):
+        line_clean = line.strip()
         for label in labels:
-            idx = line.lower().find(label.lower())
-            if idx != -1:
-                resto = line[idx + len(label):].strip().rstrip(":")
-                if resto:
+            # Remove números/prefixos do label para match flexível
+            label_variations = [
+                label,
+                re.sub(r'^\d+\s*', '', label),  # remove número na frente do label
+            ]
+            for lbl in label_variations:
+                # Match em qualquer posição da linha
+                idx = line_clean.lower().find(lbl.lower())
+                if idx != -1:
+                    # Pega o que vem DEPOIS do label na mesma linha
+                    resto = line_clean[idx + len(lbl):].strip().rstrip(":")
                     if ":" in resto:
                         resto = resto.split(":")[-1].strip()
                     if resto and not any(sl.lower() in resto.lower() for sl in stop_labels):
-                        return _clean_field(resto)
-                for j in range(i + 1, min(i + 5, len(lines))):
-                    candidate = lines[j].strip()
-                    if candidate and not any(sl.lower() in candidate.lower() for sl in stop_labels):
+                        val = _clean_field(resto)
+                        if val and len(val) > 1:
+                            return val
+                    
+                    # Procura nas próximas 10 linhas (aumentei de 5 para 10)
+                    for j in range(i + 1, min(i + 10, len(lines))):
+                        candidate = lines[j].strip()
+                        # Pula linhas muito curtas ou que parecem ser outros labels
+                        if not candidate or len(candidate) < 2:
+                            continue
+                        if re.match(r'^\d+\s+[A-ZÁÉÍÓÚÂÊÔÃÕÇ]', candidate):
+                            continue  # parece outro label numerado
+                        if any(sl.lower() in candidate.lower() for sl in stop_labels):
+                            break
                         if not re.match(r'^[A-ZÁÉÍÓÚÂÊÔÃÕÇ][a-záéíóúâêôãõç]+\s*\(', candidate):
-                            return _clean_field(candidate)
+                            val = _clean_field(candidate)
+                            if val:
+                                return val
+                    break  # não procurar outras variações do mesmo label
+    
     return ""
 
 def _detect_obito_type(text: str) -> str:
@@ -423,9 +456,13 @@ def _detect_obito_type(text: str) -> str:
 
 def parse_obito(text: str) -> dict:
     structured = {k: "" for k in HEADER}
-    structured["NOME"] = _find_block_value(text, [
+        structured["NOME"] = _find_block_value(text, [
         "Nome do Falecido", "Nome do falecido", "Falecido", "Nome",
     ], stop_labels=["Nome do Pai", "Nome da Mãe", "Nome do pai", "Nome da mãe"])
+    
+    # Se não achou, tenta busca ampliada
+    if not structured.get("NOME"):
+        structured["NOME"] = _find_name_after_label(text, "Nome do Falecido")
     structured["NOME_MAE"] = _find_block_value(text, [
         "Nome da Mãe", "Nome da mãe", "Nome da Mae", "Nome da mae",
     ], stop_labels=["Nome do Pai", "Nome do pai", "Endereço", "Logradouro"])
@@ -450,14 +487,22 @@ def parse_obito(text: str) -> dict:
                         break
             if _raw_data_obito:
                 break
+    if _raw_data_obito:
+        hora_match = re.search(r'(\d{1,2}):(\d{2})', _raw_data_obito)
+        if hora_match and not structured.get("HORA_OBITO"):
+            structured["HORA_OBITO"] = f"{hora_match.group(1).zfill(2)}:{hora_match.group(2)}"
+        # Limpar a hora do campo de data
+        _raw_data_obito = re.sub(r'\d{1,2}:\d{2}.*$', '', _raw_data_obito).strip()            
     structured["DATA_OBITO"] = _normalize_date(_normalize_date_ocr(_raw_data_obito))
-    _raw_hora = _find_block_value(text, [
+        _raw_hora = _find_block_value(text, [
         "Hora do óbito", "Hora do obito", "Hora",
     ], stop_labels=["Data do óbito", "Data do obito", "Local do óbito", "Local do obito"])
     if _raw_hora:
-        h_match = re.search(r'(\d{1,2})[:\s]*(\d{2})', _raw_hora)
+        h_match = re.search(r'(\d{1,2})[:.\s]*(\d{2})', _raw_hora)
         if h_match:
-            structured["HORA_OBITO"] = f"{h_match.group(1).zfill(2)}:{h_match.group(2)}"
+            h, m = h_match.group(1), h_match.group(2)
+            if int(h) <= 23 and int(m) <= 59:
+                structured["HORA_OBITO"] = f"{h.zfill(2)}:{m}"
     sexo_map = {"MASCULINO": "M", "FEMININO": "F", "M": "M", "F": "F"}
     _raw_sexo = _find_block_value(text, ["Sexo", "SEXO"])
     if _raw_sexo and _raw_sexo.upper() in sexo_map:
@@ -518,7 +563,25 @@ def parse_obito(text: str) -> dict:
         if campo in structured and structured[campo]:
             structured[campo] = _clean_field(structured[campo])
     return structured
-
+def _find_name_after_label(text: str, label: str) -> str:
+    """Busca nome completo após um label, mesmo que separado por várias linhas."""
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if label.lower() in line.lower():
+            # Pula linhas que são outros labels numerados
+            for j in range(i + 1, min(i + 15, len(lines))):
+                cand = lines[j].strip()
+                if not cand or len(cand) < 3:
+                    continue
+                # Pula se parecer outro label (número + palavra maiúscula)
+                if re.match(r'^\d+\s+[A-ZÁÉÍÓÚÂÊÔÃÕÇ]', cand):
+                    continue
+                # Pula se parecer cabeçalho
+                if cand in ["Identificação", "Residência", "Ocorrência", "Cartório",
+                            "Médico", "Causas externas", "Condições e causas do óbito"]:
+                    continue
+                return _clean_field(cand)
+    return ""
 # ── Validação ────────────────────────────────────────────────────
 
 CRITICAL_FIELDS = ["NOME", "NOME_MAE", "NASCIMENTO", "DATA_OBITO",
