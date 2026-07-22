@@ -211,6 +211,12 @@ def _normalize_date(raw: str) -> str:
     except ValueError:
         pass
     for fmt in ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%m/%d/%Y", "%Y/%m/%d"):
+       # Detectar formato YYYY MM DD (ex: "2005 19 22" → "22/19/2005")
+    if re.match(r'^\d{4}\s+\d{1,2}\s+\d{1,2}$', raw):
+        partes = raw.split()
+        ano, mes, dia = partes[0], partes[1], partes[2]
+    if 1 <= int(mes) <= 12 and 1 <= int(dia) <= 31:
+        return f"{dia.zfill(2)}/{mes.zfill(2)}/{ano}"        
         try:
             d = dt.datetime.strptime(raw, fmt)
             if 1900 <= d.year <= dt.datetime.now().year + 1:
@@ -537,7 +543,8 @@ def _extract_causes_v1(text: str) -> List[str]:
         "parte i", "devido ou como consequência de", "devido a",
         "intervalo entre o início e a morte", "intervalo entre o inicio e a morte",
         "cid", "meses dias horas minutos ignorado", "causas da morte", "causa da morte",
-        "outras afecções", "outras afeccoes",
+        "outras afecções", "outras afeccoes","seqüência de causas", "sequencia de causas",
+        "estados mórbidos que causaram diretamente a morte",
     ]
     start_idx = -1
     for i, (norm, _) in enumerate(pairs):
