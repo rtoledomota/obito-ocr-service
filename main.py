@@ -1619,7 +1619,38 @@ async def ocr_endpoint(request: Request, authorization: Optional[str] = Header(N
         "validation": validation,
         "headerOrder": HEADER,
     })
+# ── Diagnóstico (OCR bruto para debug) ──────────────────────────
 
+# ── Diagnóstico por file_id do Drive ────────────────────────────
+
+@app.post("/diagnose/{file_id}")
+async def diagnose_file(file_id: str, authorization: Optional[str] = Header(None)):
+    _check_auth(authorization)
+    try:
+        image_bytes, mime_type = _download_image_bytes(file_id)
+    except Exception as e:
+        return JSONResponse(status_code=502, content={
+            "code": "DRIVE_ERROR",
+            "message": f"Erro ao baixar imagem do Drive: {e}",
+        })
+
+    try:
+        raw_text, confidence = ocr_image(image_bytes, mime_type)
+    except Exception as e:
+        return {"file_id": file_id, "error": str(e), "raw_text": "", "confidence": 0}
+
+    structured = parse_obito(raw_text)
+    validate_obito(structured)
+
+    return {
+        "file_id": file_id,
+        "confidence": confidence,
+        "provider": OCR_PROVIDER,
+        "raw_text": raw_text,
+        "structured": structured,
+        "is_valid_obito": _is_valid_obito(raw_text),
+    }
+       
 # ── Endpoints Batch ─────────────────────────────────────────────
 
 @app.post("/batch/process")
