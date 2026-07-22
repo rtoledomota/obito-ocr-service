@@ -1207,11 +1207,11 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
     if nasc:
         nasc_clean = re.sub(r'\s+Idade:\s*\d+.*$', '', nasc, flags=re.IGNORECASE).strip()
         structured["NASCIMENTO"] = nasc_clean
-    # Se UF_OBITO tiver backticks
-```, limpar
+    
+    ```python
     uf_obito = structured.get("UF_OBITO", "")
     if uf_obito:
-        uf_obito = re.sub(r'[`\s]', '', uf_obito)
+        uf_obito = re.sub(r'[\`\s]', '', uf_obito)
         match_uf = re.match(r'^([A-Za-z]{2})', uf_obito)
         if match_uf:
             structured["UF_OBITO"] = match_uf.group(1).upper()
