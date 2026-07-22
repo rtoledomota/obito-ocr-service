@@ -784,7 +784,6 @@ def _is_valid_obito(ocr_text: str) -> bool:
     ]
     text_lower = ocr_text.lower()
     return any(k in text_lower for k in keywords)
-
 def parse_obito(raw_text: str) -> Dict[str, Any]:
     """Parser principal: parser original + fallback por label PT + fallback LLM."""
     structured: Dict[str, Any] = {k: "" for k in HEADER}
@@ -792,111 +791,241 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
     if not raw_text:
         return structured
 
-    # ═══════════════════════════════════════════════
-    # 1. PARSER ORIGINAL (regex, blocos, causas)
-    # ═══════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════
+    # 1. PARSER ORIGINAL (já existente no código)
+    # ═══════════════════════════════════════════════════════
+
+    # Tenta parser por numeração de campos (mais robusto)
+    numbered = _parsed_do_form(raw_text.split("\n"))
+    if numbered.get("NOME"):
+        for k, v in numbered.items():
+            if k in structured and v:
+                structured[k] = v
 
     # Nome
-    nome = _find_block_value(raw_text, "Nome do falecido", "Nome do falecida")
-    if not nome:
-        nome = _find_block_value(raw_text, "Nome")
-    structured["NOME"] = nome or ""
+    if not structured["NOME"]:
+        structured["NOME"] = _find_block_value(
+            raw_text,
+            ["Nome do Falecido", "Nome do falecido", "Nome do(a) Falecido(a)", "Nome do(a) falecido(a)"],
+            stop_labels=["Nome da mãe", "Nome da mae", "Nome do pai", "Nome social", "Data"],
+        )
+    # Fallback inline para NOME
+    if not structured["NOME"]:
+        for label in ["Nome do Falecido", "Nome do falecido"]:
+            for line in raw_text.split("\n"):
+                if label.lower() in line.lower():
+                    resto = line[line.lower().index(label.lower()) + len(label):].strip()
+                    if resto and not any(kw in resto.lower() for kw in ["nome", "data", "hora"]):
+                        structured["NOME"] = resto
+                        break
+            if structured["NOME"]:
+                break
+    # Fallback inteligente
+    if not structured["NOME"]:
+        fb = _find_name_fallback(raw_text)
+        if fb:
+            structured["NOME"] = fb
 
     # Nome social
-    structured["NOME_SOCIAL"] = _find_block_value(raw_text, "Nome social") or ""
-
-    # Nascimento
-    nasc = _find_block_value(raw_text, "Data de nascimento", "Data de Nascimento")
-    if not nasc:
-        nasc = _find_block_value(raw_text, "Nascimento")
-    structured["NASCIMENTO"] = _normalize_date(nasc or "")
-
-    # Sexo
-    sexo = _find_block_value(raw_text, "Sexo")
-    if sexo:
-        structured["SEXO"] = sexo[0].upper()
-
-    # Raça/Cor
-    structured["RACA_COR"] = _find_block_value(raw_text, "Raça/Cor", "Raça", "Cor")
-
-    # Estado civil
-    structured["ESTADO_CIVIL"] = _find_block_value(raw_text, "Estado civil", "Estado Civil")
-
-    # Nacionalidade
-    structured["NACIONALIDADE"] = _find_block_value(raw_text, "Nacionalidade")
+    structured["NOME_SOCIAL"] = _find_block_value(
+        raw_text, ["Nome social", "Nome Social"],
+        stop_labels=["Nome do falecido", "Nome da mãe", "Nome da mae", "Nome do pai"],
+    )
 
     # Nome da mãe
-    mae = _find_block_value(raw_text, "Nome da Mãe", "Nome da mãe", "Nome da Mae", "Nome da mae")
-    structured["NOME_MAE"] = mae or ""
+    if not structured["NOME_MAE"]:
+        structured["NOME_MAE"] = _find_block_value(
+            raw_text,
+            ["Nome da Mãe", "Nome da mãe", "Nome da mae", "Nome da Mae"],
+            stop_labels=["Nome do pai", "Profissão", "Profissao", "Endereço", "Endereco", "Nacionalidade"],
+        )
 
     # Nome do pai
-    pai = _find_block_value(raw_text, "Nome do Pai", "Nome do pai")
-    structured["NOME_PAI"] = pai or ""
+    if not structured["NOME_PAI"]:
+        structured["NOME_PAI"] = _find_block_value(
+            raw_text,
+            ["Nome do Pai", "Nome do pai"],
+            stop_labels=["Profissão", "Profissao", "Endereço", "Endereco", "Nacionalidade", "Nome da mãe", "Nome da mae"],
+        )
 
-    # Profissão
-    structured["PROFISSAO"] = _find_block_value(raw_text, "Ocupação habitual", "Ocupacao habitual", "Profissão", "Profissao")
+    # Nascimento
+    if not structured["NASCIMENTO"]:
+        structured["NASCIMENTO"] = _normalize_date(
+            _find_block_value(raw_text,
+                ["Data de nascimento", "Data de Nascimento", "Nascimento"],
+                stop_labels=["Data do óbito", "Data do obito", "Sexo", "Raça", "Raca"],
+            )
+        )
 
-    # Endereço
-    structured["LOGRADOURO"] = _find_block_value(raw_text, "Logradouro", "Endereço", "Endereco") or ""
-    structured["NUMERO"] = _find_block_value(raw_text, "Número", "Numero", "Nº", "nº") or ""
-    structured["COMPLEMENTO"] = _find_block_value(raw_text, "Complemento") or ""
-    structured["BAIRRO"] = _find_block_value(raw_text, "Bairro", "Bairro/Distrito") or ""
+    # Data do óbito
+    if not structured["DATA_OBITO"]:
+        structured["DATA_OBITO"] = _normalize_date(
+            _find_block_value(raw_text,
+                ["Data do óbito", "Data de óbito", "Data do obito", "Data de obito"],
+                stop_labels=["Hora", "Local do óbito", "Local do obito", "Município de ocorrência", "Municipio de ocorrencia"],
+            )
+        )
+    # Fallback inline para DATA_OBITO
+    if not structured["DATA_OBITO"]:
+        for label in ["Data do óbito", "Data de óbito", "Data do obito", "Data de obito"]:
+            for line in raw_text.split("\n"):
+                if label.lower() in line.lower():
+                    resto = line[line.lower().index(label.lower()) + len(label):].strip()
+                    if resto:
+                        structured["DATA_OBITO"] = _normalize_date(_normalize_date_ocr(resto))
+                        break
+            if structured["DATA_OBITO"]:
+                break
 
-    # Cidade e UF de residência
-    structured["CIDADE"] = _find_block_value(raw_text, "Município de residência", "Municipio de residencia", "Município de Residência") or ""
-    structured["UF"] = _extract_uf(raw_text, "residência") or ""
-
-    # CEP
-    structured["CEP"] = _find_block_value(raw_text, "CEP") or ""
-
-    # Naturalidade
-    structured["CIDADE_NASCIMENTO"] = _find_block_value(raw_text, "Naturalidade") or ""
-    structured["UF_NASCIMENTO"] = _extract_uf(raw_text, "naturalidade") or ""
-
-    # Documentos
-    structured["CPF"] = _find_block_value(raw_text, "CPF") or ""
-    structured["RG"] = _find_block_value(raw_text, "RG") or ""
-    structured["ORGAO_EMISSOR_RG"] = _find_block_value(raw_text, "Órgão emissor", "Orgao emissor") or ""
-
-    # ═══ Dados do óbito ═══
-    structured["DATA_OBITO"] = _find_obito_date(raw_text)
+    # Hora do óbito
     structured["HORA_OBITO"] = _find_hora_obito(raw_text)
-    structured["LOCAL_OBITO"] = _find_block_value(raw_text, "Local de ocorrência do óbito", "Local de ocorrencia do obito", "Local do óbito") or ""
-
-    # Cidade e UF do óbito
-    structured["CIDADE_OBITO"] = _find_block_value(raw_text, "Município de ocorrência", "Municipio de ocorrencia", "Município do óbito", "Municipio do obito") or ""
-    structured["UF_OBITO"] = _extract_uf(raw_text, "ocorrência", "ocorrencia", "óbito", "obito") or ""
-
-    # ═══ Causas da morte ═══
-    structured["CAUSA_MORTE"] = _find_block_value(raw_text, "Causa da morte", "Causa da Morte") or ""
-    structured["CAUSA_MORTE_2"] = _find_block_value(raw_text, "choque séptico", "choque septico", "choque") or ""
-    structured["CAUSA_MORTE_3"] = _find_block_value(raw_text, "abscesso hepático", "abscesso hepatico", "abscesso") or ""
-    structured["CAUSA_MORTE_4"] = _find_block_value(raw_text, "cirrose hepática", "cirrose hepatica", "cirrose") or ""
-    structured["CAUSA_MORTE_5"] = _find_block_value(raw_text, "colite") or ""
-    structured["CAUSA_BASICA"] = _find_block_value(raw_text, "Causa básica", "Causa basica", "Causa Básica") or ""
-    structured["CODIGO_CAUSA_BASICA"] = ""
-    structured["CID_BASICA"] = ""
-    structured["TIPO_OBITO"] = _find_block_value(raw_text, "Tipo de óbito", "Tipo de obito") or ""
-
-    # Causas detalhadas
-    causes = _extract_causes(raw_text)
-    for i, cause in enumerate(causes[:5], 1):
-        structured[f"CAUSA_MORTE_{i}"] = cause
-
-    # Parte II
-    structured["PARTE_II"] = _extract_parte_ii(raw_text)
-
-    # Médico
-    structured["MEDICO_ATESTANTE"] = _find_block_value(raw_text, "Nome do Médico", "Nome do medico", "Médico", "Medico") or ""
-    structured["CRM_MEDICO"] = _find_block_value(raw_text, "CRM") or ""
 
     # Data do atestado
-    structured["DATA_ATESTADO"] = _normalize_date(_find_block_value(raw_text, "Data do atestado", "Data do Atestado") or "")
+    structured["DATA_ATESTADO"] = _normalize_date(
+        _find_block_value(raw_text, ["Data do atestado", "Data de emissão", "Data da emissão"])
+    )
 
-    # ═══════════════════════════════════════════════
+    # Local do óbito
+    structured["LOCAL_OBITO"] = _find_block_value(
+        raw_text, ["Local do óbito", "Local de óbito", "Local do obito", "Local de obito"],
+        stop_labels=["Município de ocorrência", "Municipio de ocorrencia", "UF"],
+    )
+
+    # Cidade do óbito
+    if not structured["CIDADE_OBITO"]:
+        structured["CIDADE_OBITO"] = _find_block_value(
+            raw_text,
+            ["Município de ocorrência", "Municipio de ocorrência", "Município de ocorrencia", "Municipio de ocorrencia"],
+            stop_labels=["UF", "Estado", "Data", "CEP", "Cep"],
+        )
+
+    # UF do óbito
+    structured["UF_OBITO"] = _find_uf_after(raw_text, ["Município de ocorrência", "Municipio de ocorrencia"])
+    if not structured["UF_OBITO"]:
+        structured["UF_OBITO"] = _extract_uf_ocorrencia(raw_text)
+
+    # Endereço
+    structured["LOGRADOURO"] = _find_block_value(
+        raw_text, ["Logradouro", "Endereço", "Endereco"],
+        stop_labels=["Número", "Numero", "Complemento", "Bairro"],
+    )
+    structured["NUMERO"] = _find_block_value(
+        raw_text, ["Número", "Numero"], stop_labels=["Complemento", "Bairro"],
+    )
+    structured["COMPLEMENTO"] = _find_block_value(
+        raw_text, ["Complemento"], stop_labels=["Bairro", "Município", "Municipio"],
+    )
+    structured["BAIRRO"] = _find_block_value(
+        raw_text, ["Bairro"], stop_labels=["Município", "Municipio", "Cidade", "UF"],
+    )
+    structured["CIDADE"] = _find_block_value(
+        raw_text, ["Município", "Municipio", "Cidade"],
+        stop_labels=["UF", "CEP", "Cep"],
+    )
+    structured["UF"] = _find_uf_after(
+        raw_text, ["Endereço", "Endereco", "Logradouro", "Bairro", "Município", "Municipio", "Cidade"],
+    )
+    structured["CEP"] = _normalize_cep(_find_block_value(raw_text, ["CEP", "Cep"]))
+
+    # Naturalidade
+    structured["CIDADE_NASCIMENTO"] = _find_block_value(
+        raw_text, ["Naturalidade", "Município de nascimento", "Municipio de nascimento", "Cidade de nascimento"],
+        stop_labels=["UF de nascimento", "Nacionalidade"],
+    )
+    structured["UF_NASCIMENTO"] = _find_uf_after(
+        raw_text, ["Naturalidade", "Município de nascimento", "Municipio de nascimento"],
+    )
+
+    # Documentos
+    structured["CPF"] = _find_block_value(raw_text, ["CPF"])
+    structured["RG"] = _find_block_value(raw_text, ["RG", "Registro Geral"])
+    structured["ORGAO_EMISSOR_RG"] = _find_block_value(
+        raw_text, ["Órgão emissor", "Orgao emissor", "Órgão expedidor", "Orgao expedidor"],
+    )
+
+    # Sexo, Raça, Estado civil, Nacionalidade, Profissão
+    structured["SEXO"] = _find_block_value(raw_text, ["Sexo"], stop_labels=["Raça", "Raca", "Cor"])
+    structured["RACA_COR"] = _find_block_value(raw_text, ["Raça/Cor", "Raça", "Raca/Cor", "Raca", "Cor"])
+    structured["ESTADO_CIVIL"] = _find_block_value(raw_text, ["Estado civil"])
+    structured["NACIONALIDADE"] = _find_block_value(raw_text, ["Nacionalidade"])
+    structured["PROFISSAO"] = _find_block_value(raw_text, ["Profissão", "Profissao", "Ocupação", "Ocupacao"])
+
+    # Tipo de óbito
+    structured["TIPO_OBITO"] = _detect_obito_type(raw_text)
+
+    # Causas da morte
+    causas = _extract_causes(raw_text)
+    structured["CAUSA_MORTE"] = causas.get("CAUSA_MORTE", "")
+    structured["CAUSA_MORTE_2"] = causas.get("CAUSA_MORTE_2", "")
+    structured["CAUSA_MORTE_3"] = causas.get("CAUSA_MORTE_3", "")
+    structured["CAUSA_MORTE_4"] = causas.get("CAUSA_MORTE_4", "")
+    structured["CAUSA_MORTE_5"] = causas.get("CAUSA_MORTE_5", "")
+    structured["CAUSA_BASICA"] = causas.get("CAUSA_BASICA", "")
+
+    # CID_BASICA
+    cid_basica = ""
+    if structured.get("CAUSA_BASICA"):
+        cids = _CID_RE.findall(structured["CAUSA_BASICA"])
+        if cids:
+            cid_basica = cids[-1].upper()
+    if not cid_basica:
+        cids = _CID_RE.findall(raw_text)
+        if cids:
+            cid_basica = cids[-1].upper()
+    structured["CID_BASICA"] = cid_basica
+
+    # DO_NUMERO
+    structured["DO_NUMERO"] = _find_block_value(
+        raw_text,
+        [r"D\.O\.", "DO nº", "DO Nº", "Nº DO", "Numero DO", "Número DO", "DO "],
+        stop_labels=["Nome", "Data", "Tipo"],
+    )
+    if not structured["DO_NUMERO"]:
+        do_match = re.search(
+            r"Declaração\s+de\s+Óbito\s+(\d+(?:-\d+)?)", raw_text, re.IGNORECASE
+        )
+        if do_match:
+            structured["DO_NUMERO"] = do_match.group(1)
+
+    # Médico atestante
+    structured["MEDICO_ATESTANTE"] = _find_block_value(
+        raw_text,
+        ["Médico atestante", "Medico atestante", "Nome do médico", "Nome do medico"],
+        stop_labels=["CRM", "Registro", "Assinatura"],
+    )
+    structured["CRM_MEDICO"] = _find_block_value(
+        raw_text, ["CRM", "C.R.M.", "C.R.M"],
+        stop_labels=["Assinatura", "Carimbo", "UF"],
+    )
+
+    # PARTE II
+    structured["PARTE_II"] = _find_block_value(
+        raw_text,
+        ["Parte II", "Parte 2", "Outras condições significativas", "Outras condicoes significativas"],
+        stop_labels=["Oportunidade", "Notificado", "Providências", "Nome do auditor", "Nome do medico"],
+        max_distance=20,
+    )
+    if not structured["PARTE_II"]:
+        parte_ii_match = re.search(
+            r"PARTE\s+II[:\s]*\\n?(.*?)(?:Outros episódios|Nome do médico|CRM|$)",
+            raw_text, re.DOTALL | re.IGNORECASE
+        )
+        if parte_ii_match:
+            structured["PARTE_II"] = _clean_field(parte_ii_match.group(1).strip()[:200])
+
+    # INTERVALO
+    structured["INTERVALO_DOENCA_MORTE"] = _find_block_value(
+        raw_text,
+        ["Tempo aproximado", "Intervalo entre o início", "Intervalo entre o inicio"],
+        stop_labels=["Causas", "Parte", "Nome"],
+        max_distance=8,
+    )
+
+    # ═══════════════════════════════════════════════════════
     # 2. FALLBACK: MAPEAMENTO POR LABEL EM PORTUGUÊS
-    # ═══════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════
     # Só preenche campos que o parser original deixou vazios
+
     label_map = {
         "nome do falecido": "NOME",
         "nome do falecida": "NOME",
@@ -972,19 +1101,13 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
                     value = value[1:].strip()
                 # Só preenche se o campo ainda está vazio
                 if value and not structured.get(field):
-                    # Tratamento especial para DATA_OBITO:
-                    # Só aceita "Data:" se for a PRIMEIRA data no texto
-                    # (a primeira data costuma ser a do óbito)
-                    if label == "data:" and structured.get("NASCIMENTO"):
-                        # Se já achou nascimento, esta é provavelmente a data do óbito
-                        pass
                     structured[field] = value
                 current_field = field
                 matched = True
                 break
 
         if not matched and current_field and structured.get(current_field):
-            # Linha de continuação
+            # Linha de continuação do campo anterior
             structured[current_field] += " " + line_stripped
 
     # Normalizar datas no formato "30 05 2020" → "30/05/2020"
@@ -994,54 +1117,52 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
             partes = val.split()
             structured[campo_data] = f"{partes[0]}/{partes[1]}/{partes[2]}"
 
-    # ═══════════════════════════════════════════════
-    # 3. VALIDAÇÃO E QUALIDADE
-    # ═══════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════
+    # 3. LIMPEZA FINAL
+    # ═══════════════════════════════════════════════════════
+    text_fields = [
+        "NOME", "NOME_MAE", "NOME_PAI", "PROFISSAO",
+        "LOGRADOURO", "BAIRRO", "CIDADE", "CIDADE_OBITO",
+        "CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_MORTE_4",
+        "CAUSA_BASICA", "LOCAL_OBITO", "MEDICO_ATESTANTE",
+        "PARTE_II", "INTERVALO_DOENCA_MORTE",
+    ]
+    for campo in text_fields:
+        if structured.get(campo):
+            structured[campo] = _clean_field(structured[campo])
 
-    # Campos críticos
-    campos_criticos = ["NOME", "NOME_MAE", "NASCIMENTO", "DATA_OBITO", "CIDADE_OBITO", "UF_OBITO"]
-
-    # NOMES_OK / NOME_OK
-    structured["NOMES_OK"] = "SIM" if structured.get("NOME") and structured.get("NOME_MAE") else "NAO"
-    structured["NOME_OK"] = "SIM" if structured.get("NOME") else "NAO"
-
-    # GARBAGE_CODES
-    garbage = _check_garbage(structured)
-    structured["GARBAGE_CODES"] = garbage
-    structured["QTD_GARBAGE"] = str(len(garbage))
-
-    # PROTOCOLO_TEV
-    structured["PROTOCOLO_TEV"] = _check_tev(structured)
-
-    # ERROS
-    erros = []
-    for campo in campos_criticos:
-        if not structured.get(campo):
-            erros.append(f"Campo crítico ausente: {campo}")
-    structured["ERROS"] = " | ".join(erros)
-
-    # QUALIDADE_SCORE
-    structured["QUALIDADE_SCORE"] = str(_calculate_score(structured))
-
-    # Hash
-    structured["HASH_ARQUIVO"] = ""
-    structured["HASH_CONTEUDO"] = hashlib.sha256(raw_text.encode()).hexdigest()
-
-    # STATUS
-    structured["STATUS"] = "REVISAR" if erros else "OK"
+    # IDADE (calcular)
+    idade_calc = ""
+    if structured.get("NASCIMENTO") and structured.get("DATA_OBITO"):
+        try:
+            dn = dt.datetime.strptime(structured["NASCIMENTO"], "%d/%m/%Y")
+            do = dt.datetime.strptime(structured["DATA_OBITO"], "%d/%m/%Y")
+            anos = do.year - dn.year - ((do.month, do.day) < (dn.month, dn.day))
+            if 0 <= anos <= 130:
+                idade_calc = str(anos)
+        except Exception:
+            pass
+    structured["IDADE_ANOS"] = idade_calc
 
     # NOME_MES
-    structured["NOME_MES"] = ""
+    if structured["DATA_OBITO"]:
+        partes = structured["DATA_OBITO"].split("/")
+        if len(partes) == 3:
+            mes = partes[1].zfill(2)
+            structured["NOME_MES"] = MESES_PT.get(mes, "")
 
-    # IDADE_ANOS
-    structured["IDADE_ANOS"] = _calculate_age(structured.get("NASCIMENTO", ""), structured.get("DATA_OBITO", ""))
+    # Hashes
+    structured["HASH_ARQUIVO"] = ""
+    structured["HASH_CONTEUDO"] = _sha256_text(raw_text)
 
-    # INTERVALO_DOENCA_MORTE
-    structured["INTERVALO_DOENCA_MORTE"] = ""
+    # ═══════════════════════════════════════════════════════
+    # 4. VALIDAÇÃO (usa a função já existente)
+    # ═══════════════════════════════════════════════════════
+    validate_obito(structured)
 
-    # ═══════════════════════════════════════════════
-    # 4. FALLBACK LLM (se QUALIDADE_SCORE < 50)
-    # ═══════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════
+    # 5. FALLBACK LLM (se QUALIDADE_SCORE < 50)
+    # ═══════════════════════════════════════════════════════
     score = int(structured.get("QUALIDADE_SCORE", 0))
     if score < 50 and raw_text and OPENAI_API_KEY:
         try:
@@ -1053,6 +1174,7 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
             pass  # fallback silencioso
 
     return structured
+
 def _llm_parse_fallback(raw_text: str) -> Dict[str, str]:
     """Usa GPT-4o-mini para extrair campos de DO quando o parser tradicional falha."""
     prompt = f"""Extraia os campos abaixo deste texto de Declaração de Óbito.
