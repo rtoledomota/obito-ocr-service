@@ -790,7 +790,136 @@ def _is_valid_obito(ocr_text: str) -> bool:
 def parse_obito(text: str) -> Dict[str, Any]:
     """Constrói dicionário estruturado a partir do texto OCR."""
     structured: Dict[str, Any] = {k: "" for k in HEADER}
+def _llm_parse_fallback(raw_text: str) -> Dict[str, str]:
+    """Usa GPT-4o-mini para extrair campos de DO quando o parser tradicional falha."""
+    prompt = f"""Extraia os campos abaixo deste texto de Declaração de Óbito.
+Retorne APENAS um JSON válido com os campos encontrados (string vazia se não encontrar).
 
+Campos: NOME, NOME_MAE, NOME_PAI, NASCIMENTO (DD/MM/AAAA), DATA_OBITO (DD/MM/AAAA),
+HORA_OBITO, CIDADE_OBITO, UF_OBITO, CAUSA_MORTE, CAUSA_BASICA,
+DO_NUMERO, MEDICO_ATESTANTE, CRM_MEDICO, TIPO_OBITO, SEXO,
+LOGRADOURO, NUMERO, BAIRRO, CIDADE, CEP, PROFISSAO
+
+Texto OCR:
+{raw_text}
+"""
+    try:
+        resp = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.0,
+                "response_format": {"type": "json_object"},
+            },
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            timeout=30,
+        )
+        result = resp.json()
+        content = result["choices"][0]["message"]["content"]
+        return json.loads(content)
+    except Exception as e:
+        print(f"[LLM_FALLBACK] Erro: {e}")
+        return {}       
+def parse_obito(raw_text: str) -> Dict[str, str]:
+    # ── Fallback: parser por labels em português natural ────────
+    if not raw_text:
+        return _empty_obito()
+
+    lines = raw_text.split('\n')
+    parsed = _empty_obito()
+
+    # Mapeamento de labels em português → campos do sistema
+    label_map = {
+        "nome do falecido": "NOME",
+        "nome do falecida": "NOME",
+        "nome do paciente": "NOME",
+        "nome da mãe": "NOME_MAE",
+        "nome da mae": "NOME_MAE",
+        "nome do pai": "NOME_PAI",
+        "data de nascimento": "NASCIMENTO",
+        "data de nasc": "NASCIMENTO",
+        "data nascimento": "NASCIMENTO",
+        "data do óbito": "DATA_OBITO",
+        "data do obito": "DATA_OBITO",
+        "data do falecimento": "DATA_OBITO",
+        "data:": "DATA_OBITO",  # genérico — tratado com cuidado abaixo
+        "hora:": "HORA_OBITO",
+        "hora do óbito": "HORA_OBITO",
+        "hora do obito": "HORA_OBITO",
+        "sexo:": "SEXO",
+        "naturalidade": "CIDADE_NASCIMENTO",
+        "raça/cor": "RACA_COR",
+        "raca/cor": "RACA_COR",
+        "estado civil": "ESTADO_CIVIL",
+        "escolaridade": "ESCOLARIDADE",
+        "ocupação habitual": "PROFISSAO",
+        "ocupacao habitual": "PROFISSAO",
+        "profissão": "PROFISSAO",
+        "logradouro": "LOGRADOURO",
+        "endereço": "LOGRADOURO",
+        "endereco": "LOGRADOURO",
+        "número": "NUMERO",
+        "numero": "NUMERO",
+        "nº": "NUMERO",
+        "complemento": "COMPLEMENTO",
+        "bairro": "BAIRRO",
+        "município de residência": "CIDADE",
+        "municipio de residencia": "CIDADE",
+        "município de ocorrência": "CIDADE_OBITO",
+        "municipio de ocorrencia": "CIDADE_OBITO",
+        "cidade": "CIDADE_OBITO",
+        "uf:": "UF_OBITO",
+        "cep:": "CEP",
+        "causa basica": "CAUSA_BASICA",
+        "causa básica": "CAUSA_BASICA",
+        "causa da morte": "CAUSA_MORTE",
+        "nome do médico": "MEDICO_ATESTANTE",
+        "nome do medico": "MEDICO_ATESTANTE",
+        "crm:": "CRM_MEDICO",
+        "crm": "CRM_MEDICO",
+        "data do atestado": "DATA_ATESTADO",
+        "tipo de óbito": "TIPO_OBITO",
+        "tipo de obito": "TIPO_OBITO",
+    }
+
+    current_field = None
+    for line in lines:
+        line_stripped = line.strip()
+        if not line_stripped:
+            continue
+
+        line_lower = line_stripped.lower()
+
+        # Tenta匹配 um label conhecido
+        matched = False
+        for label, field in label_map.items():
+            if line_lower.startswith(label):
+                value = line_stripped[len(label):].strip()
+                # Remove ":" inicial se houver
+                if value.startswith(':'):
+                    value = value[1:].strip()
+                if value and not parsed.get(field):
+                    parsed[field] = value
+                current_field = field
+                matched = True
+                break
+
+        if not matched and current_field:
+            # Linha de continuação do campo anterior (ex: causa da morte em várias linhas)
+            if parsed.get(current_field):
+                parsed[current_field] += " " + line_stripped
+
+    # ── Pós-processamento: normalizar datas ──────────────────────
+    for campo_data in ["NASCIMENTO", "DATA_OBITO", "DATA_ATESTADO"]:
+        val = parsed.get(campo_data, "")
+        # "30 05 2020" → "30/05/2020"
+        if val and re.match(r'^\d{2}\s+\d{2}\s+\d{4}$', val):
+            partes = val.split()
+            parsed[campo_data] = f"{partes[0]}/{partes[1]}/{partes[2]}"
     # 1. Tenta parser por numeração de campos (mais robusto)
     numbered = _parsed_do_form(text.split("\n"))
     if numbered.get("NOME"):
@@ -1029,7 +1158,18 @@ def parse_obito(text: str) -> Dict[str, Any]:
     for campo in text_fields:
         if structured.get(campo):
             structured[campo] = _clean_field(structured[campo])
+ # ── Fallback LLM se QUALIDADE_SCORE < 50 ────────────────────
+    score = int(parsed.get("QUALIDADE_SCORE", 0))
+    if score < 50 and raw_text and OPENAI_API_KEY:
+        try:
+            llm_data = _llm_parse_fallback(raw_text)
+            for k, v in llm_data.items():
+                if v and not parsed.get(k):
+                    parsed[k] = v
+        except Exception:
+            pass  # fallback silencioso
 
+    return parsed
     return structured
 
 # ── Validação ───────────────────────────────────────────────────
