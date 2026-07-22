@@ -926,7 +926,10 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
     )
 
     structured["SEXO"] = _find_block_value(raw_text, ["Sexo"], stop_labels=["Raça", "Raca", "Cor"])
-    structured["RACA_COR"] = _find_block_value(raw_text, ["Raça/Cor", "Raça", "Raca/Cor", "Raca", "Cor"], stop_labels=["Situação", "Situacao", "Escolaridade", "Ocupação", "Ocupacao"])
+    structured["RACA_COR"] = _find_block_value(
+        raw_text, ["Raça/Cor", "Raça", "Raca/Cor", "Raca", "Cor"],
+        stop_labels=["Situação", "Situacao", "Escolaridade", "Ocupação", "Ocupacao"],
+    )
     structured["ESTADO_CIVIL"] = _find_block_value(raw_text, ["Estado civil"])
     structured["NACIONALIDADE"] = _find_block_value(raw_text, ["Nacionalidade"])
     structured["PROFISSAO"] = _find_block_value(raw_text, ["Profissão", "Profissao", "Ocupação", "Ocupacao"])
@@ -995,7 +998,6 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         max_distance=8,
     )
 
-    # ═══════════════════════════════════════════════════════
     # ═══════════════════════════════════════════════════════
     # 2. FALLBACK: MAPEAMENTO POR LABEL EM PORTUGUÊS
     # ═══════════════════════════════════════════════════════
@@ -1100,46 +1102,9 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
             partes = val.split()
             structured[campo_data] = f"{partes[0]}/{partes[1]}/{partes[2]}"
 
-    for line in lines:
-        line_stripped = line.strip()
-        if not line_stripped:
-            continue
-
-        line_lower = line_stripped.lower()
-
-        matched = False
-        for label, field in label_map.items():
-            if line_lower.startswith(label):
-                value = line_stripped[len(label):].strip()
-                if value.startswith(':'):
-                    value = value[1:].strip()
-                if value and not structured.get(field):
-                    structured[field] = value
-                current_field = field
-                continuation_count[current_field] = 0  # reseta contador
-                matched = True
-                break
-
-        # 🔧 CONTINUAÇÃO LIMITADA: no máximo 2 linhas extras
-        if not matched and current_field and structured.get(current_field):
-            cont_key = f"cont_{current_field}"
-            continuation_count[cont_key] = continuation_count.get(cont_key, 0) + 1
-            if continuation_count[cont_key] <= 2:
-                structured[current_field] += " " + line_stripped
-            else:
-                current_field = None  # para de acumular
-
-    # Normalizar datas "30 05 2020" → "30/05/2020"
-    for campo_data in ["NASCIMENTO", "DATA_OBITO", "DATA_ATESTADO"]:
-        val = structured.get(campo_data, "")
-        if val and re.match(r'^\d{2}\s+\d{2}\s+\d{4}$', val):
-            partes = val.split()
-            structured[campo_data] = f"{partes[0]}/{partes[1]}/{partes[2]}"
-
     # ═══════════════════════════════════════════════════════
     # 3. LIMPEZA DE PREFIXOS NOS CAMPOS
     # ═══════════════════════════════════════════════════════
-    # Remove prefixos conhecidos que sobram dos labels do OCR
 
     prefixos_para_remover = [
         (r"^\(rua,\s*praça,\s*avenida,\s*etc\):\s*", ""),
@@ -1153,10 +1118,12 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         (r"^habitual:\s*", ""),
         (r"^\(última série concluída\):\s*", ""),
         (r"^\(ultima serie concluida\):\s*", ""),
-        (r"\s+Idade:\s*\d+$", ""),       # Remove " Idade: 93" no final
+        (r"\s+Idade:\s*\d+$", ""),
         (r"\s+Idade\s*\d+$", ""),
-        (r"\s+Cartão\s+SUS:?.*$", ""),   # Remove " Cartão SUS:" e tudo depois
+        (r"\s+Cartão\s+SUS:?.*$", ""),
         (r"\s+Cartao\s+SUS:?.*$", ""),
+        (r"^e a morte:\s*", ""),
+        (r"^UF do CRM:\s*", ""),
     ]
 
     campos_para_limpar = [
@@ -1168,6 +1135,7 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         "CAUSA_MORTE_4", "CAUSA_MORTE_5", "CAUSA_BASICA",
         "LOCAL_OBITO", "MEDICO_ATESTANTE", "PARTE_II",
         "INTERVALO_DOENCA_MORTE", "DATA_ATESTADO",
+        "CRM_MEDICO", "RACA_COR",
     ]
 
     for campo in campos_para_limpar:
@@ -1207,19 +1175,33 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
     if nasc:
         nasc_clean = re.sub(r'\s+Idade:\s*\d+.*$', '', nasc, flags=re.IGNORECASE).strip()
         structured["NASCIMENTO"] = nasc_clean
-    
-    uf_obito = structured.get("UF_OBITO", "")
-if uf_obito:
-    uf_obito = re.sub(r'[`\s]', '', uf_obito)      # Remove backticks e espaços
-    match_uf = re.match(r'^([A-Za-z]{2})', uf_obito)
-    if match_uf:
-        structured["UF_OBITO"] = match_uf.group(1).upper()
 
-    # Se INTERVALO_DOENCA_MORTE tiver "e a morte:", limpar
+    # Limpar RACA_COR se tiver ":" ou for muito longo
+    raca = structured.get("RACA_COR", "")
+    if raca and (":" in raca or len(raca) > 20):
+        structured["RACA_COR"] = ""
+
+    # Se UF_OBITO tiver backticks ou texto extra, limpar
+    uf_obito = structured.get("UF_OBITO", "")
+    if uf_obito:
+        uf_obito = re.sub(r'[`\s]', '', uf_obito)
+        match_uf = re.match(r'^([A-Za-z]{2})', uf_obito)
+        if match_uf:
+            structured["UF_OBITO"] = match_uf.group(1).upper()
+
+    # Se CRM_MEDICO tiver texto extra depois do número, limpar
+    crm = structured.get("CRM_MEDICO", "")
+    if crm:
+        match_crm = re.match(r'^(\d+)', crm)
+        if match_crm:
+            structured["CRM_MEDICO"] = match_crm.group(1)
+
+    # Limpar INTERVALO_DOENCA_MORTE
     intervalo = structured.get("INTERVALO_DOENCA_MORTE", "")
     if intervalo:
         intervalo = re.sub(r'^e a morte:\s*', '', intervalo, flags=re.IGNORECASE).strip()
         structured["INTERVALO_DOENCA_MORTE"] = intervalo
+
     # IDADE (calcular)
     idade_calc = ""
     if structured.get("NASCIMENTO") and structured.get("DATA_OBITO"):
