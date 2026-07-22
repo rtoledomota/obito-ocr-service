@@ -1727,3 +1727,25 @@ if AUTO_PROCESS_ENABLED and DRIVE_FOLDER_ID and DRIVE_SERVICE_ACCOUNT_JSON and S
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=False)
+
+# ── Listar imagens da pasta (para diagnóstico) ──────────────────
+
+@app.get("/diagnose/files")
+async def diagnose_list_files(authorization: Optional[str] = Header(None)):
+    _check_auth(authorization)
+    folder_id = os.getenv("DRIVE_FOLDER_ID")
+    if not folder_id:
+        return JSONResponse(status_code=400, content={"error": "DRIVE_FOLDER_ID não configurado"})
+    
+    images = _list_images_in_folder(folder_id)
+    return {
+        "total": len(images),
+        "files": [
+            {
+                "id": img["id"],
+                "name": img["name"],
+                "mimeType": img.get("mimeType", "unknown"),
+            }
+            for img in images[:20]  # primeiras 20
+        ]
+    }
