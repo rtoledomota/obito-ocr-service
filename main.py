@@ -996,9 +996,9 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
     )
 
     # ═══════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════
     # 2. FALLBACK: MAPEAMENTO POR LABEL EM PORTUGUÊS
     # ═══════════════════════════════════════════════════════
-    # Só preenche campos que o parser original deixou vazios
 
     label_map = {
         "nome do falecido": "NOME",
@@ -1059,11 +1059,32 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
 
     lines = raw_text.split('\n')
     current_field = None
-   # 🔧 CONTINUAÇÃO LIMITADA: no máximo 2 linhas extras
-        # E NÃO continua se a linha tiver ":" (provavelmente é outro campo)
+    continuation_count = {}
+
+    for line in lines:
+        line_stripped = line.strip()
+        if not line_stripped:
+            continue
+
+        line_lower = line_stripped.lower()
+
+        matched = False
+        for label, field in label_map.items():
+            if line_lower.startswith(label):
+                value = line_stripped[len(label):].strip()
+                if value.startswith(':'):
+                    value = value[1:].strip()
+                if value and not structured.get(field):
+                    structured[field] = value
+                current_field = field
+                continuation_count[current_field] = 0
+                matched = True
+                break
+
+        # NÃO continua se a linha tiver ":" (provavelmente é outro campo)
         if not matched and current_field and structured.get(current_field):
             if ":" in line_stripped:
-                current_field = None  # É outro campo, para de acumular
+                current_field = None
             else:
                 cont_key = f"cont_{current_field}"
                 continuation_count[cont_key] = continuation_count.get(cont_key, 0) + 1
@@ -1071,6 +1092,13 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
                     structured[current_field] += " " + line_stripped
                 else:
                     current_field = None
+
+    # Normalizar datas "30 05 2020" → "30/05/2020"
+    for campo_data in ["NASCIMENTO", "DATA_OBITO", "DATA_ATESTADO"]:
+        val = structured.get(campo_data, "")
+        if val and re.match(r'^\d{2}\s+\d{2}\s+\d{4}$', val):
+            partes = val.split()
+            structured[campo_data] = f"{partes[0]}/{partes[1]}/{partes[2]}"
 
     for line in lines:
         line_stripped = line.strip()
