@@ -926,7 +926,7 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
     )
 
     structured["SEXO"] = _find_block_value(raw_text, ["Sexo"], stop_labels=["Raça", "Raca", "Cor"])
-    structured["RACA_COR"] = _find_block_value(raw_text, ["Raça/Cor", "Raça", "Raca/Cor", "Raca", "Cor"])
+    structured["RACA_COR"] = _find_block_value(raw_text, ["Raça/Cor", "Raça", "Raca/Cor", "Raca", "Cor"], stop_labels=["Situação", "Situacao", "Escolaridade", "Ocupação", "Ocupacao"])
     structured["ESTADO_CIVIL"] = _find_block_value(raw_text, ["Estado civil"])
     structured["NACIONALIDADE"] = _find_block_value(raw_text, ["Nacionalidade"])
     structured["PROFISSAO"] = _find_block_value(raw_text, ["Profissão", "Profissao", "Ocupação", "Ocupacao"])
@@ -1207,7 +1207,20 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
     if nasc:
         nasc_clean = re.sub(r'\s+Idade:\s*\d+.*$', '', nasc, flags=re.IGNORECASE).strip()
         structured["NASCIMENTO"] = nasc_clean
+    # Se UF_OBITO tiver backticks
+```, limpar
+    uf_obito = structured.get("UF_OBITO", "")
+    if uf_obito:
+        uf_obito = re.sub(r'[`\s]', '', uf_obito)
+        match_uf = re.match(r'^([A-Za-z]{2})', uf_obito)
+        if match_uf:
+            structured["UF_OBITO"] = match_uf.group(1).upper()
 
+    # Se INTERVALO_DOENCA_MORTE tiver "e a morte:", limpar
+    intervalo = structured.get("INTERVALO_DOENCA_MORTE", "")
+    if intervalo:
+        intervalo = re.sub(r'^e a morte:\s*', '', intervalo, flags=re.IGNORECASE).strip()
+        structured["INTERVALO_DOENCA_MORTE"] = intervalo
     # IDADE (calcular)
     idade_calc = ""
     if structured.get("NASCIMENTO") and structured.get("DATA_OBITO"):
