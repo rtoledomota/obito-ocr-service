@@ -546,7 +546,9 @@ def _extract_causes_v1(text: str) -> List[str]:
         "intervalo entre o início e a morte", "intervalo entre o inicio e a morte",
         "cid", "meses dias horas minutos ignorado", "causas da morte", "causa da morte",
         "outras afecções", "outras afeccoes","seqüência de causas", "sequencia de causas",
-        "estados mórbidos que causaram diretamente a morte",
+        "estados mórbidos que causaram diretamente a morte","anote somente um diagnóstico por linha",
+        "doença ou estado mórbido que causou diretamente a morte","sequência de causas mórbidas que ocasionaram diretamente a morte",
+        "parte i", "parte ii",
     ]
     start_idx = -1
     for i, (norm, _) in enumerate(pairs):
@@ -1141,6 +1143,8 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         (r"^e o óbito:\s*", ""),
         (r"^\(que contribuíram para a morte, mas não relacionadas à doença ou condição que a causou\):\s*", ""),
         (r"^\(que contribuiram para a morte, mas nao relacionadas a doenca ou condicao que a causou\):\s*", ""),
+        (r"^habitual \(Informar anterior, se aposentado / desempregado\):\s*", ""),
+        (r"^habitual \(Informar anterior, se aposentada / desempregada\):\s*", ""),
     ]
 
     campos_para_limpar = [
