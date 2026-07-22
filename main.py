@@ -1130,6 +1130,8 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         (r"^Intervalo entre o início e o óbito:\s*", ""),
         (r"^Intervalo entre o início e a morte:\s*", ""),
         (r"^e o óbito:\s*", ""),
+        (r"^\(que contribuíram para a morte, mas não relacionadas à doença ou condição que a causou\):\s*", ""),
+        (r"^\(que contribuiram para a morte, mas nao relacionadas a doenca ou condicao que a causou\):\s*", ""),
     ]
 
     campos_para_limpar = [
