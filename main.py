@@ -802,9 +802,8 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
                 structured[k] = v
 
     if not structured["NOME"]:
-        structured["NOME"] = _find_block_value(
-            raw_text,
-            ["Nome do Falecido", "Nome do falecido", "Nome do(a) Falecido(a)", "Nome do(a) falecido(a)"],
+        structured["NOME"] = _find_block_value(raw_text,
+           ["Nome do Falecido", "Nome do falecido", "Nome do(a) Falecido(a)", "Nome do(a) falecido(a)", "Nome da falecida"],
             stop_labels=["Nome da mãe", "Nome da mae", "Nome do pai", "Nome social", "Data"],
         )
     if not structured["NOME"]:
@@ -930,7 +929,10 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         raw_text, ["Raça/Cor", "Raça", "Raca/Cor", "Raca", "Cor"],
         stop_labels=["Situação", "Situacao", "Escolaridade", "Ocupação", "Ocupacao"],
     )
-    structured["ESTADO_CIVIL"] = _find_block_value(raw_text, ["Estado civil"])
+    structured["ESTADO_CIVIL"] = _find_block_value(
+    raw_text, ["Estado civil", "Situação conjugal", "Situacao conjugal"],
+    stop_labels=["Escolaridade", "Ocupação", "Ocupacao", "Raça", "Raca"],
+    )
     structured["NACIONALIDADE"] = _find_block_value(raw_text, ["Nacionalidade"])
     structured["PROFISSAO"] = _find_block_value(raw_text, ["Profissão", "Profissao", "Ocupação", "Ocupacao"])
 
@@ -1124,6 +1126,10 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         (r"\s+Cartao\s+SUS:?.*$", ""),
         (r"^e a morte:\s*", ""),
         (r"^UF do CRM:\s*", ""),
+        (r"^Devido ou como consequência de:\s*", ""),
+        (r"^Intervalo entre o início e o óbito:\s*", ""),
+        (r"^Intervalo entre o início e a morte:\s*", ""),
+        (r"^e o óbito:\s*", ""),
     ]
 
     campos_para_limpar = [
