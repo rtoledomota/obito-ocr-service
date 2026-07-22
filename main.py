@@ -1059,8 +1059,18 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
 
     lines = raw_text.split('\n')
     current_field = None
-    # 🔧 CONTADOR DE CONTINUAÇÃO — no máximo 2 linhas extras por campo
-    continuation_count = {}
+   # 🔧 CONTINUAÇÃO LIMITADA: no máximo 2 linhas extras
+        # E NÃO continua se a linha tiver ":" (provavelmente é outro campo)
+        if not matched and current_field and structured.get(current_field):
+            if ":" in line_stripped:
+                current_field = None  # É outro campo, para de acumular
+            else:
+                cont_key = f"cont_{current_field}"
+                continuation_count[cont_key] = continuation_count.get(cont_key, 0) + 1
+                if continuation_count[cont_key] <= 2:
+                    structured[current_field] += " " + line_stripped
+                else:
+                    current_field = None
 
     for line in lines:
         line_stripped = line.strip()
