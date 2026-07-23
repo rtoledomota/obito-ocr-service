@@ -549,6 +549,7 @@ def _extract_causes_v1(text: str) -> List[str]:
         "estados mórbidos que causaram diretamente a morte","anote somente um diagnóstico por linha",
         "doença ou estado mórbido que causou diretamente a morte","sequência de causas mórbidas que ocasionaram diretamente a morte",
         "parte i", "parte ii", anote somente um diagnóstico por linha", "doença ou estado mórbido que causou diretamente a morte",
+        "sequência de causas mórbidas que ocasionaram diretamente a morte",  "causas antecedentes",
         "sequência de causas mórbidas que ocasionaram diretamente a morte",
     ]
     start_idx = -1
@@ -1146,6 +1147,8 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         (r"^\(que contribuiram para a morte, mas nao relacionadas a doenca ou condicao que a causou\):\s*", ""),
         (r"^habitual \(Informar anterior, se aposentado / desempregado\):\s*", ""),
         (r"^habitual \(Informar anterior, se aposentada / desempregada\):\s*", ""),
+        (r"^que contribuíram para a morte, mas (?:que )?não (?:entram (?:diretamente na seqüência acima|relacionadas à doença ou condição que a causou)|relacionadas à doença ou condição que a causou)[^:]*:?\s*", ""),
+
     ]
 
     campos_para_limpar = [
@@ -1211,6 +1214,11 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         if match_uf:
             structured["UF_OBITO"] = match_uf.group(1).upper()
 
+    # Se COMPLEMENTO contiver "CEP:", limpar
+    compl = structured.get("COMPLEMENTO", "")
+    if compl and re.search(r'CEP:\s', compl, re.IGNORECASE):
+        structured["COMPLEMENTO"] = ""
+    
     # Se CRM_MEDICO tiver texto extra depois do número, limpar
     crm = structured.get("CRM_MEDICO", "")
     if crm:
