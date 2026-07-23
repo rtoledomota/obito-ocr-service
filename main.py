@@ -548,7 +548,7 @@ def _extract_causes_v1(text: str) -> List[str]:
         "outras afecções", "outras afeccoes","seqüência de causas", "sequencia de causas",
         "estados mórbidos que causaram diretamente a morte","anote somente um diagnóstico por linha",
         "doença ou estado mórbido que causou diretamente a morte","sequência de causas mórbidas que ocasionaram diretamente a morte",
-        "parte i", "parte ii", anote somente um diagnóstico por linha", "doença ou estado mórbido que causou diretamente a morte",
+        "parte i", "parte ii", "anote somente um diagnóstico por linha", "doença ou estado mórbido que causou diretamente a morte",
         "sequência de causas mórbidas que ocasionaram diretamente a morte",  "causas antecedentes",
         "sequência de causas mórbidas que ocasionaram diretamente a morte",
     ]
