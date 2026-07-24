@@ -1123,6 +1123,11 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
             if l not in linhas_unicas:
                 linhas_unicas.append(l)
         structured["MEDICO_ATESTANTE"] = " ".join(linhas_unicas)
+    
+    # ── Remover "Nome:" do início do NOME (quando OCR captura label) ──
+    nome = structured.get("NOME", "")
+    if nome and nome.lower().startswith("nome:"):
+        structured["NOME"] = nome[5:].strip()
     # ═══════════════════════════════════════════════════════
     # 2. FALLBACK: MAPEAMENTO POR LABEL EM PORTUGUÊS
     # ═══════════════════════════════════════════════════════
@@ -1276,6 +1281,12 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         (r"^Anote somente um diagnóstico por linha\s*", ""),
         (r"^Não preencher este espaço\s*", ""),
         (r"^PREENCHEMENTO EXCLUSIVO[:\s]*", ""),
+        (r"^Nome:\s*", ""),
+        (r"^Condições ou causas mórbidas que deram origem à sequência de eventos que produziram a morte[:\s]*", ""),
+        (r"^Doença ou condições significativas[:\s]*", ""),
+        (r"^Condições ou causas mórbidas que ocasionaram diretamente[:\s]*", ""),
+        (r":\s*\d+\s*$", ""),
+        (r"\s+\d{2,3}\s*$", ""),
     ]
 
     campos_para_limpar = [
