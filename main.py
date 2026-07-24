@@ -41,6 +41,84 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
+def _process_single_image(file_id: str, file_name: str) -> dict:
+    """Pipeline completo: baixar → OCR (melhor de 3 tentativas) → parse → validar."""
+    logger.info(f"Processando: {file_name} ({file_id})")
+    try:
+        image_bytes, mime_type = _download_image_bytes(file_id)
+    except Exception as e:
+        return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_DRIVE", "ERROS": str(e)}
+
+    # Múltiplas tentativas de OCR, fica com o melhor resultado
+    melhor_raw_text = None
+    melhor_structured = None
+    melhor_score = -1
+
+    for tentativa in range(3):
+        try:
+            raw_text, confidence = ocr_image(image_bytes, mime_type)
+
+            if not _is_valid_obito(raw_text):
+                logger.info(f"{file_name}: tentativa {tentativa+1}/3 - não reconhecida como DO, pulando")
+                continue
+
+            structured = parse_obito(raw_text)
+            validate_obito(structured)
+            score = int(structured.get("QUALIDADE_SCORE", 0))
+
+            if score > melhor_score:
+                melhor_score = score
+                melhor_raw_text = raw_text
+                melhor_structured = structured
+                logger.info(f"{file_name}: tentativa {tentativa+1}/3 - score {score}")
+
+            if score >= 60:
+                break  # Já está bom, não precisa tentar mais
+
+        except Exception as e:
+            logger.warning(f"{file_name}: tentativa {tentativa+1}/3 falhou: {e}")
+            continue
+
+    # Se nenhuma tentativa funcionou
+    if melhor_raw_text is None:
+        return {
+            "NOME_ARQUIVO": file_name, "STATUS": "ERRO_OCR",
+            "ERROS": "Todas as 3 tentativas de OCR falharam ou não reconheceram DO",
+        }
+
+    # Usa o melhor resultado
+    raw_text = melhor_raw_text
+    structured = melhor_structured
+
+    structured["HASH_ARQUIVO"] = _sha256_bytes(image_bytes)
+    structured["HASH_CONTEUDO"] = _sha256_text(raw_text)
+    validate_obito(structured)
+
+    return {
+        "DATA_PROCESSAMENTO": datetime.utcnow().strftime("%d/%m/%Y %H:%M:%S"),
+        "NOME_ARQUIVO": file_name,
+        "STATUS": structured.get("STATUS", ""),
+        "QUALIDADE_SCORE": str(structured.get("QUALIDADE_SCORE", "")),
+        "NOME": structured.get("NOME", ""),
+        "NOME_MAE": structured.get("NOME_MAE", ""),
+        "NASCIMENTO": structured.get("NASCIMENTO", ""),
+        "IDADE_ANOS": structured.get("IDADE_ANOS", ""),
+        "DATA_OBITO": structured.get("DATA_OBITO", ""),
+        "HORA_OBITO": structured.get("HORA_OBITO", ""),
+        "CIDADE_OBITO": structured.get("CIDADE_OBITO", ""),
+        "UF_OBITO": structured.get("UF_OBITO", ""),
+        "CAUSA_MORTE": structured.get("CAUSA_MORTE", ""),
+        "CAUSA_BASICA": structured.get("CAUSA_BASICA", ""),
+        "CID_BASICA": structured.get("CID_BASICA", ""),
+        "TIPO_OBITO": structured.get("TIPO_OBITO", ""),
+        "DO_NUMERO": structured.get("DO_NUMERO", ""),
+        "MEDICO_ATESTANTE": structured.get("MEDICO_ATESTANTE", ""),
+        "CRM_MEDICO": structured.get("CRM_MEDICO", ""),
+        "PARTE_II": structured.get("PARTE_II", ""),
+        "INTERVALO_DOENCA_MORTE": structured.get("INTERVALO_DOENCA_MORTE", ""),
+        "ERROS": structured.get("ERROS", ""),
+        "HASH_ARQUIVO": structured.get("HASH_ARQUIVO", ""),
+    }
 # ── Logger ──────────────────────────────────────────────────────
 logger = logging.getLogger(__name__)
 logging.basicConfig(
