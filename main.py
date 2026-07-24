@@ -274,6 +274,9 @@ def _normalize_date_ocr(raw: str) -> str:
             d, m, a = int(n[0:2]), int(n[2:4]), int(n[4:8])
             if 1 <= d <= 31 and 1 <= m <= 12 and 1900 <= a <= 2100:
                 return f"{d:02d}/{m:02d}/{a}"
+    # Se mês > 12, provavelmente está trocado (dia/mês invertidos)
+    if int(month) > 12:
+        month, day = day, month               
     return ""
 
 def _normalize_date(raw: str) -> str:
@@ -628,7 +631,10 @@ def _extract_causes_v1(text: str) -> List[str]:
         "doença ou estado mórbido que causou diretamente a morte","sequência de causas mórbidas que ocasionaram diretamente a morte",
         "parte i", "parte ii", "anote somente um diagnóstico por linha", "doença ou estado mórbido que causou diretamente a morte",
         "sequência de causas mórbidas que ocasionaram diretamente a morte",  "causas antecedentes","afecções mórbidas, se houver",
-        "outra condição significativa","condição significativa que contribuiu","não relacionadas diretamente",    ]
+        "outra condição significativa","condição significativa que contribuiu","não relacionadas diretamente","afeccoes que originaram as causas acima",
+        "afecções que originaram as causas acima","afeccoes que originaram","afecções que originaram", "produziram a causa básica",
+        "outra condição significativa","condição significativa que contribuiu",
+        "não relacionadas diretamente",    ]
     start_idx = -1
     for i, (norm, _) in enumerate(pairs):
         nl = _norm_label(norm)
@@ -1359,7 +1365,12 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
                     structured[k] = v
         except Exception:
             pass
-
+    # Limpar sufixo "PARTE I" / "PARTE II" das causas
+    for campo in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_BASICA"]:
+        val = structured.get(campo, "")
+        if val:
+            val = re.sub(r'\s+PARTE\s+(I|II)\s*$', '', val, flags=re.IGNORECASE).strip()
+            structured[campo] = val
     return structured
 
 def _llm_parse_fallback(raw_text: str) -> Dict[str, str]:
