@@ -848,22 +848,22 @@ def _find_name_fallback(text: str) -> str:
 # ── Utilitários diversos para parser ────────────────────────────
 
 def _extract_uf_ocorrencia(text: str) -> str:
-    """Extrai UF do local de ocorrência."""
     if not text:
         return ""
-    ocorrencia_match = re.search(
-        r"Local de ocorrência do óbito[:\s]*\n?(.*?)(?:III[\)\.\s]|PREENCHEMENTO|IV[\)\.\s]|$)",
-        text, re.DOTALL | re.IGNORECASE
-    )
-    if ocorrencia_match:
-        secao = ocorrencia_match.group(1)
-        uf_match = re.search(r"UF\s*[:\s]*([A-Z]{2})", secao)
-        if uf_match:
-            return uf_match.group(1).strip()
-    ufs = re.findall(r"(?<!Município\s.*)UF\s*[:\s]*([A-Z]{2})", text)
-    if ufs:
-        return ufs[-1].strip()
-    return ""
+    
+    # Encontra TODOS os "UF: XX" no texto
+    todos_ufs = re.findall(r"UF\s*[:\s]*([A-Z]{2})", text)
+    
+    # Remove matches que tenham "Município" antes (até 30 caracteres antes)
+    ufs_validos = []
+    for match in re.finditer(r"UF\s*[:\s]*([A-Z]{2})", text):
+        start = max(0, match.start() - 40)
+        before = text[start:match.start()]
+        if "Município" not in before and "município" not in before:
+            ufs_validos.append(match.group(1))
+    
+    # Pega o último UF válido (geralmente UF_OBITO)
+    return ufs_validos[-1] if ufs_validos else ""
 
 def _detect_obito_type(text: str) -> str:
     """Detecta tipo de óbito (Fetal/Fatal)."""
