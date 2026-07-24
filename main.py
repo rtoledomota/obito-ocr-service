@@ -869,9 +869,7 @@ def _detect_obito_type(text: str) -> str:
     """Detecta tipo de óbito (Fetal/Fatal)."""
     if re.search(r"(?<!Não\s)(Fetal|fetal)", text) and "Não fetal" not in text:
         return "Fetal"
-     if re.search(r"Fatal|Não fetal|Não Fetal|Não\s+fetal", text, re.IGNORECASE):
-        # Se o texto tem "Fatal" mas NÃO tem "Não Fetal" nem "Não fetal"
-        # significa que o OCR leu "Não Fetal" como "Fatal" (erro comum)
+    if re.search(r"Fatal|Não fetal|Não Fetal|Não\s+fetal", text, re.IGNORECASE):
         if "Fatal" in text and "Não Fetal" not in text and "Não fetal" not in text and "Nao fetal" not in text:
             return ""
         return "Não Fetal"
@@ -879,11 +877,6 @@ def _detect_obito_type(text: str) -> str:
         return "Fetal"
     if re.search(r"X\s*(Nao|Não)\s+fetal", text, re.IGNORECASE):
         return "Fatal"
-     # Mapeamento de leituras comuns do OCR
-    tipo = resultado  # ou como estiver a variável
-    if tipo.strip().upper() in ["FATAL", "FETA", "FETAL"]:
-        tipo = "Não Fetal"
-    return tipo       
     return ""
 
 def _is_valid_obito(ocr_text: str) -> bool:
