@@ -1272,6 +1272,10 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         (r"^Parte\s+I[:\s]*", ""),
         (r"^Imediata[:\s]*", ""),
         (r"^Causa imediata[:\s]*", ""),
+        (r"^ANOTE SOMENTE UM DIAGNÓSTICO POR LINHA\s*", ""),
+        (r"^Anote somente um diagnóstico por linha\s*", ""),
+        (r"^Não preencher este espaço\s*", ""),
+        (r"^PREENCHEMENTO EXCLUSIVO[:\s]*", ""),
     ]
 
     campos_para_limpar = [
@@ -1434,7 +1438,33 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
             val = re.sub(r'\s+PARTE\s+(I|II)\s*$', '', val, flags=re.IGNORECASE).strip()
             structured[campo] = val               
     return structured
-
+    # ── Remover instruções do formulário dos campos de causa ──
+    instrucoes = [
+        "anote somente um diagnóstico por linha",
+        "não preencher este espaço",
+        "preenchimento exclusivo",
+    ]
+    for campo in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_BASICA"]:
+        val = structured.get(campo, "")
+        if val:
+            for inst in instrucoes:
+                if inst in val.lower():
+                    structured[campo] = ""
+                    break
+    # ── Limpar PARTE_II ──
+    parte_ii = structured.get("PARTE_II", "")
+    if parte_ii:
+        # Remove labels do formulário no início
+        parte_ii = re.sub(
+            r'^\(?que\s+contribu[ií]ram\s+para\s+a\s+morte.*?(?:acima:|acima\s|eventos:|seq[uüe]ncia\s+acima)\)?\s*',
+            '', parte_ii, flags=re.IGNORECASE | re.DOTALL
+        ).strip()
+        parte_ii = re.sub(
+            r'^\(?(?:Outras\s+)?condi[cç][õo]es?\s+significativas?\s+que\s+contribu[ií]ram.*?(?:acima:|acima\s)\)?\s*',
+            '', parte_ii, flags=re.IGNORECASE | re.DOTALL
+        ).strip()
+        structured["PARTE_II"] = parte_ii
+           
 def _llm_parse_fallback(raw_text: str) -> Dict[str, str]:
     """Usa GPT-4o-mini para extrair campos de DO quando o parser tradicional falha."""
     prompt = f"""Extraia os campos abaixo deste texto de Declaração de Óbito.
