@@ -627,9 +627,8 @@ def _extract_causes_v1(text: str) -> List[str]:
         "estados mórbidos que causaram diretamente a morte","anote somente um diagnóstico por linha",
         "doença ou estado mórbido que causou diretamente a morte","sequência de causas mórbidas que ocasionaram diretamente a morte",
         "parte i", "parte ii", "anote somente um diagnóstico por linha", "doença ou estado mórbido que causou diretamente a morte",
-        "sequência de causas mórbidas que ocasionaram diretamente a morte",  "causas antecedentes",
-        "sequência de causas mórbidas que ocasionaram diretamente a morte",
-    ]
+        "sequência de causas mórbidas que ocasionaram diretamente a morte",  "causas antecedentes","afecções mórbidas, se houver",
+        "outra condição significativa","condição significativa que contribuiu","não relacionadas diretamente",    ]
     start_idx = -1
     for i, (norm, _) in enumerate(pairs):
         nl = _norm_label(norm)
@@ -1090,7 +1089,15 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         stop_labels=["Causas", "Parte", "Nome"],
         max_distance=8,
     )
-
+# Remover duplicatas consecutivas em MEDICO_ATESTANTE
+    medico = structured.get("MEDICO_ATOESTANTE", "")
+    if medico:
+        partes = re.split(r'\s{2,}', medico)
+        partes_unicas = []
+        for p in partes:
+            if p not in partes_unicas:
+                partes_unicas.append(p)
+        structured["MEDICO_ATOESTANTE"] = " ".join(partes_unicas)
     # ═══════════════════════════════════════════════════════
     # 2. FALLBACK: MAPEAMENTO POR LABEL EM PORTUGUÊS
     # ═══════════════════════════════════════════════════════
