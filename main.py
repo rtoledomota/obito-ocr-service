@@ -1114,20 +1114,9 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         stop_labels=["Causas", "Parte", "Nome"],
         max_distance=8,
     )
-# Remover duplicatas consecutivas em MEDICO_ATESTANTE
-    medico = structured.get("MEDICO_ATOESTANTE", "")
-    if medico:
-        partes = re.split(r'\s{2,}', medico)
-        partes_unicas = []
-        for p in partes:
-            if p not in partes_unicas:
-                partes_unicas.append(p)
-        structured["MEDICO_ATOESTANTE"] = " ".join(partes_unicas)
-           
-    # Deduplicar médico atestante
+    # ── Deduplicar médico atestante ──
     medico = structured.get("MEDICO_ATESTANTE", "")
     if medico:
-        # Remove linhas duplicadas consecutivas
         linhas = [l.strip() for l in medico.split("\n") if l.strip()]
         linhas_unicas = []
         for l in linhas:
@@ -1274,7 +1263,15 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         (r"^habitual \(Informar anterior, se aposentado / desempregado\):\s*", ""),
         (r"^habitual \(Informar anterior, se aposentada / desempregada\):\s*", ""),
         (r"^que contribuíram para a morte, mas (?:que )?não (?:entram (?:diretamente na seqüência acima|relacionadas à doença ou condição que a causou)|relacionadas à doença ou condição que a causou)[^:]*:?\s*", ""),
-
+        (r"^imediatA[:\s]*", ""),
+        (r"^causa imediata[:\s]*", ""),
+        (r"^Doença ou estado mórbido que causou diretamente a morte[:\s]*", ""),
+        (r"^Condições ou causas mórbidas que ocasionaram diretamente[:\s]*", ""),
+        (r"^Afeccoes mórbidas, se houver, que produziram a causa acima[:\s]*", ""),
+        (r"^Afecções mórbidas, se houver, que produziram a causa acima[:\s]*", ""),
+        (r"^Parte\s+I[:\s]*", ""),
+        (r"^Imediata[:\s]*", ""),
+        (r"^Causa imediata[:\s]*", ""),
     ]
 
     campos_para_limpar = [
@@ -1409,19 +1406,15 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
     # ── Pós-processamento: limpar labels dos campos ──
     
     # Limpar PARTE_II
-    parte_ii = structured.get("PARTE_II", "")
+        parte_ii = structured.get("PARTE_II", "")
     if parte_ii:
         parte_ii = re.sub(
             r'(?:Outras\s+)?condi[cç][õo]es?\s+significativas?\s+que\s+contribu[ií]ram\s+para\s+a\s+morte.*?(?:acima:|acima\s)',
-            '',
-            parte_ii,
-            flags=re.IGNORECASE | re.DOTALL
+            '', parte_ii, flags=re.IGNORECASE | re.DOTALL
         ).strip()
         parte_ii = re.sub(
-            r'(?:Doença|condição)\s+ou\s+condição\s+significativa\s+que\s+contribuiu\s+para\s+a\s+morte.*?(?:parte\s+I|parte\s+i):\s*',
-            '',
-            parte_ii,
-            flags=re.IGNORECASE | re.DOTALL
+            r'que\s+contribu[ií]ram\s+para\s+a\s+morte.*?(?:acima:|acima\s|eventos:)',
+            '', parte_ii, flags=re.IGNORECASE | re.DOTALL
         ).strip()
         structured["PARTE_II"] = parte_ii
     
