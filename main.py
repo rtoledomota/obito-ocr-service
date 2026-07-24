@@ -40,6 +40,8 @@ from fastapi.responses import JSONResponse
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
+from PIL import Image
+import io
 
 def _process_single_image(file_id: str, file_name: str) -> dict:
     """Pipeline completo: baixar → OCR (melhor de 3 tentativas) → parse → validar."""
@@ -48,6 +50,13 @@ def _process_single_image(file_id: str, file_name: str) -> dict:
         image_bytes, mime_type = _download_image_bytes(file_id)
     except Exception as e:
         return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_DRIVE", "ERROS": str(e)}
+     # Validar integridade da imagem
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        img.verify()
+    except Exception as e:
+        logger.error(f"Imagem inválida/corrompida {file_name}: {e}")
+        return {"NOME_ARQUIVO": file_name, "STATUS": "IMAGEM_INVALIDA", "ERROS": str(e)}       
 
     # Múltiplas tentativas de OCR, fica com o melhor resultado
     melhor_raw_text = None
