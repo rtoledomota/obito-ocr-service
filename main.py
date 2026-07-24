@@ -296,13 +296,12 @@ def _normalize_date(raw: str) -> str:
     raw = re.sub(r"\([^)]*\)", "", raw).strip()
 
     # Detectar formato YYYY MM DD (ex: "2005 19 22" → "22/19/2005")
-    if re.match(r'^\d{4}\s+\d{1,2}\s+\d{1,2}$', raw):
+     if re.match(r'^\d{4}\s+\d{1,2}\s+\d{1,2}$', raw):
         partes = raw.split()
         ano, mes, dia = partes[0], partes[1], partes[2]
-        # --- ADICIONE ESTAS 2 LINHAS ---
-        if int(mes) > 12 and int(dia) <= 12:
+        # CORREÇÃO: se mês > 12, está trocado (dia/mês invertidos)
+        if int(mes) > 12:
             mes, dia = dia, mes
-        # ---------------------------------
         if 1 <= int(mes) <= 12 and 1 <= int(dia) <= 31:
             return f"{dia.zfill(2)}/{mes.zfill(2)}/{ano}"
 
@@ -646,10 +645,11 @@ def _extract_causes_v1(text: str) -> List[str]:
         "sequência de causas mórbidas que ocasionaram diretamente a morte",  "causas antecedentes","afecções mórbidas, se houver",
         "outra condição significativa","condição significativa que contribuiu","não relacionadas diretamente","afeccoes que originaram as causas acima",
         "afecções que originaram as causas acima","afeccoes que originaram","afecções que originaram", "produziram a causa básica",
-        "outra condição significativa","condição significativa que contribuiu",
-        "não relacionadas diretamente",  "doença ou estado mórbido que causou diretamente a morte",
-        "devido ou como consequência de",
-        "doenca ou estado morbido que causou diretamente a morte",   ]
+        "outra condição significativa","condição significativa que contribuiu", "não relacionadas diretamente", "doença ou estado mórbido que causou diretamente a morte","devido ou como consequência de", "doenca ou estado morbido que causou diretamente a morte","imediatA",
+        "causa imediata","devido ou como consequência", "consequência","parte i","parte ii", "doença ou estado mórbido que causou diretamente a morte", "doença ou condição significativa que contribuiu",
+        "condições ou causas mórbidas que ocasionaram diretamente", "afeccoes mórbidas, se houver, que produziram a causa acima", "afecções mórbidas, se houver, que produziram a causa acima",
+        "outra condição significativa", "condição significativa que contribuiu", "não relacionadas diretamente", "que contribuíram para a morte", "que não entraram", "que não entram", "outras condições significativas",
+        "não relacionadas à doença",  ]
     start_idx = -1
     for i, (norm, _) in enumerate(pairs):
         nl = _norm_label(norm)
@@ -1075,7 +1075,8 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
     [r"D\.O\.", "DO nº", "DO Nº", "Nº DO", "Numero DO", "Número DO", "DO "],
     stop_labels=["Nome", "Data", "Tipo", "Logradouro", "Endereço", "Endereco",
                  "Outras", "condições", "Condições", "CAUSAS", "Causa", "Parte",
-                 "Ocupação", "Ocup", "Escolaridade", "Naturalidade"],
+                 "Ocupação", "Ocup", "Profissão", "Profissao",
+                 "Escolaridade", "Naturalidade", "Cartão", "RG", "CPF"],
     )
     if not structured["DO_NUMERO"]:
         do_match = re.search(
@@ -1395,6 +1396,40 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         if val:
             val = re.sub(r'\s+PARTE\s+(I|II)\s*$', '', val, flags=re.IGNORECASE).strip()
             structured[campo] = val
+    # ── Pós-processamento: limpar labels dos campos ──
+    
+    # Limpar PARTE_II
+    parte_ii = structured.get("PARTE_II", "")
+    if parte_ii:
+        parte_ii = re.sub(
+            r'(?:Outras\s+)?condi[cç][õo]es?\s+significativas?\s+que\s+contribu[ií]ram\s+para\s+a\s+morte.*?(?:acima:|acima\s)',
+            '',
+            parte_ii,
+            flags=re.IGNORECASE | re.DOTALL
+        ).strip()
+        parte_ii = re.sub(
+            r'(?:Doença|condição)\s+ou\s+condição\s+significativa\s+que\s+contribuiu\s+para\s+a\s+morte.*?(?:parte\s+I|parte\s+i):\s*',
+            '',
+            parte_ii,
+            flags=re.IGNORECASE | re.DOTALL
+        ).strip()
+        structured["PARTE_II"] = parte_ii
+    
+    # Limpar CAUSA_MORTE de labels como "A - Imediata:", "A - Doença ou estado mórbido..."
+    for campo in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_BASICA"]:
+        val = structured.get(campo, "")
+        if val:
+            # Remove prefixos como "A - Imediata:", "B - Devido ou como consequência de:", "C - Covid-19"
+            val = re.sub(r'^[A-Da-d][\s)*.:-]+\s*(?:Imediata|Devido|Devida|Consequência|Doença|Causa)[^:]*:\s*', '', val, flags=re.IGNORECASE).strip()
+            val = re.sub(r'^[A-Da-d][\s)*.:-]+\s*', '', val).strip()
+            structured[campo] = val
+    
+    # Limpar sufixo "PARTE I" / "PARTE II" das causas
+    for campo in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_BASICA"]:
+        val = structured.get(campo, "")
+        if val:
+            val = re.sub(r'\s+PARTE\s+(I|II)\s*$', '', val, flags=re.IGNORECASE).strip()
+            structured[campo] = val               
     return structured
 
 def _llm_parse_fallback(raw_text: str) -> Dict[str, str]:
