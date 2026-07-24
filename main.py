@@ -296,7 +296,7 @@ def _normalize_date(raw: str) -> str:
     raw = re.sub(r"\([^)]*\)", "", raw).strip()
 
     # Detectar formato YYYY MM DD (ex: "2005 19 22" → "22/19/2005")
-     if re.match(r'^\d{4}\s+\d{1,2}\s+\d{1,2}$', raw):
+    if re.match(r'^\d{4}\s+\d{1,2}\s+\d{1,2}$', raw):
         partes = raw.split()
         ano, mes, dia = partes[0], partes[1], partes[2]
         # CORREÇÃO: se mês > 12, está trocado (dia/mês invertidos)
@@ -304,7 +304,6 @@ def _normalize_date(raw: str) -> str:
             mes, dia = dia, mes
         if 1 <= int(mes) <= 12 and 1 <= int(dia) <= 31:
             return f"{dia.zfill(2)}/{mes.zfill(2)}/{ano}"
-
     raw = re.sub(r"[.\s]+", "/", raw)
     try:
         dt.datetime.strptime(raw, "%d/%m/%Y")
