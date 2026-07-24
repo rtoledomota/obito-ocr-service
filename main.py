@@ -1071,7 +1071,7 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
 
     structured["DO_NUMERO"] = _find_block_value(
     raw_text,
-    [r"D\.O\.", "DO nº", "DO Nº", "Nº DO", "Numero DO", "Número DO", "DO "],
+     [r"D\.O\.", "DO nº", "DO Nº", "Nº DO", "Numero DO", "Número DO"],
     stop_labels=["Nome", "Data", "Tipo", "Logradouro", "Endereço", "Endereco",
                  "Outras", "condições", "Condições", "CAUSAS", "Causa", "Parte",
                  "Ocupação", "Ocup", "Profissão", "Profissao",
@@ -1123,6 +1123,17 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
             if p not in partes_unicas:
                 partes_unicas.append(p)
         structured["MEDICO_ATOESTANTE"] = " ".join(partes_unicas)
+           
+    # Deduplicar médico atestante
+    medico = structured.get("MEDICO_ATESTANTE", "")
+    if medico:
+        # Remove linhas duplicadas consecutivas
+        linhas = [l.strip() for l in medico.split("\n") if l.strip()]
+        linhas_unicas = []
+        for l in linhas:
+            if l not in linhas_unicas:
+                linhas_unicas.append(l)
+        structured["MEDICO_ATESTANTE"] = " ".join(linhas_unicas)
     # ═══════════════════════════════════════════════════════
     # 2. FALLBACK: MAPEAMENTO POR LABEL EM PORTUGUÊS
     # ═══════════════════════════════════════════════════════
