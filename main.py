@@ -973,7 +973,7 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
     structured["DO_NUMERO"] = _find_block_value(
         raw_text,
         [r"D\.O\.", "DO nº", "DO Nº", "Nº DO", "Numero DO", "Número DO", "DO "],
-        stop_labels=["Nome", "Data", "Tipo"],
+        stop_labels=["Nome", "Data", "Tipo", "Logradouro", "Endereço", "Endereco"],
     )
     if not structured["DO_NUMERO"]:
         do_match = re.search(
@@ -1176,10 +1176,11 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
 
     # Se CAUSA_MORTE ou CAUSA_BASICA estão com nome de médico, limpar
     nomes_medicos_conhecidos = ["julia lins fabbri", "julia lins fabbi", "julia"]
-    for campo_causa in ["CAUSA_MORTE", "CAUSA_BASICA"]:
-        val = structured.get(campo_causa, "").lower().strip()
-        if val and any(nome in val for nome in nomes_medicos_conhecidos):
-            structured[campo_causa] = ""
+    for campo_causa in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_BASICA"]:
+        val = structured.get(campo_causa, "")
+        if val:
+            val = re.sub(r'\s+PARTE\s+(I|II)\s+.*$', '', val, flags=re.IGNORECASE).strip()
+            structured[campo_causa] = val
 
     # Se HORA_OBITO tem texto extra depois do horário, limpar
     hora = structured.get("HORA_OBITO", "")
