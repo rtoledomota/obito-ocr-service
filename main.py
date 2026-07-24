@@ -869,12 +869,21 @@ def _detect_obito_type(text: str) -> str:
     """Detecta tipo de óbito (Fetal/Fatal)."""
     if re.search(r"(?<!Não\s)(Fetal|fetal)", text) and "Não fetal" not in text:
         return "Fetal"
-    if re.search(r"Fatal|Não fetal|Não Fetal|Não\s+fetal", text, re.IGNORECASE):
-        return "Fatal"
+     if re.search(r"Fatal|Não fetal|Não Fetal|Não\s+fetal", text, re.IGNORECASE):
+        # Se o texto tem "Fatal" mas NÃO tem "Não Fetal" nem "Não fetal"
+        # significa que o OCR leu "Não Fetal" como "Fatal" (erro comum)
+        if "Fatal" in text and "Não Fetal" not in text and "Não fetal" not in text and "Nao fetal" not in text:
+            return ""
+        return "Não Fetal"
     if re.search(r"X\s*Fetal", text) and not re.search(r"X\s*Não\s+fetal", text):
         return "Fetal"
     if re.search(r"X\s*(Nao|Não)\s+fetal", text, re.IGNORECASE):
         return "Fatal"
+     # Mapeamento de leituras comuns do OCR
+    tipo = resultado  # ou como estiver a variável
+    if tipo.strip().upper() in ["FATAL", "FETA", "FETAL"]:
+        tipo = "Não Fetal"
+    return tipo       
     return ""
 
 def _is_valid_obito(ocr_text: str) -> bool:
@@ -1063,9 +1072,10 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
     structured["CID_BASICA"] = cid_basica
 
     structured["DO_NUMERO"] = _find_block_value(
-        raw_text,
-        [r"D\.O\.", "DO nº", "DO Nº", "Nº DO", "Numero DO", "Número DO", "DO "],
-        stop_labels=["Nome", "Data", "Tipo", "Logradouro", "Endereço", "Endereco"],
+    raw_text,
+    [r"D\.O\.", "DO nº", "DO Nº", "Nº DO", "Numero DO", "Número DO", "DO "],
+    stop_labels=["Nome", "Data", "Tipo", "Logradouro", "Endereço", "Endereco",
+                 "Outras", "condições", "Condições", "CAUSAS", "Causa", "Parte"],
     )
     if not structured["DO_NUMERO"]:
         do_match = re.search(
