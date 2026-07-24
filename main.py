@@ -299,6 +299,10 @@ def _normalize_date(raw: str) -> str:
     if re.match(r'^\d{4}\s+\d{1,2}\s+\d{1,2}$', raw):
         partes = raw.split()
         ano, mes, dia = partes[0], partes[1], partes[2]
+        # --- ADICIONE ESTAS 2 LINHAS ---
+        if int(mes) > 12 and int(dia) <= 12:
+            mes, dia = dia, mes
+        # ---------------------------------
         if 1 <= int(mes) <= 12 and 1 <= int(dia) <= 31:
             return f"{dia.zfill(2)}/{mes.zfill(2)}/{ano}"
 
@@ -643,7 +647,9 @@ def _extract_causes_v1(text: str) -> List[str]:
         "outra condição significativa","condição significativa que contribuiu","não relacionadas diretamente","afeccoes que originaram as causas acima",
         "afecções que originaram as causas acima","afeccoes que originaram","afecções que originaram", "produziram a causa básica",
         "outra condição significativa","condição significativa que contribuiu",
-        "não relacionadas diretamente",    ]
+        "não relacionadas diretamente",  "doença ou estado mórbido que causou diretamente a morte",
+        "devido ou como consequência de",
+        "doenca ou estado morbido que causou diretamente a morte",   ]
     start_idx = -1
     for i, (norm, _) in enumerate(pairs):
         nl = _norm_label(norm)
@@ -1068,7 +1074,8 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
     raw_text,
     [r"D\.O\.", "DO nº", "DO Nº", "Nº DO", "Numero DO", "Número DO", "DO "],
     stop_labels=["Nome", "Data", "Tipo", "Logradouro", "Endereço", "Endereco",
-                 "Outras", "condições", "Condições", "CAUSAS", "Causa", "Parte"],
+                 "Outras", "condições", "Condições", "CAUSAS", "Causa", "Parte",
+                 "Ocupação", "Ocup", "Escolaridade", "Naturalidade"],
     )
     if not structured["DO_NUMERO"]:
         do_match = re.search(
@@ -1212,7 +1219,12 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
                     structured[current_field] += " " + line_stripped
                 else:
                     current_field = None
-
+    # Limpar prefixos "A - ", "B - ", "C - " das causas
+    for campo in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_BASICA"]:
+        val = structured.get(campo, "")
+        if val:
+            val = re.sub(r'^[A-E]\s*[-–—:]\s*', '', val).strip()
+            structured[campo] = val
     # Normalizar datas "30 05 2020" → "30/05/2020"
     for campo_data in ["NASCIMENTO", "DATA_OBITO", "DATA_ATESTADO"]:
         val = structured.get(campo_data, "")
