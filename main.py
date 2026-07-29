@@ -1363,7 +1363,6 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
     compl = structured.get("COMPLEMENTO", "")
     if compl and re.search(r'CEP:\s', compl, re.IGNORECASE):
         structured["COMPLEMENTO"] = ""
-
     # ── Limpeza de CRM_MEDICO ──
     crm = structured.get("CRM_MEDICO", "")
     if crm:
@@ -1373,14 +1372,16 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         ).strip()
         structured["CRM_MEDICO"] = crm
 
-   intervalo = structured.get("INTERVALO_DOENCA_MORTE", "")
-   if intervalo:
-    intervalo = re.sub(
-        r'^(?:entre\s+)?o\s+in[ií]cio\s+(?:da\s+doen[cç]a\s+)?e\s+(?:a\s+)?morte[:\s]*',
-        '', intervalo, flags=re.IGNORECASE
-    ).strip()
-    structured["INTERVALO_DOENCA_MORTE"] = intervalo
-    # IDADE (calcular)
+    # ── Limpeza de INTERVALO_DOENCA_MORTE ──
+    intervalo = structured.get("INTERVALO_DOENCA_MORTE", "")
+    if intervalo:
+        intervalo = re.sub(
+            r'^(?:entre\s+)?o\s+in[ií]cio\s+(?:da\s+doen[cç]a\s+)?e\s+(?:a\s+)?morte[:\s]*',
+            '', intervalo, flags=re.IGNORECASE
+        ).strip()
+        structured["INTERVALO_DOENCA_MORTE"] = intervalo
+
+    # ── IDADE (calcular) ──
     idade_calc = ""
     if structured.get("NASCIMENTO") and structured.get("DATA_OBITO"):
         try:
@@ -1403,7 +1404,6 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
     # Hashes
     structured["HASH_ARQUIVO"] = ""
     structured["HASH_CONTEUDO"] = _sha256_text(raw_text)
-
     # ═══════════════════════════════════════════════════════
     # 5. VALIDAÇÃO
     # ═══════════════════════════════════════════════════════
