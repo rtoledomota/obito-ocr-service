@@ -1946,7 +1946,22 @@ def _append_rows_to_sheet(sheet_id: str, rows: List[dict]):
         insertDataOption="INSERT_ROWS",
         body={"values": values},
     ).execute()
-
+def _update_row_in_sheet(sheet_id: str, row_number: int, row_data: dict):
+    """Atualiza uma linha existente na planilha."""
+    try:
+        sheet = _get_sheet(sheet_id)
+        values = [[row_data.get(col, "") for col in AUDIT_COLUMNS]]
+        range_name = f'A{row_number}:W{row_number}'
+        sheet.values().update(
+            spreadsheetId=SHEET_ID,
+            range=f"'{sheet.title}'!{range_name}",
+            body={"values": values},
+            valueInputOption="USER_ENTERED"
+        ).execute()
+        logger.info(f"Linha {row_number} atualizada com sucesso.")
+    except Exception as e:
+        logger.error(f"Erro ao atualizar linha {row_number}: {e}")
+        raise
 # ── Processamento individual ────────────────────────────────────
 
 def _process_single_image(file_id: str, file_name: str) -> dict:
@@ -2052,14 +2067,17 @@ def run_batch(
 
     for img in new_images:
         try:
-            row = _process_single_image(img["id"], img["name"])
-            _append_rows_to_sheet(sheet_id, [row])
-            success_count += 1
-            gc.collect()
-        except Exception as e:
-            fail_count += 1
-            last_error = str(e)
-            logger.error(f"Falha ao processar {img['name']}: {e}")
+           row = _process_single_image(img["id"], img["name"])
+            nome_arquivo = img["name"]
+            if nome_arquivo in existing_names:
+                # Já existe → atualizar a linha
+                linha = existing_names[nome_arquivo] + 1  # +1 por causa do cabeçalho
+                _update_row_in_sheet(sheet_id, linha, row)
+                logger.info(f"Atualizada linha {linha} para {nome_arquivo}")
+            else:
+                # Novo → inserir
+                _append_rows_to_sheet(sheet_id, [row])
+                logger.info(f"Inserida nova linha para {nome_arquivo}")
 
     return {
         "success": True,
@@ -2358,3 +2376,19 @@ async def diagnose_list_files(authorization: Optional[str] = Header(None)):
             for img in images[:20]  # primeiras 20
         ]
     }
+# ── Salvar/Atualizar resultado na planilha ──
+def _save_or_update_result(sheet, result: dict, existing_data: dict):
+    """Salva ou atualiza uma linha na planilha. Se já existe para o mesmo arquivo, atualiza."""
+    nome_arquivo = result.get("NOME_ARQUIVO", "")
+    linha_existente = existing_data.get("nomes", {}).get(nome_arquivo)
+
+    novaLinha = [[result.get(col, "") for col in AUDIT_COLUMNS]]
+
+    if linha_existente:
+        # Atualizar linha existente
+        sheet.update(f'A{linha_existente}:W{linha_existente}', novaLinha)
+        logger.info(f"Atualizada linha {linha_existente} para {nome_arquivo}")
+    else:
+        # Inserir nova linha
+        sheet.append_rows(novaLinha)
+        logger.info(f"Inserida nova linha para {nome_arquivo}")
