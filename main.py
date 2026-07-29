@@ -1355,6 +1355,14 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         (r"^\(última doença ou condição que causou diretamente a morte\)[:\s]*", ""),
         (r"^Tempo aproximado entre o início e a morte[:\s]*", ""),
         (r"^entre o início[:\s]*", ""),
+        (r"^:\s*", ""),
+        (r"^Número[:\s]*", ""),
+        (r"^Código[:\s]*", ""),
+        (r"^Código\s+CID[:\s]*", ""),
+        (r"^\(a doença ou estado mórbido que causou diretamente a morte\)[:\s]*", ""),
+        (r"^\(última doença ou condição que causou diretamente a morte\)[:\s]*", ""),
+        (r"^Tempo aproximado entre o início e a morte[:\s]*", ""),
+        (r"^entre o início[:\s]*", ""),
            
     ]
 
