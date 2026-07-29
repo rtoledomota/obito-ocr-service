@@ -1287,6 +1287,14 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         (r"^Condições ou causas mórbidas que ocasionaram diretamente[:\s]*", ""),
         (r":\s*\d+\s*$", ""),
         (r"\s+\d{2,3}\s*$", ""),
+        (r"^:\s*", ""),
+        (r"^Código:\s*", ""),
+        (r"^Código\s+CID[:\s]*", ""),
+        (r"^Tempo aproximado entre o início e a morte[:\s]*", ""),
+        (r"^entre o início e[:\s]*", ""),
+        (r"^como consequência de:\s*", ""),
+        (r"^ou como consequência de:\s*", ""),
+        (r"^Devido ou como consequência de:\s*", ""),
     ]
 
     campos_para_limpar = [
@@ -1322,11 +1330,9 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
 
     # Se HORA_OBITO tem texto extra depois do horário, limpar
     hora = structured.get("HORA_OBITO", "")
-    if hora:
-        match_hora = re.match(r'^(\d{2}[:h]\d{2})', hora)
-        if match_hora:
-            structured["HORA_OBITO"] = match_hora.group(1)
-
+    if hora and (len(hora) > 5 or re.search(r'\s{2,}', hora.strip()) or ':' not in hora):
+    structured["HORA_OBITO"] = ""
+       
     # Se DATA_ATESTADO tem texto extra depois da data, limpar
     data_atestado = structured.get("DATA_ATESTADO", "")
     if data_atestado:
@@ -1359,18 +1365,21 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         structured["COMPLEMENTO"] = ""
     
     # Se CRM_MEDICO tiver texto extra depois do número, limpar
-    crm = structured.get("CRM_MEDICO", "")
-    if crm:
-        match_crm = re.match(r'^(\d+)', crm)
-        if match_crm:
-            structured["CRM_MEDICO"] = match_crm.group(1)
+   crm = structured.get("CRM_MEDICO", "")
+   if crm:
+    crm = re.sub(
+        r'(?:Data do atestado|Óbito atestado por|Município|Meio de contato|SP \d+|RQE).*',
+        '', crm, flags=re.IGNORECASE
+    ).strip()
+    structured["CRM_MEDICO"] = crm
 
-    # Limpar INTERVALO_DOENCA_MORTE
-    intervalo = structured.get("INTERVALO_DOENCA_MORTE", "")
-    if intervalo:
-        intervalo = re.sub(r'^e a morte:\s*', '', intervalo, flags=re.IGNORECASE).strip()
-        structured["INTERVALO_DOENCA_MORTE"] = intervalo
-
+   intervalo = structured.get("INTERVALO_DOENCA_MORTE", "")
+   if intervalo:
+    intervalo = re.sub(
+        r'^(?:entre\s+)?o\s+in[ií]cio\s+(?:da\s+doen[cç]a\s+)?e\s+(?:a\s+)?morte[:\s]*',
+        '', intervalo, flags=re.IGNORECASE
+    ).strip()
+    structured["INTERVALO_DOENCA_MORTE"] = intervalo
     # IDADE (calcular)
     idade_calc = ""
     if structured.get("NASCIMENTO") and structured.get("DATA_OBITO"):
