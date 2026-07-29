@@ -1296,7 +1296,19 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         (r"^ou como consequência de:\s*", ""),
         (r"^Devido ou como consequência de:\s*", ""),
         (r"^,\s*mas\s+não\s+", ""),
-        (r"^\d+:\s*", ""),
+        (r"^\d+:\s*", ""),         
+        (r"^Aponte\s+(a\s+)?(cadeia|doença|eventos|condição).*", ""),
+        (r"^Preencha\s+(o\s+)?(atestado|cada|a\s+cadeia).*", ""),
+        (r"^Coloque,\s*em\s+cada\s+linha.*", ""),
+        (r"^Denote\s+o\s+evento.*", ""),
+        (r"^Seção\s+médica.*", ""),
+        (r"^Estado\s+mórbido\s+que\s+causou.*", ""),
+        (r"^Doença,\s+lesão\s+ou\s+estado.*", ""),
+        (r"^Condições\s+morbosas.*", ""),
+        (r"^Causas\s+mórbidas.*", ""),
+        (r"^ANOTE\s+SOMENTE\s+UM\s+DIAGNÓSTICO.*", ""),
+        (r"^Deve\s+ser\s+usada\s+esta\s+parte.*", ""),
+           
     ]
 
     campos_para_limpar = [
@@ -1341,23 +1353,47 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         match_data = re.match(r'^(\d{2}/\d{2}/\d{4})', data_atestado)
         if match_data:
             structured["DATA_ATESTADO"] = match_data.group(1)
-
-    # Se NASCIMENTO tem "Idade:" no final, limpar
+    # ── Extrair primeira data válida em NASCIMENTO ──
     nasc = structured.get("NASCIMENTO", "")
     if nasc:
-        nasc_clean = re.sub(r'\s+Idade:\s*\d+.*$', '', nasc, flags=re.IGNORECASE).strip()
-        structured["NASCIMENTO"] = nasc_clean
+        match_data = re.search(r'(\d{2}/\d{2}/\d{4})', nasc)
+        if match_data:
+            structured["NASCIMENTO"] = match_data.group(1)
+        else:
+            # Tentar extrair data no formato YYYY MM DD
+            match_ymd = re.search(r'(\d{4})\s+(\d{1,2})\s+(\d{1,2})', nasc)
+            if match_ymd:
+                ano, mes, dia = match_ymd.group(1), match_ymd.group(2), match_ymd.group(3)
+                if int(mes) > 12:
+                    mes, dia = dia, mes
+                if 1 <= int(mes) <= 12 and 1 <= int(dia) <= 31:
+                    structured["NASCIMENTO"] = f"{dia.zfill(2)}/{mes.zfill(2)}/{ano}"
+
+    # ── Extrair primeira data válida em DATA_OBITO ──
+    data_obito = structured.get("DATA_OBITO", "")
+    if data_obito:
+        match_data = re.search(r'(\d{2}/\d{2}/\d{4})', data_obito)
+        if match_data:
+            structured["DATA_OBITO"] = match_data.group(1)
+        else:
+            match_ymd = re.search(r'(\d{4})\s+(\d{1,2})\s+(\d{1,2})', data_obito)
+            if match_ymd:
+                ano, mes, dia = match_ymd.group(1), match_ymd.group(2), match_ymd.group(3)
+                if int(mes) > 12:
+                    mes, dia = dia, mes
+                if 1 <= int(mes) <= 12 and 1 <= int(dia) <= 31:
+                    structured["DATA_OBITO"] = f"{dia.zfill(2)}/{mes.zfill(2)}/{ano}"
 
     # Limpar RACA_COR se tiver ":" ou for muito longo
     raca = structured.get("RACA_COR", "")
     if raca and (":" in raca or len(raca) > 20):
         structured["RACA_COR"] = ""
 
-    # Se UF_OBITO tiver backticks ou texto extra, limpar
+    # ── Limpeza de UF_OBITO ──
     uf_obito = structured.get("UF_OBITO", "")
     if uf_obito:
         uf_obito = re.sub(r'[`\s]', '', uf_obito)
-        match_uf = re.match(r'^([A-Za-z]{2})', uf_obito)
+        match_uf = re.search(r'([A-Za-z]{2})', uf_obito)
         if match_uf:
             structured["UF_OBITO"] = match_uf.group(1).upper()
 
@@ -1380,6 +1416,19 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
                     resultado.append(p)
             if len(resultado) < len(partes):
                 structured[campo_cidade] = " ".join(resultado)
+    # ── Limpeza de CIDADE_OBITO ──
+    cidade = structured.get("CIDADE_OBITO", "")
+    if cidade:
+        cidade = re.sub(
+            r'\s*(Código|CEP|UF|Código Código|UF UF)\s*$',
+            '', cidade, flags=re.IGNORECASE
+        ).strip()
+        palavras = cidade.split()
+        resultado = []
+        for p in palavras:
+            if not resultado or p.upper() != resultado[-1].upper():
+                resultado.append(p)
+        structured["CIDADE_OBITO"] = " ".join(resultado)
     # ── Limpeza de CRM_MEDICO ──
     crm = structured.get("CRM_MEDICO", "")
     if crm:
