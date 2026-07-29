@@ -1295,6 +1295,8 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         (r"^como consequência de:\s*", ""),
         (r"^ou como consequência de:\s*", ""),
         (r"^Devido ou como consequência de:\s*", ""),
+        (r"^,\s*mas\s+não\s+", ""),
+        (r"^\d+:\s*", ""),
     ]
 
     campos_para_limpar = [
@@ -1363,9 +1365,25 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
     compl = structured.get("COMPLEMENTO", "")
     if compl and re.search(r'CEP:\s', compl, re.IGNORECASE):
         structured["COMPLEMENTO"] = ""
+
+    # ── Limpeza de cidade duplicada ──
+    for campo_cidade in ["CIDADE_OBITO"]:
+        val = structured.get(campo_cidade, "")
+        if val:
+            partes = val.split()
+            # Se a mesma palavra aparece repetida, manter só uma
+            palavras_vistas = []
+            resultado = []
+            for p in partes:
+                if p not in palavras_vistas:
+                    palavras_vistas.append(p)
+                    resultado.append(p)
+            if len(resultado) < len(partes):
+                structured[campo_cidade] = " ".join(resultado)
     # ── Limpeza de CRM_MEDICO ──
     crm = structured.get("CRM_MEDICO", "")
     if crm:
+        crm = re.sub(r'[`\s]+', ' ', crm).strip()
         crm = re.sub(
             r'(?:Data do atestado|Óbito atestado por|Município|Meio de contato|SP \d+|RQE).*',
             '', crm, flags=re.IGNORECASE
