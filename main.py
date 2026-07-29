@@ -1328,10 +1328,10 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
             val = re.sub(r'\s+PARTE\s+(I|II)\s+.*$', '', val, flags=re.IGNORECASE).strip()
             structured[campo_causa] = val
 
-    # Se HORA_OBITO tem texto extra depois do horário, limpar
+    # ── Validar HORA_OBITO ──
     hora = structured.get("HORA_OBITO", "")
     if hora and (len(hora) > 5 or re.search(r'\s{2,}', hora.strip()) or ':' not in hora):
-    structured["HORA_OBITO"] = ""
+        structured["HORA_OBITO"] = ""
        
     # Se DATA_ATESTADO tem texto extra depois da data, limpar
     data_atestado = structured.get("DATA_ATESTADO", "")
