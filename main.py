@@ -1887,8 +1887,8 @@ def _ensure_sheet_exists() -> str:
     logger.info(f"Nova planilha criada: {sid}")
     return sid
 
-def _get_existing_data(sheet_id: str) -> Tuple[set, set]:
-    """Lê TODAS as colunas da planilha e retorna (nomes, hashes)."""
+def _get_existing_data(sheet_id: str) -> Tuple[dict, set]:
+    """Lê TODAS as colunas da planilha e retorna (dict_nome_para_linha, hashes)."""
     try:
         sheets = _get_sheets_service()
         sheet_name = _get_sheet_name()
@@ -1897,31 +1897,26 @@ def _get_existing_data(sheet_id: str) -> Tuple[set, set]:
             range=f"{sheet_name}!A:Z",
         ).execute()
         values = result.get("values", [])
-        names = set()
+        nomes = {}  # nome_arquivo → número da linha (1-based)
         hashes = set()
-
-        # Mapeia índices baseado no AUDIT_COLUMNS
         try:
-            idx_nome = AUDIT_COLUMNS.index("NOME_ARQUIVO")   # = 1
-            idx_hash = AUDIT_COLUMNS.index("HASH_ARQUIVO")   # = 22
+            idx_nome = AUDIT_COLUMNS.index("NOME_ARQUIVO")
+            idx_hash = AUDIT_COLUMNS.index("HASH_ARQUIVO")
         except ValueError:
-            return set(), set()
-
-        for row in values:
+            return {}, set()
+        for i, row in enumerate(values):
             if not row:
                 continue
-            # Pula cabeçalho
             if row and row[0] == "DATA_PROCESSAMENTO":
                 continue
             if len(row) > idx_nome and row[idx_nome].strip():
-                names.add(row[idx_nome].strip())
+                nomes[row[idx_nome].strip()] = i + 1  # +1 porque planilha é 1-based
             if len(row) > idx_hash and row[idx_hash].strip():
                 hashes.add(row[idx_hash].strip())
-
-        return names, hashes
+        return nomes, hashes
     except Exception as e:
         logger.warning(f"Não foi possível ler dados existentes: {e}")
-        return set(), set()
+        return {}, set()
 
 def _col_to_letter(col: int) -> str:
     letters = ""
@@ -2065,15 +2060,17 @@ def run_batch(
     fail_count = 0
     last_error = None
 
-    for img in new_images:
+     for img in new_images:
         try:
             row = _process_single_image(img["id"], img["name"])
             nome_arquivo = img["name"]
             if nome_arquivo in existing_names:
-                linha = existing_names[nome_arquivo] + 1
+                # Já existe → atualizar a linha existente
+                linha = existing_names[nome_arquivo]
                 _update_row_in_sheet(sheet_id, linha, row)
                 logger.info(f"Atualizada linha {linha} para {nome_arquivo}")
             else:
+                # Novo → inserir
                 _append_rows_to_sheet(sheet_id, [row])
                 logger.info(f"Inserida nova linha para {nome_arquivo}")
             success_count += 1
@@ -2082,6 +2079,7 @@ def run_batch(
             fail_count += 1
             last_error = str(e)
             logger.error(f"Falha ao processar {img['name']}: {e}")
+
     return {
         "success": True,
         "total": len(images),
