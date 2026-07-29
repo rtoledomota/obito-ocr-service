@@ -2060,19 +2060,12 @@ def run_batch(
     fail_count = 0
     last_error = None
 
-     for img in new_images:
+    for img in new_images:
+        if limit > 0 and len(new_images) > limit:
+            break
         try:
             row = _process_single_image(img["id"], img["name"])
-            nome_arquivo = img["name"]
-            if nome_arquivo in existing_names:
-                # Já existe → atualizar a linha existente
-                linha = existing_names[nome_arquivo]
-                _update_row_in_sheet(sheet_id, linha, row)
-                logger.info(f"Atualizada linha {linha} para {nome_arquivo}")
-            else:
-                # Novo → inserir
-                _append_rows_to_sheet(sheet_id, [row])
-                logger.info(f"Inserida nova linha para {nome_arquivo}")
+            _append_rows_to_sheet(sheet_id, [row])
             success_count += 1
             gc.collect()
         except Exception as e:
