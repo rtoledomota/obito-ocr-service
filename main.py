@@ -1102,7 +1102,7 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
     stop_labels=["Nome", "Data", "Tipo", "Logradouro", "Endereço", "Endereco",
                  "Outras", "condições", "Condições", "CAUSAS", "Causa", "Parte",
                  "Ocupação", "Ocup", "Profissão", "Profissao",
-                 "Escolaridade", "Naturalidade", "Cartão", "RG", "CPF"],
+                 "Escolaridade", "Naturalidade", "Cartão", "RG", "CPF","Dr[a.]", "Médico", "CRM", "Telefone", "Data do atestado"],
     )
     if not structured["DO_NUMERO"]:
         do_match = re.search(
@@ -1347,6 +1347,14 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
         (r"^Causas\s+mórbidas.*", ""),
         (r"^ANOTE\s+SOMENTE\s+UM\s+DIAGNÓSTICO.*", ""),
         (r"^Deve\s+ser\s+usada\s+esta\s+parte.*", ""),
+        (r"^:\s*", ""),
+        (r"^Número[:\s]*", ""),
+        (r"^Código[:\s]*", ""),
+        (r"^Código\s+CID[:\s]*", ""),
+        (r"^\(a doença ou estado mórbido que causou diretamente a morte\)[:\s]*", ""),
+        (r"^\(última doença ou condição que causou diretamente a morte\)[:\s]*", ""),
+        (r"^Tempo aproximado entre o início e a morte[:\s]*", ""),
+        (r"^entre o início[:\s]*", ""),
            
     ]
 
@@ -1455,19 +1463,14 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
                     resultado.append(p)
             if len(resultado) < len(partes):
                 structured[campo_cidade] = " ".join(resultado)
-    # ── Limpeza de CIDADE_OBITO ──
+    # ── Limpar CIDADE_OBITO com labels capturadas ──
     cidade = structured.get("CIDADE_OBITO", "")
     if cidade:
         cidade = re.sub(
-            r'\s*(Código|CEP|UF|Código Código|UF UF)\s*$',
+            r'\s+(?:CAUSAS\s+DA\s+MORTE|Código|UF|CEP).*$',
             '', cidade, flags=re.IGNORECASE
         ).strip()
-        palavras = cidade.split()
-        resultado = []
-        for p in palavras:
-            if not resultado or p.upper() != resultado[-1].upper():
-                resultado.append(p)
-        structured["CIDADE_OBITO"] = " ".join(resultado)
+        structured["CIDADE_OBITO"] = cidade
     # ── Normalizar HORA_OBITO ──
     hora = structured.get("HORA_OBITO", "")
     if hora:
