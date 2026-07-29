@@ -1363,15 +1363,15 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
     compl = structured.get("COMPLEMENTO", "")
     if compl and re.search(r'CEP:\s', compl, re.IGNORECASE):
         structured["COMPLEMENTO"] = ""
-    
-    # Se CRM_MEDICO tiver texto extra depois do número, limpar
-   crm = structured.get("CRM_MEDICO", "")
-   if crm:
-    crm = re.sub(
-        r'(?:Data do atestado|Óbito atestado por|Município|Meio de contato|SP \d+|RQE).*',
-        '', crm, flags=re.IGNORECASE
-    ).strip()
-    structured["CRM_MEDICO"] = crm
+
+    # ── Limpeza de CRM_MEDICO ──
+    crm = structured.get("CRM_MEDICO", "")
+    if crm:
+        crm = re.sub(
+            r'(?:Data do atestado|Óbito atestado por|Município|Meio de contato|SP \d+|RQE).*',
+            '', crm, flags=re.IGNORECASE
+        ).strip()
+        structured["CRM_MEDICO"] = crm
 
    intervalo = structured.get("INTERVALO_DOENCA_MORTE", "")
    if intervalo:
