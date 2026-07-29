@@ -902,7 +902,34 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
 
     if not raw_text:
         return structured
+    # ── Dicionário de correção de OCR ──
+    correcoes_ocr = {
+        "cheguei ": "choque ",
+        "cheguei ": "choque ",
+        "cheque ": "choque ",
+        "chequei ": "choque ",
+        "chocume ": "choque ",
+        "sepses ": "sepse ",
+        "septicemia": "sepse",
+        "pu ": "de foco ",
+        "pu foco": "de foco",
+        "isoscomica": "nosocomial",
+        "isquêmica": "isquêmica",  # manter se já está correto
+    }
 
+    for campo_texto in ["CAUSA_MORTE", "CAUSA_BASICA", "PARTE_II"]:
+        valor = structured.get(campo_texto, "")
+        if valor:
+            valor_lower = valor.lower()
+            for errado, correto in correcoes_ocr.items():
+                valor_lower = valor_lower.replace(errado.lower(), correto)
+            # Preservar capitalização original aproximada
+            if valor_lower != valor.lower():
+                # Reconstruir mantendo a primeira letra maiúscula se original era
+                palavras = valor_lower.split()
+                if palavras and valor[0].isupper():
+                    palavras[0] = palavras[0].capitalize()
+                structured[campo_texto] = " ".join(palavras)
     # ═══════════════════════════════════════════════════════
     # 1. PARSER ORIGINAL
     # ═══════════════════════════════════════════════════════
@@ -1124,10 +1151,22 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
                 linhas_unicas.append(l)
         structured["MEDICO_ATESTANTE"] = " ".join(linhas_unicas)
     
-    # ── Remover "Nome:" do início do NOME (quando OCR captura label) ──
+    # ── Remover cabeçalhos de formulário do NOME ──
     nome = structured.get("NOME", "")
-    if nome and nome.lower().startswith("nome:"):
-        structured["NOME"] = nome[5:].strip()
+    if nome:
+        nome_original = nome
+        nome = re.sub(
+            r'^(República Federativa do Brasil|CAPÍTULO IX|ENDEREÇO DO LOCAL|'
+            r'Estabelecimento\s+|PROVÁVEIS CIRCUNSTÂNCIAS|Nome do (Pai|Médico)|'
+            r'Data de nascimento|Código CNES|Número da Declaração|'
+            r'Cidade e procedência|Nome da Mãe|'
+            r'ÓBITO DE MULHER|ASSISTÊNCIA MÉDICA|'
+            r'II\s+Identificação|III\s+Ocorrência).*',
+            '', nome, flags=re.IGNORECASE | re.DOTALL
+        ).strip()
+        if nome != nome_original:
+            logger.info(f"NOME limpo: '{nome_original[:50]}...' → '{nome[:50]}...'")
+        structured["NOME"] = nome
     # ═══════════════════════════════════════════════════════
     # 2. FALLBACK: MAPEAMENTO POR LABEL EM PORTUGUÊS
     # ═══════════════════════════════════════════════════════
@@ -1429,6 +1468,22 @@ def parse_obito(raw_text: str) -> Dict[str, Any]:
             if not resultado or p.upper() != resultado[-1].upper():
                 resultado.append(p)
         structured["CIDADE_OBITO"] = " ".join(resultado)
+    # ── Normalizar HORA_OBITO ──
+    hora = structured.get("HORA_OBITO", "")
+    if hora:
+        # Remover labels
+        hora = re.sub(r'(Hora|hora|HORA)\s*', '', hora).strip()
+        # "2 6" → "02:06"
+        hora = re.sub(r'^(\d{1})\s+(\d{2})$', r'0\1:\2', hora)
+        # "06 19" → "06:19"
+        hora = re.sub(r'^(\d{2})\s+(\d{2})$', r'\1:\2', hora)
+        # "02 06" → "02:06"
+        hora = re.sub(r'^(\d{2})\s+(\d{2})$', r'\1:\2', hora)
+        # "20 12 03" → "20:12:03"
+        hora = re.sub(r'^(\d{2}):(\d{2})\s+(\d{2})$', r'\1:\2:\3', hora)
+        # "2 6" com espaços variados
+        hora = re.sub(r'^(\d{1,2})\s+(\d{2})$', lambda m: f"{int(m.group(1)):02d}:{m.group(2)}", hora)
+        structured["HORA_OBITO"] = hora
     # ── Limpeza de CRM_MEDICO ──
     crm = structured.get("CRM_MEDICO", "")
     if crm:
