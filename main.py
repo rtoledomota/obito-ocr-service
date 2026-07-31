@@ -398,14 +398,58 @@ def _detect_refusal(text: str) -> bool:
     return False
 
 def _ocr_google_vision(image_bytes: bytes) -> Tuple[str, float]:
-    """OCR via Google Cloud Vision REST API."""
+    """OCR via Google Cloud Vision REST API.
+    
+    Tenta OCR sem pré-processamento primeiro.
+    Se o resultado for vazio ou score muito baixo, tenta novamente com OpenCV.
+    """
     if not GOOGLE_VISION_API_KEY:
         raise OCRProviderError("GOOGLE_VISION_API_KEY não configurada.", 502)
-    
-    # ── Pré-processamento OpenCV antes do OCR ──
-    image_bytes = _preprocess_image(image_bytes)           
-    
-    img_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
+    def _do_ocr(img_bytes: bytes) -> Tuple[str, float]:
+        """Executa a chamada REST ao Google Vision."""
+        img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+        url = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_VISION_API_KEY}"
+        payload = {
+            "requests": [{
+                "image": {"content": img_b64},
+                "features": [{"type": "TEXT_DETECTION"}],
+            }]
+        }
+        try:
+            resp = requests.post(url, json=payload, timeout=60)
+            result = resp.json()
+        except requests.RequestException as e:
+            raise OCRProviderError(f"Falha de comunicação com Vision API: {e}", 502)
+        except Exception as e:
+            raise OCRProviderError(f"Resposta inválida da Vision API: {e}", 502)
+        if resp.status_code != 200:
+            err_msg = result.get("error", {}).get("message", "")
+            raise OCRProviderError(
+                f"Vision API HTTP {resp.status_code}: {err_msg}", 502
+            )
+        annotations = result.get("responses", [{}])[0].get("textAnnotations", [])
+        if not annotations:
+            return "", 0.0
+        full_text = annotations[0].get("description", "")
+        return full_text.strip(), 1.0
+
+    # ── 1ª tentativa: SEM pré-processamento ──
+    text, score = _do_ocr(image_bytes)
+
+    # ── Se vazio ou muito baixo, tenta com OpenCV ──
+    if not text or len(text) < 20:
+        logger.info("OCR sem resultado com imagem original. Tentando com OpenCV...")
+        processed = _preprocess_image(image_bytes)
+        text2, score2 = _do_ocr(processed)
+        if text2 and len(text2) > len(text):
+            logger.info(f"OpenCV melhorou o resultado: {len(text)} → {len(text2)} chars")
+            return text2, score2
+        elif text:
+            return text, score
+        return text2, score2
+
+    return text, score
     url = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_VISION_API_KEY}"
     payload = {
         "requests": [{
