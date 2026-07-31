@@ -2207,7 +2207,9 @@ def _monitor_worker():
             _monitor_stop.wait(POLL_INTERVAL_MINUTES * 60)
             continue
         try:
-            result = run_batch()
+            result = run_batch(limit=3)
+            import gc
+            gc.collect()   
             if result.get("new", 0) > 0:
                 logger.info(f"Monitor: {result['message']}")
         except Exception as e:
@@ -2394,7 +2396,7 @@ async def batch_process(request: Request, authorization: Optional[str] = Header(
     folder_id = body.get("folderId") or body.get("folder_id") or None
     force = body.get("force_reprocess", body.get("force", False))
     request_id = body.get("requestId") or body.get("request_id") or None
-    limit = int(request.query_params.get("limit", 0))
+    limit = int(request.query_params.get("limit", 5))
     result = run_batch(folder_id=folder_id, force_reprocess=force, limit=limit)
     result["requestId"] = request_id
     status_code = 200 if result.get("success") else 500
