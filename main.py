@@ -474,7 +474,92 @@ def _ocr_google_vision(image_bytes: bytes) -> Tuple[str, float]:
         return "", 0.0
     full_text = annotations[0].get("description", "")
     return full_text.strip(), 1.0
+# ── OCR Gemini Multimodal ────────────────────────────────────
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = "gemini-2.0-flash"
 
+def _ocr_gemini(image_bytes: bytes) -> Tuple[Optional[dict], float]:
+    """Extrai os campos da DO direto da imagem usando Gemini (multimodal).
+
+    Retorna (dict com campos, confiança) ou (None, 0.0) se não reconhecer DO.
+    """
+    if not GEMINI_API_KEY:
+        return None, 0.0
+
+    img_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+
+    prompt = """Você é um especialista em Declarações de Óbito (DO) brasileiras (formulário do SIM/MS).
+Analise a imagem e extraia SOMENTE os dados preenchidos à mão ou datilografados.
+NÃO copie os textos impressos do formulário (labels como "Data de nascimento", "Nome do Médico", "CAUSAS DA MORTE", "que contribuíram para a morte...").
+Responda APENAS com JSON válido, sem markdown, sem comentários, neste formato exato:
+{
+  "valido": true ou false,
+  "nome": "nome do falecido ou string vazia",
+  "nome_mae": "",
+  "nascimento": "DD/MM/AAAA ou vazio",
+  "idade_anos": null,
+  "data_obito": "DD/MM/AAAA ou vazio",
+  "hora_obito": "HH:MM ou vazio",
+  "cidade_obito": "",
+  "uf_obito": "SP",
+  "causa_morte": "causa imediata da morte, linha 1 da Parte I",
+  "causa_basica": "causa básica (última linha preenchida da Parte I)",
+  "cid_basica": "código CID ou vazio",
+  "tipo_obito": "Fetal | Não Fetal | vazio",
+  "do_numero": "número da DO ou vazio",
+  "medico_atestante": "",
+  "crm_medico": "",
+  "parte_ii": "outras condições contribuintes ou vazio",
+  "intervalo_doenca_morte": "intervalos de tempo anotados ou vazio"
+}
+Se a imagem NÃO for uma Declaração de Óbito, retorne {"valido": false} e os demais campos vazios.
+Normalize datas para DD/MM/AAAA. Ignore carimbos, assinaturas ilegíveis e textos impressos do formulário."""
+
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0.1,
+            "responseMimeType": "application/json"
+        }
+    }
+
+    try:
+        resp = requests.post(url, json=payload, timeout=90)
+        result = resp.json()
+    except requests.RequestException as e:
+        raise OCRProviderError(f"Falha de comunicação com Gemini API: {e}", 502)
+    except Exception as e:
+        raise OCRProviderError(f"Resposta inválida da Gemini API: {e}", 502)
+
+    if resp.status_code != 200:
+        err_msg = result.get("error", {}).get("message", "")
+        raise OCRProviderError(f"Gemini API HTTP {resp.status_code}: {err_msg}", 502)
+
+    try:
+        text = result["candidates"][0]["content"]["parts"][0]["text"]
+        data = json.loads(text)
+    except Exception:
+        return None, 0.0
+
+    if not data.get("valido", False):
+        return data, 0.0
+
+    # Confiança simples baseada em campos críticos preenchidos
+    criticos = [data.get(k) for k in ("nome", "nascimento", "data_obito")]
+    score = 0.0
+    if data.get("nome"):
+        score += 0.4
+    if data.get("nascimento"):
+        score += 0.3
+    if data.get("data_obito"):
+        score += 0.3
+    return data, score
 def _ocr_openai_compatible(image_bytes: bytes, mime_type: str) -> Tuple[str, float]:
     """OCR via OpenAI-compatible API (fallback)."""
     if not OPENAI_API_KEY:
@@ -528,9 +613,100 @@ def _ocr_openai_compatible(image_bytes: bytes, mime_type: str) -> Tuple[str, flo
     except Exception:
         pass
     return content.strip(), confidence
+# ── OCR Gemini Multimodal ────────────────────────────────────
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = "gemini-2.0-flash"
+
+def _ocr_gemini(image_bytes: bytes) -> Tuple[Optional[dict], float]:
+    """Extrai os campos da DO direto da imagem usando Gemini (multimodal)."""
+    if not GEMINI_API_KEY:
+        return None, 0.0
+
+    img_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+
+    prompt = """Você é um especialista em Declarações de Óbito (DO) brasileiras (formulário do SIM/MS).
+Analise a imagem e extraia SOMENTE os dados preenchidos à mão ou datilografados.
+NÃO copie os textos impressos do formulário (labels como "Data de nascimento", "Nome do Médico", "CAUSAS DA MORTE", "que contribuíram para a morte...").
+Responda APENAS com JSON válido, sem markdown, sem comentários, neste formato exato:
+{
+  "valido": true ou false,
+  "nome": "nome do falecido ou string vazia",
+  "nome_mae": "",
+  "nascimento": "DD/MM/AAAA ou vazio",
+  "idade_anos": null,
+  "data_obito": "DD/MM/AAAA ou vazio",
+  "hora_obito": "HH:MM ou vazio",
+  "cidade_obito": "",
+  "uf_obito": "SP",
+  "causa_morte": "causa imediata da morte, linha 1 da Parte I",
+  "causa_basica": "causa básica (última linha preenchida da Parte I)",
+  "cid_basica": "código CID ou vazio",
+  "tipo_obito": "Fetal | Não Fetal | vazio",
+  "do_numero": "número da DO ou vazio",
+  "medico_atestante": "",
+  "crm_medico": "",
+  "parte_ii": "outras condições contribuintes ou vazio",
+  "intervalo_doenca_morte": "intervalos de tempo anotados ou vazio"
+}
+Se a imagem NÃO for uma Declaração de Óbito, retorne {"valido": false} e os demais campos vazios.
+Normalize datas para DD/MM/AAAA. Ignore carimbos, assinaturas ilegíveis e textos impressos do formulário."""
+
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0.1,
+            "responseMimeType": "application/json"
+        }
+    }
+
+    try:
+        resp = requests.post(url, json=payload, timeout=90)
+        result = resp.json()
+    except requests.RequestException as e:
+        raise OCRProviderError(f"Falha de comunicação com Gemini API: {e}", 502)
+    except Exception as e:
+        raise OCRProviderError(f"Resposta inválida da Gemini API: {e}", 502)
+
+    if resp.status_code != 200:
+        err_msg = result.get("error", {}).get("message", "")
+        raise OCRProviderError(f"Gemini API HTTP {resp.status_code}: {err_msg}", 502)
+
+    try:
+        text = result["candidates"][0]["content"]["parts"][0]["text"]
+        data = json.loads(text)
+    except Exception:
+        return None, 0.0
+
+    if not data.get("valido", False):
+        return data, 0.0
+
+    score = 0.0
+    if data.get("nome"):
+        score += 0.4
+    if data.get("nascimento"):
+        score += 0.3
+    if data.get("data_obito"):
+        score += 0.3
+    return data, score
 
 def ocr_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> Tuple[str, float]:
-    """Dispatcher: tenta Google Vision primeiro, fallback para OpenAI."""
+    """Dispatcher: tenta Gemini multimodal primeiro, depois Vision, fallback OpenAI."""
+    # ── 1ª tentativa: Gemini multimodal (extrai campos estruturados) ──
+    if GEMINI_API_KEY:
+        try:
+            gemini_data, gemini_conf = _ocr_gemini(image_bytes)
+            if gemini_data and gemini_data.get("valido"):
+                # Serializa o dict estruturado para o parser reconhecer
+                return json.dumps(gemini_data, ensure_ascii=False), gemini_conf
+        except OCRProviderError as e:
+            logger.warning(f"Gemini falhou ({e}), tentando Google Vision...")
+
     if OCR_PROVIDER == "openai":
         return _ocr_openai_compatible(image_bytes, mime_type)
     # Padrão: Google Vision
@@ -541,7 +717,7 @@ def ocr_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> Tuple[str, f
         if OPENAI_API_KEY:
             return _ocr_openai_compatible(image_bytes, mime_type)
         raise  # Sem fallback disponível
-
+           
 # ── Parser: busca por label textual (v1) ────────────────────────
 
 def _find_label_index(
@@ -2076,24 +2252,53 @@ def _process_single_image(file_id: str, file_name: str) -> dict:
         image_bytes, mime_type = _download_image_bytes(file_id)
     except Exception as e:
         return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_DRIVE", "ERROS": str(e)}
+    # ── 1ª tentativa: Gemini multimodal (campos estruturados) ──
+    structured = None
+    if GEMINI_API_KEY:
+        try:
+            gemini_data, gemini_conf = _ocr_gemini(image_bytes)
+            if gemini_data and gemini_data.get("valido"):
+                structured = {
+                    "NOME": gemini_data.get("nome", ""),
+                    "NOME_MAE": gemini_data.get("nome_mae", ""),
+                    "NASCIMENTO": gemini_data.get("nascimento", ""),
+                    "IDADE_ANOS": gemini_data.get("idade_anos") or "",
+                    "DATA_OBITO": gemini_data.get("data_obito", ""),
+                    "HORA_OBITO": gemini_data.get("hora_obito", ""),
+                    "CIDADE_OBITO": gemini_data.get("cidade_obito", ""),
+                    "UF_OBITO": gemini_data.get("uf_obito", ""),
+                    "CAUSA_MORTE": gemini_data.get("causa_morte", ""),
+                    "CAUSA_BASICA": gemini_data.get("causa_basica", ""),
+                    "CID_BASICA": gemini_data.get("cid_basica", ""),
+                    "TIPO_OBITO": gemini_data.get("tipo_obito", ""),
+                    "DO_NUMERO": gemini_data.get("do_numero", ""),
+                    "MEDICO_ATESTANTE": gemini_data.get("medico_atestante", ""),
+                    "CRM_MEDICO": gemini_data.get("crm_medico", ""),
+                    "PARTE_II": gemini_data.get("parte_ii", ""),
+                    "INTERVALO_DOENCA_MORTE": gemini_data.get("intervalo_doenca_morte", ""),
+                }
+                logger.info(f"{file_name}: Gemini extraiu {sum(1 for v in structured.values() if v)} campos.")
+        except OCRProviderError as e:
+            logger.warning(f"Gemini falhou ({e}), usando fluxo Vision/parser.")
 
-    try:
-        raw_text, confidence = ocr_image(image_bytes, mime_type)
-    except Exception as e:
-        return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_OCR", "ERROS": str(e)}
-
-    if not _is_valid_obito(raw_text):
-        logger.warning(f"{file_name}: texto não reconhecido como DO, pulando")
-        return {
-            "NOME_ARQUIVO": file_name, "STATUS": "REJEITADO",
-            "ERROS": "Imagem não contém uma Declaração de Óbito válida",
-        }
-
-    try:
-        structured = parse_obito(raw_text)
-    except Exception as e:
-        structured = {k: "" for k in HEADER}
-        structured["ERROS"] = f"Erro no parser: {e}"
+    # ── Se Gemini não funcionou, fluxo atual (Vision + parser) ──
+        if structured is None:
+        try:
+            raw_text, confidence = ocr_image(image_bytes, mime_type)
+        except Exception as e:
+            return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_OCR", "ERROS": str(e)}
+        if not _is_valid_obito(raw_text):
+            logger.warning(f"{file_name}: texto não reconhecido como DO, pulando")
+            return {
+                "NOME_ARQUIVO": file_name, "STATUS": "REJEITADO",
+                "ERROS": "Imagem não contém uma Declaração de Óbito válida",
+            }
+        try:
+            structured = parse_obito(raw_text)
+        except Exception as e:
+            structured = {k: "" for k in HEADER}
+            structured["ERROS"] = f"Erro no parser: {e}"
+  
 
     structured["HASH_ARQUIVO"] = _sha256_bytes(image_bytes)
     structured["HASH_CONTEUDO"] = _sha256_text(raw_text)
