@@ -490,29 +490,30 @@ def _ocr_gemini(image_bytes: bytes) -> Tuple[Optional[dict], float]:  # nível 0
     )                                                          # 4 espaços
 
     prompt = """..."""                                      # 4 espaços
-    payload = {                                              # 4 espaços
-        "contents": [{                                       # 8 espaços
-            "parts": [                                       # 12 espaços
-                {"text": prompt},                            # 16 espaços
-                {...}                                        # 16 espaços
-            ]                                                # 12 espaços
-        }],                                                  # 8 espaços
-        "generationConfig": {...}                            # 8 espaços
-    }                                                        # 4 espaços
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0.1,
+            "responseMimeType": "application/json"
+        }
+    }
 
-    try:                                                     # 4 espaços
-        resp = requests.post(url, json=payload, timeout=90)  # 8 espaços
-        result = resp.json()                                 # 8 espaços
-    except requests.RequestException as e:                    # 4 espaços
-        raise OCRProviderError(f"...", 502)                  # 8 espaços
-    ...
+    try:
+        resp = requests.post(url, json=payload, timeout=90)
+        result = resp.json()
+    except requests.RequestException as e:
+        raise OCRProviderError(f"Falha de comunicação com Gemini API: {e}", 502)
     except Exception as e:
         raise OCRProviderError(f"Resposta inválida da Gemini API: {e}", 502)
 
     if resp.status_code != 200:
         err_msg = result.get("error", {}).get("message", "")
-        raise OCRProviderError(f"Gemini API HTTP {resp.status_code}: {err_msg}", 502)
-
+        raise OCRProviderError(f"Gemini API HTTP {resp.status_code}: {err_msg}", 502)    
     try:
         text = result["candidates"][0]["content"]["parts"][0]["text"]
         data = json.loads(text)
