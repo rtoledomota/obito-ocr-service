@@ -698,15 +698,16 @@ Normalize datas para DD/MM/AAAA. Ignore carimbos, assinaturas ilegíveis e texto
 def ocr_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> Tuple[str, float]:
     """Dispatcher: tenta Gemini multimodal primeiro, depois Vision, fallback OpenAI."""
     # ── 1ª tentativa: Gemini multimodal (extrai campos estruturados) ──
-    if GEMINI_API_KEY:
+   if GEMINI_API_KEY:
         try:
             gemini_data, gemini_conf = _ocr_gemini(image_bytes)
             if gemini_data and gemini_data.get("valido"):
-                # Serializa o dict estruturado para o parser reconhecer
-                return json.dumps(gemini_data, ensure_ascii=False), gemini_conf
+                structured = {
+                    "NOME": gemini_data.get("nome", ""),
+                    ...
+                }
         except OCRProviderError as e:
-            logger.warning(f"Gemini falhou ({e}), tentando Google Vision...")
-
+            logger.warning(f"Gemini falhou ({e}), usando fluxo Vision/parser.")
     if OCR_PROVIDER == "openai":
         return _ocr_openai_compatible(image_bytes, mime_type)
     # Padrão: Google Vision
@@ -2254,6 +2255,7 @@ def _process_single_image(file_id: str, file_name: str) -> dict:
         return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_DRIVE", "ERROS": str(e)}
     # ── 1ª tentativa: Gemini multimodal (campos estruturados) ──
     structured = None
+    raw_text = ""
     if GEMINI_API_KEY:
         try:
             gemini_data, gemini_conf = _ocr_gemini(image_bytes)
@@ -2282,7 +2284,7 @@ def _process_single_image(file_id: str, file_name: str) -> dict:
             logger.warning(f"Gemini falhou ({e}), usando fluxo Vision/parser.")
 
     # ── Se Gemini não funcionou, fluxo atual (Vision + parser) ──
-        if structured is None:
+    if structured is None:
         try:
             raw_text, confidence = ocr_image(image_bytes, mime_type)
         except Exception as e:
@@ -2298,7 +2300,6 @@ def _process_single_image(file_id: str, file_name: str) -> dict:
         except Exception as e:
             structured = {k: "" for k in HEADER}
             structured["ERROS"] = f"Erro no parser: {e}"
-  
 
     structured["HASH_ARQUIVO"] = _sha256_bytes(image_bytes)
     structured["HASH_CONTEUDO"] = _sha256_text(raw_text)
