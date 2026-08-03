@@ -475,65 +475,37 @@ def _ocr_google_vision(image_bytes: bytes) -> Tuple[str, float]:
     full_text = annotations[0].get("description", "")
     return full_text.strip(), 1.0
 # ── OCR Gemini Multimodal ────────────────────────────────────
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")        # nível 0
+GEMINI_MODEL = "gemini-2.0-flash"                       # nível 0
 
-def _ocr_gemini(image_bytes: bytes) -> Tuple[Optional[dict], float]:
-    """Extrai os campos da DO direto da imagem usando Gemini (multimodal).
+def _ocr_gemini(image_bytes: bytes) -> Tuple[Optional[dict], float]:  # nível 0
+    """Extrai os campos da DO usando Gemini."""          # 4 espaços
+    if not GEMINI_API_KEY:                               # 4 espaços
+        return None, 0.0                                 # 8 espaços
 
-    Retorna (dict com campos, confiança) ou (None, 0.0) se não reconhecer DO.
-    """
-    if not GEMINI_API_KEY:
-        return None, 0.0
+    img_b64 = base64.b64encode(image_bytes).decode("utf-8")  # 4 espaços
+    url = (                                                  # 4 espaços
+        f"https://generativelanguage.googleapis.com/v1beta/models/"  # 8 espaços
+        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"       # 8 espaços
+    )                                                          # 4 espaços
 
-    img_b64 = base64.b64encode(image_bytes).decode("utf-8")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    prompt = """..."""                                      # 4 espaços
+    payload = {                                              # 4 espaços
+        "contents": [{                                       # 8 espaços
+            "parts": [                                       # 12 espaços
+                {"text": prompt},                            # 16 espaços
+                {...}                                        # 16 espaços
+            ]                                                # 12 espaços
+        }],                                                  # 8 espaços
+        "generationConfig": {...}                            # 8 espaços
+    }                                                        # 4 espaços
 
-    prompt = """Você é um especialista em Declarações de Óbito (DO) brasileiras (formulário do SIM/MS).
-Analise a imagem e extraia SOMENTE os dados preenchidos à mão ou datilografados.
-NÃO copie os textos impressos do formulário (labels como "Data de nascimento", "Nome do Médico", "CAUSAS DA MORTE", "que contribuíram para a morte...").
-Responda APENAS com JSON válido, sem markdown, sem comentários, neste formato exato:
-{
-  "valido": true ou false,
-  "nome": "nome do falecido ou string vazia",
-  "nome_mae": "",
-  "nascimento": "DD/MM/AAAA ou vazio",
-  "idade_anos": null,
-  "data_obito": "DD/MM/AAAA ou vazio",
-  "hora_obito": "HH:MM ou vazio",
-  "cidade_obito": "",
-  "uf_obito": "SP",
-  "causa_morte": "causa imediata da morte, linha 1 da Parte I",
-  "causa_basica": "causa básica (última linha preenchida da Parte I)",
-  "cid_basica": "código CID ou vazio",
-  "tipo_obito": "Fetal | Não Fetal | vazio",
-  "do_numero": "número da DO ou vazio",
-  "medico_atestante": "",
-  "crm_medico": "",
-  "parte_ii": "outras condições contribuintes ou vazio",
-  "intervalo_doenca_morte": "intervalos de tempo anotados ou vazio"
-}
-Se a imagem NÃO for uma Declaração de Óbito, retorne {"valido": false} e os demais campos vazios.
-Normalize datas para DD/MM/AAAA. Ignore carimbos, assinaturas ilegíveis e textos impressos do formulário."""
-
-    payload = {
-        "contents": [{
-            "parts": [
-                {"text": prompt},
-                {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
-            ]
-        }],
-        "generationConfig": {
-            "temperature": 0.1,
-            "responseMimeType": "application/json"
-        }
-    }
-
-    try:
-        resp = requests.post(url, json=payload, timeout=90)
-        result = resp.json()
-    except requests.RequestException as e:
-        raise OCRProviderError(f"Falha de comunicação com Gemini API: {e}", 502)
+    try:                                                     # 4 espaços
+        resp = requests.post(url, json=payload, timeout=90)  # 8 espaços
+        result = resp.json()                                 # 8 espaços
+    except requests.RequestException as e:                    # 4 espaços
+        raise OCRProviderError(f"...", 502)                  # 8 espaços
+    ...
     except Exception as e:
         raise OCRProviderError(f"Resposta inválida da Gemini API: {e}", 502)
 
