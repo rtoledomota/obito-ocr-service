@@ -671,18 +671,17 @@ Normalize datas para DD/MM/AAAA. Ignore carimbos, assinaturas ilegíveis e texto
 def ocr_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> Tuple[str, float]:
     """Dispatcher: tenta Gemini multimodal primeiro, depois Vision, fallback OpenAI."""
     # ── 1ª tentativa: Gemini multimodal (extrai campos estruturados) ──
-   if GEMINI_API_KEY:
+    if GEMINI_API_KEY:
         try:
             gemini_data, gemini_conf = _ocr_gemini(image_bytes)
             if gemini_data and gemini_data.get("valido"):
-                structured = {
-                    "NOME": gemini_data.get("nome", ""),
-                    ...
-                }
+                return json.dumps(gemini_data, ensure_ascii=False), gemini_conf
         except OCRProviderError as e:
             logger.warning(f"Gemini falhou ({e}), usando fluxo Vision/parser.")
+
     if OCR_PROVIDER == "openai":
         return _ocr_openai_compatible(image_bytes, mime_type)
+
     # Padrão: Google Vision
     try:
         return _ocr_google_vision(image_bytes)
@@ -690,7 +689,7 @@ def ocr_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> Tuple[str, f
         logger.warning(f"Google Vision falhou ({e}), tentando fallback OpenAI...")
         if OPENAI_API_KEY:
             return _ocr_openai_compatible(image_bytes, mime_type)
-        raise  # Sem fallback disponível
+        raise
            
 # ── Parser: busca por label textual (v1) ────────────────────────
 
