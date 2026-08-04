@@ -2200,22 +2200,18 @@ def _append_rows_to_sheet(sheet_id: str, rows: List[dict]):
         insertDataOption="INSERT_ROWS",
         body={"values": values},
     ).execute()
-def _update_row_in_sheet(sheet_id: str, row_number: int, row_data: dict):
-    """Atualiza uma linha existente na planilha."""
-    try:
-        sheet = _get_sheet(sheet_id)
-        values = [[row_data.get(col, "") for col in AUDIT_COLUMNS]]
-        range_name = f'A{row_number}:W{row_number}'
-        sheet.values().update(
-            spreadsheetId=SHEET_ID,
-            range=f"'{sheet.title}'!{range_name}",
-            body={"values": values},
-            valueInputOption="USER_ENTERED"
-        ).execute()
-        logger.info(f"Linha {row_number} atualizada com sucesso.")
-    except Exception as e:
-        logger.error(f"Erro ao atualizar linha {row_number}: {e}")
-        raise
+def _update_row_in_sheet(sheet_id: str, row_number: int, row: dict):
+    """Atualiza uma linha existente (upsert) com os valores do registro."""
+    sheets = _get_sheets_service()
+    sheet_name = _get_sheet_name()
+    values = [[row.get(col, "") for col in AUDIT_COLUMNS]]
+    sheets.spreadsheets().values().update(
+        spreadsheetId=sheet_id,
+        range=f"{sheet_name}!A{row_number}",
+        valueInputOption="RAW",
+        body={"values": values},
+    ).execute()
+       
 # ── Processamento individual ────────────────────────────────────
 
 def _process_single_image(file_id: str, file_name: str) -> dict:
@@ -2353,14 +2349,20 @@ def run_batch(
             break
         try:
             row = _process_single_image(img["id"], img["name"])
-            _append_rows_to_sheet(sheet_id, [row])
+            nome = img["name"].strip()
+            # UPSERT: se o arquivo já existe na planilha, atualiza a linha; senão, adiciona
+            if nome in existing_names:
+                linha = existing_names[nome]   # número da linha (1-based)
+                _update_row_in_sheet(sheet_id, linha, row)
+                logger.info(f"{nome} atualizado (upsert) na linha {linha}.")
+            else:
+                _append_rows_to_sheet(sheet_id, [row])
             success_count += 1
             gc.collect()
         except Exception as e:
             fail_count += 1
             last_error = str(e)
             logger.error(f"Falha ao processar {img['name']}: {e}")
-
     return {
         "success": True,
         "total": len(images),
@@ -2376,8 +2378,10 @@ def run_batch(
 _monitor_thread: Optional[Thread] = None
 _monitor_stop = Event()
 _monitor_lock = Lock()
+_monitor_force = False
 
 def _monitor_worker():
+    global _monitor_force
     logger.info(f"Monitor iniciado: a cada {POLL_INTERVAL_MINUTES} minuto(s).")
     while not _monitor_stop.is_set():
         if not _monitor_lock.acquire(blocking=False):
@@ -2385,9 +2389,9 @@ def _monitor_worker():
             _monitor_stop.wait(POLL_INTERVAL_MINUTES * 60)
             continue
         try:
-            result = run_batch(limit=3)
+            result = run_batch(limit=3, force_reprocess=_monitor_force)
             import gc
-            gc.collect()   
+            gc.collect()
             if result.get("new", 0) > 0:
                 logger.info(f"Monitor: {result['message']}")
         except Exception as e:
@@ -2396,14 +2400,7 @@ def _monitor_worker():
             _monitor_lock.release()
         _monitor_stop.wait(POLL_INTERVAL_MINUTES * 60)
 
-def start_monitor():
-    global _monitor_thread
-    if _monitor_thread and _monitor_thread.is_alive():
-        logger.info("Monitor já está rodando.")
-        return
-    _monitor_stop.clear()
-    _monitor_thread = Thread(target=_monitor_worker, daemon=True)
-    _monitor_thread.start()
+
 
 def stop_monitor():
     _monitor_stop.set()
@@ -2593,16 +2590,15 @@ async def batch_status(authorization: Optional[str] = Header(None)):
     }
 
 @app.post("/batch/monitor/start")
-async def monitor_start(authorization: Optional[str] = Header(None)):
-    _check_auth(authorization)
-    if not DRIVE_FOLDER_ID:
-        return JSONResponse(status_code=400, content={
-            "code": "MISSING_FOLDER",
-            "message": "DRIVE_FOLDER_ID não configurado.",
-        })
-    start_monitor()
-    return {"success": True, "message": "Monitor iniciado."}
-
+def start_monitor(force_reprocess=False):
+    global _monitor_thread, _monitor_force
+    if _monitor_thread and _monitor_thread.is_alive():
+        logger.info("Monitor já está rodando.")
+        return
+    _monitor_force = force_reprocess
+    _monitor_stop.clear()
+    _monitor_thread = Thread(target=_monitor_worker, daemon=True)
+    _monitor_thread.start()
 @app.post("/batch/monitor/stop")
 async def monitor_stop(authorization: Optional[str] = Header(None)):
     _check_auth(authorization)
