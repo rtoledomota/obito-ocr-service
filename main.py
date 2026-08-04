@@ -2592,9 +2592,10 @@ async def batch_status(authorization: Optional[str] = Header(None)):
 @app.post("/batch/monitor/start")
 def start_monitor(force_reprocess=False):
     global _monitor_thread, _monitor_force
+    # Se existe uma thread, garante que ela está realmente parada
     if _monitor_thread and _monitor_thread.is_alive():
-        logger.info("Monitor já está rodando.")
-        return
+        _monitor_stop.set()          # sinaliza parada
+        _monitor_thread.join(timeout=5)  # aguarda encerrar (máx 5s)
     _monitor_force = force_reprocess
     _monitor_stop.clear()
     _monitor_thread = Thread(target=_monitor_worker, daemon=True)
