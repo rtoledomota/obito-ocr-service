@@ -478,18 +478,38 @@ def _ocr_google_vision(image_bytes: bytes) -> Tuple[str, float]:
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")        # nível 0
 GEMINI_MODEL = "gemini-3.5-flash"                       # nível 0
 
-def _ocr_gemini(image_bytes: bytes) -> Tuple[Optional[dict], float]:  # nível 0
-    """Extrai os campos da DO usando Gemini."""          # 4 espaços
-    if not GEMINI_API_KEY:                               # 4 espaços
-        return None, 0.0                                 # 8 espaços
-
-    img_b64 = base64.b64encode(image_bytes).decode("utf-8")  # 4 espaços
-    url = (                                                  # 4 espaços
-        f"https://generativelanguage.googleapis.com/v1beta/models/"  # 8 espaços
-        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"       # 8 espaços
-    )                                                          # 4 espaços
-
-    prompt = """..."""                                      # 4 espaços
+def _ocr_gemini(image_bytes: bytes) -> Tuple[Optional[dict], float]:
+    """Extrai os campos da DO direto da imagem usando Gemini (multimodal)."""
+    if not GEMINI_API_KEY:
+        return None, 0.0
+    img_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    prompt = """Você é um especialista em Declarações de Óbito (DO) brasileiras (formulário do SIM/MS).
+Analise a imagem e extraia SOMENTE os dados preenchidos à mão ou datilografados.
+NÃO copie os textos impressos do formulário (labels como "Data de nascimento", "Nome do Médico", "CAUSAS DA MORTE", "que contribuíram para a morte...").
+Responda APENAS com JSON válido, sem markdown, sem comentários, neste formato exato:
+{
+  "valido": true ou false,
+  "nome": "nome do falecido ou string vazia",
+  "nome_mae": "",
+  "nascimento": "DD/MM/AAAA ou vazio",
+  "idade_anos": null,
+  "data_obito": "DD/MM/AAAA ou vazio",
+  "hora_obito": "HH:MM ou vazio",
+  "cidade_obito": "",
+  "uf_obito": "SP",
+  "causa_morte": "causa imediata da morte, linha 1 da Parte I",
+  "causa_basica": "causa básica (última linha preenchida da Parte I)",
+  "cid_basica": "código CID ou vazio",
+  "tipo_obito": "Fetal | Não Fetal | vazio",
+  "do_numero": "número da DO ou vazio",
+  "medico_atestante": "",
+  "crm_medico": "",
+  "parte_ii": "outras condições contribuintes ou vazio",
+  "intervalo_doenca_morte": "intervalos de tempo anotados ou vazio"
+}
+Regra de validação: retorne "valido": true se a imagem contiver INDÍCIOS de ser uma Declaração de Óbito (título "Declaração de Óbito", campos "Nome do falecido"/"Data do óbito", estrutura do formulário SIM/MS), MESMO que partes estejam ilegíveis, cortadas ou com qualidade baixa. Retorne "valido": false APENAS se a imagem for claramente outro tipo de documento (receita, atestado comum, certidão, foto aleatória). Em caso de dúvida, prefira "valido": true.
+Normalize datas para DD/MM/AAAA. Ignore carimbos, assinaturas ilegíveis e textos impressos do formulário."""
     payload = {
         "contents": [{
             "parts": [
@@ -498,11 +518,10 @@ def _ocr_gemini(image_bytes: bytes) -> Tuple[Optional[dict], float]:  # nível 0
             ]
         }],
         "generationConfig": {
-            "temperature": 0.1,
+            "temperature": 0.0,
             "responseMimeType": "application/json"
         }
     }
-
     try:
         resp = requests.post(url, json=payload, timeout=90)
         result = resp.json()
@@ -510,21 +529,16 @@ def _ocr_gemini(image_bytes: bytes) -> Tuple[Optional[dict], float]:  # nível 0
         raise OCRProviderError(f"Falha de comunicação com Gemini API: {e}", 502)
     except Exception as e:
         raise OCRProviderError(f"Resposta inválida da Gemini API: {e}", 502)
-
     if resp.status_code != 200:
         err_msg = result.get("error", {}).get("message", "")
-        raise OCRProviderError(f"Gemini API HTTP {resp.status_code}: {err_msg}", 502)    
+        raise OCRProviderError(f"Gemini API HTTP {resp.status_code}: {err_msg}", 502)
     try:
         text = result["candidates"][0]["content"]["parts"][0]["text"]
         data = json.loads(text)
     except Exception:
         return None, 0.0
-
     if not data.get("valido", False):
         return data, 0.0
-
-    # Confiança simples baseada em campos críticos preenchidos
-    criticos = [data.get(k) for k in ("nome", "nascimento", "data_obito")]
     score = 0.0
     if data.get("nome"):
         score += 0.4
