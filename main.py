@@ -590,15 +590,7 @@ def _ocr_openai_compatible(image_bytes: bytes, mime_type: str) -> Tuple[str, flo
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = "gemini-3.5-flash"
 
-def _ocr_gemini(image_bytes: bytes) -> Tuple[Optional[dict], float]:
-    """Extrai os campos da DO direto da imagem usando Gemini (multimodal)."""
-    if not GEMINI_API_KEY:
-        return None, 0.0
-
-    img_b64 = base64.b64encode(image_bytes).decode("utf-8")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-
-    prompt = """Você é um especialista em Declarações de Óbito (DO) brasileiras (formulário do SIM/MS).
+  prompt = """Você é um especialista em Declarações de Óbito (DO) brasileiras (formulário do SIM/MS).
 Analise a imagem e extraia SOMENTE os dados preenchidos à mão ou datilografados.
 NÃO copie os textos impressos do formulário (labels como "Data de nascimento", "Nome do Médico", "CAUSAS DA MORTE", "que contribuíram para a morte...").
 Responda APENAS com JSON válido, sem markdown, sem comentários, neste formato exato:
@@ -622,7 +614,7 @@ Responda APENAS com JSON válido, sem markdown, sem comentários, neste formato 
   "parte_ii": "outras condições contribuintes ou vazio",
   "intervalo_doenca_morte": "intervalos de tempo anotados ou vazio"
 }
-Se a imagem NÃO for uma Declaração de Óbito, retorne {"valido": false} e os demais campos vazios.
+Regra de validação: retorne "valido": true se a imagem contiver INDÍCIOS de ser uma Declaração de Óbito (título "Declaração de Óbito", campos "Nome do falecido"/"Data do óbito", estrutura do formulário SIM/MS), MESMO que partes estejam ilegíveis, cortadas ou com qualidade baixa. Retorne "valido": false APENAS se a imagem for claramente outro tipo de documento (receita, atestado comum, certidão, foto aleatória). Em caso de dúvida, prefira "valido": true.
 Normalize datas para DD/MM/AAAA. Ignore carimbos, assinaturas ilegíveis e textos impressos do formulário."""
 
     payload = {
@@ -633,7 +625,7 @@ Normalize datas para DD/MM/AAAA. Ignore carimbos, assinaturas ilegíveis e texto
             ]
         }],
         "generationConfig": {
-            "temperature": 0.1,
+            "temperature": 0.0,
             "responseMimeType": "application/json"
         }
     }
