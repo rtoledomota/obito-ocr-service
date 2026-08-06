@@ -509,6 +509,7 @@ Responda APENAS com JSON válido, sem markdown, sem comentários, neste formato 
   "intervalo_doenca_morte": "intervalos de tempo anotados ou vazio"
 }
 Regra de validação: retorne "valido": true se a imagem contiver INDÍCIOS de ser uma Declaração de Óbito (título "Declaração de Óbito", campos "Nome do falecido"/"Data do óbito", estrutura do formulário SIM/MS), MESMO que partes estejam ilegíveis, cortadas ou com qualidade baixa. Retorne "valido": false APENAS se a imagem for claramente outro tipo de documento (receita, atestado comum, certidão, foto aleatória). Em caso de dúvida, prefira "valido": true.
+Normalize datas para DD/MM/AAAA. Ignore carimbos, assinaturas ilegíveis e textos impressos do formulário."""
     payload = {
         "contents": [{
             "parts": [
