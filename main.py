@@ -604,45 +604,45 @@ def _ocr_openai_compatible(image_bytes: bytes, mime_type: str) -> Tuple[str, flo
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = "gemini-3.5-flash"
 
-  prompt = """Você é um especialista em Declarações de Óbito (DO) brasileiras (formulário do SIM/MS).
-Analise a imagem e extraia SOMENTE os dados preenchidos à mão ou datilografados.
-NÃO copie os textos impressos do formulário (labels como "Data de nascimento", "Nome do Médico", "CAUSAS DA MORTE", "que contribuíram para a morte...").
-Responda APENAS com JSON válido, sem markdown, sem comentários, neste formato exato:
-{
-  "valido": true ou false,
-  "nome": "nome do falecido ou string vazia",
-  "nome_mae": "",
-  "nascimento": "DD/MM/AAAA ou vazio",
-  "idade_anos": null,
-  "data_obito": "DD/MM/AAAA ou vazio",
-  "hora_obito": "HH:MM ou vazio",
-  "cidade_obito": "",
-  "uf_obito": "SP",
-  "causa_morte": "causa imediata da morte, linha 1 da Parte I",
-  "causa_basica": "causa básica (última linha preenchida da Parte I)",
-  "cid_basica": "código CID ou vazio",
-  "tipo_obito": "Fetal | Não Fetal | vazio",
-  "do_numero": "número da DO ou vazio",
-  "medico_atestante": "",
-  "crm_medico": "",
-  "parte_ii": "outras condições contribuintes ou vazio",
-  "intervalo_doenca_morte": "intervalos de tempo anotados ou vazio"
-}
-Regra de validação: retorne "valido": true se a imagem contiver INDÍCIOS de ser uma Declaração de Óbito (título "Declaração de Óbito", campos "Nome do falecido"/"Data do óbito", estrutura do formulário SIM/MS), MESMO que partes estejam ilegíveis, cortadas ou com qualidade baixa. Retorne "valido": false APENAS se a imagem for claramente outro tipo de documento (receita, atestado comum, certidão, foto aleatória). Em caso de dúvida, prefira "valido": true.
-Normalize datas para DD/MM/AAAA. Ignore carimbos, assinaturas ilegíveis e textos impressos do formulário."""
-
-    payload = {
-        "contents": [{
-            "parts": [
-                {"text": prompt},
-                {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
-            ]
-        }],
-        "generationConfig": {
-            "temperature": 0.0,
-            "responseMimeType": "application/json"
-        }
-    }
+       prompt = """Você é um especialista em Declarações de Óbito (DO) brasileiras (formulário do SIM/MS).
+       Analise a imagem e extraia SOMENTE os dados preenchidos à mão ou datilografados.
+       NÃO copie os textos impressos do formulário (labels como "Data de nascimento", "Nome do Médico", "CAUSAS DA MORTE", "que contribuíram para a morte...").
+       Responda APENAS com JSON válido, sem markdown, sem comentários, neste formato exato:
+       {
+         "valido": true ou false,
+         "nome": "nome do falecido ou string vazia",
+         "nome_mae": "",
+         "nascimento": "DD/MM/AAAA ou vazio",
+         "idade_anos": null,
+         "data_obito": "DD/MM/AAAA ou vazio",
+         "hora_obito": "HH:MM ou vazio",
+         "cidade_obito": "",
+         "uf_obito": "SP",
+         "causa_morte": "causa imediata da morte, linha 1 da Parte I",
+         "causa_basica": "causa básica (última linha preenchida da Parte I)",
+         "cid_basica": "código CID ou vazio",
+         "tipo_obito": "Fetal | Não Fetal | vazio",
+         "do_numero": "número da DO ou vazio",
+         "medico_atestante": "",
+         "crm_medico": "",
+         "parte_ii": "outras condições contribuintes ou vazio",
+         "intervalo_doenca_morte": "intervalos de tempo anotados ou vazio"
+       }
+       Regra de validação: retorne "valido": true se a imagem contiver INDÍCIOS de ser uma Declaração de Óbito (título "Declaração de Óbito", campos "Nome do falecido"/"Data do óbito", estrutura do formulário SIM/MS), MESMO que partes estejam ilegíveis, cortadas ou com qualidade baixa. Retorne "valido": false APENAS se a imagem for claramente outro tipo de documento (receita, atestado comum, certidão, foto aleatória). Em caso de dúvida, prefira "valido": true.
+       Normalize datas para DD/MM/AAAA. Ignore carimbos, assinaturas ilegíveis e textos impressos do formulário."""
+       
+           payload = {
+               "contents": [{
+                   "parts": [
+                       {"text": prompt},
+                       {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
+                   ]
+               }],
+               "generationConfig": {
+                   "temperature": 0.0,
+                   "responseMimeType": "application/json"
+               }
+           }
 
     try:
         resp = requests.post(url, json=payload, timeout=90)
