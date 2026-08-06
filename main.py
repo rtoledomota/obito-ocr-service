@@ -604,7 +604,7 @@ def _ocr_openai_compatible(image_bytes: bytes, mime_type: str) -> Tuple[str, flo
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = "gemini-3.5-flash"
 prompt = """Você é um especialista em Declarações de Óbito (DO) brasileiras (formulário do SIM/MS).
-       Analise a imagem e extraia SOMENTE os dados preenchidos à mão ou datilografados.
+    Analise a imagem e extraia SOMENTE os dados preenchidos à mão ou datilografados.
        NÃO copie os textos impressos do formulário (labels como "Data de nascimento", "Nome do Médico", "CAUSAS DA MORTE", "que contribuíram para a morte...").
        Responda APENAS com JSON válido, sem markdown, sem comentários, neste formato exato:
        {
