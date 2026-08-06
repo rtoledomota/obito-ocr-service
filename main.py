@@ -476,7 +476,7 @@ def _ocr_google_vision(image_bytes: bytes) -> Tuple[str, float]:
     return full_text.strip(), 1.0
 # ── OCR Gemini Multimodal ────────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")        # nível 0
-GEMINI_MODEL = "gemini-2.5-flash"                       # nível 0
+GEMINI_MODEL = "gemini-3.5-flash"                       # nível 0
 
 def _ocr_gemini(image_bytes: bytes) -> Tuple[Optional[dict], float]:  # nível 0
     """Extrai os campos da DO usando Gemini."""          # 4 espaços
@@ -588,7 +588,7 @@ def _ocr_openai_compatible(image_bytes: bytes, mime_type: str) -> Tuple[str, flo
     return content.strip(), confidence
 # ── OCR Gemini Multimodal ────────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.5-flash"
 
 def _ocr_gemini(image_bytes: bytes) -> Tuple[Optional[dict], float]:
     """Extrai os campos da DO direto da imagem usando Gemini (multimodal)."""
