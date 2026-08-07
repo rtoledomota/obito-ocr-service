@@ -674,7 +674,7 @@ def ocr_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> Tuple[str, f
     if GEMINI_API_KEY:
         try:
             gemini_data, gemini_conf = _ocr_gemini(image_bytes)
-            if gemini_data and gemini_data.get("valido"):
+            if gemini_data:
                 return json.dumps(gemini_data, ensure_ascii=False), gemini_conf
         except OCRProviderError as e:
             logger.warning(f"Gemini falhou ({e}), usando fluxo Vision/parser.")
@@ -682,7 +682,7 @@ def ocr_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> Tuple[str, f
     if OCR_PROVIDER == "openai":
         return _ocr_openai_compatible(image_bytes, mime_type)
 
-    # Padrão: Google Vision
+       # Google Vision (vê a imagem — melhor fallback para DO escrita à mão)
     try:
         return _ocr_google_vision(image_bytes)
     except OCRProviderError as e:
