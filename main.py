@@ -504,7 +504,7 @@ def _ocr_gemini(image_bytes: bytes) -> Tuple[Optional[dict], float]:  # nível 0
     }
 
     try:
-        resp = requests.post(url, json=payload, timeout=90)
+        resp = requests.post(url, json=payload, timeout=120)
         result = resp.json()
     except requests.RequestException as e:
         raise OCRProviderError(f"Falha de comunicação com Gemini API: {e}", 502)
@@ -639,7 +639,7 @@ Normalize datas para DD/MM/AAAA. Ignore carimbos, assinaturas ilegíveis e texto
     }
 
     try:
-        resp = requests.post(url, json=payload, timeout=90)
+        resp = requests.post(url, json=payload, timeout=120)
         result = resp.json()
     except requests.RequestException as e:
         raise OCRProviderError(f"Falha de comunicação com Gemini API: {e}", 502)
@@ -1892,7 +1892,7 @@ Texto OCR:
                 "Authorization": f"Bearer {OPENAI_API_KEY}",
                 "Content-Type": "application/json",
             },
-            timeout=30,
+            timeout=120,
         )
         result = resp.json()
         content = result["choices"][0]["message"]["content"]
