@@ -417,7 +417,7 @@ def _ocr_google_vision(image_bytes: bytes) -> Tuple[str, float]:
             }]
         }
         try:
-            resp = requests.post(url, json=payload, timeout=60)
+            resp = requests.post(url, json=payload, timeout=120)
             result = resp.json()
         except requests.RequestException as e:
             raise OCRProviderError(f"Falha de comunicação com Vision API: {e}", 502)
@@ -458,7 +458,7 @@ def _ocr_google_vision(image_bytes: bytes) -> Tuple[str, float]:
         }]
     }
     try:
-        resp = requests.post(url, json=payload, timeout=60)
+        resp = requests.post(url, json=payload, timeout=120)
         result = resp.json()
     except requests.RequestException as e:
         raise OCRProviderError(f"Falha de comunicação com Vision API: {e}", 502)
