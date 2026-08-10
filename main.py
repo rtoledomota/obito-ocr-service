@@ -42,7 +42,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from PIL import Image
-import io
+import unicodedata
 
 def _process_single_image(file_id: str, file_name: str) -> dict:
     """Pipeline completo: baixar - OCR (melhor de 3 tentativas) - parse - validar."""
@@ -544,32 +544,54 @@ def _ocr_gemini(image_bytes: bytes) -> Tuple[Optional[dict], float]:
     img_b64 = base64.b64encode(image_bytes).decode("utf-8")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
 
-    prompt = """Você é um especialista em Declarações de Óbito (DO) brasileiras (formulário do SIM/MS).
-Analise a imagem e extraia SOMENTE os dados preenchidos à mão ou datilografados.
-NÃO copie os textos impressos do formulário (labels como "Data de nascimento", "Nome do Médico", "CAUSAS DA MORTE", "que contribuíram para a morte...").
-Responda APENAS com JSON válido, sem markdown, sem comentários, neste formato exato:
-{
-  "valido": true ou false,
-  "nome": "nome do falecido ou string vazia",
-  "nome_mae": "",
-  "nascimento": "DD/MM/AAAA ou vazio",
-  "idade_anos": null,
-  "data_obito": "DD/MM/AAAA ou vazio",
-  "hora_obito": "HH:MM ou vazio",
-  "cidade_obito": "",
-  "uf_obito": "SP",
-  "causa_morte": "causa imediata da morte, linha 1 da Parte I",
-  "causa_basica": "causa básica (última linha preenchida da Parte I)",
-  "cid_basica": "código CID ou vazio",
-  "tipo_obito": "Fetal | Não Fetal | vazio",
-  "do_numero": "número da DO ou vazio",
-  "medico_atestante": "",
-  "crm_medico": "",
-  "parte_ii": "outras condições contribuintes ou vazio",
-  "intervalo_doenca_morte": "intervalos de tempo anotados ou vazio"
-}
-Se a imagem NÃO for uma Declaração de Óbito, retorne {"valido": false} e os demais campos vazios.
-Normalize datas para DD/MM/AAAA. Ignore carimbos, assinaturas ilegíveis e textos impressos do formulário."""
+    prompt = (
+    "Você é um extrator de dados de Declarações de Óbito (DO) brasileiras. "
+    "Analise a imagem e extraia APENAS os valores preenchidos (manuscritos ou digitados) "
+    "nos campos do formulário. "
+    "\n\nREGRAS OBRIGATÓRIAS:\n"
+    "1. IGNORE completamente rótulos, títulos, instruções e texto impresso do formulário. "
+    "Extraia SOMENTE o conteúdo preenchido em cada campo. "
+    "Exemplos de rótulos que NUNCA devem ser extraídos como dados: "
+    "'Nome do pai', 'Nome da Mãe', 'Data de nascimento', 'Raça/Cor', 'Sexo', "
+    "'Situação conjugal', 'Ocupação habitual', 'Complexo Hospitalar de Clínicas', "
+    "'ENDEREÇO DO LOCAL DO ACIDENTE OU VIOLÊNCIA', 'Causas da morte', "
+    "'Devido ou como consequência de', 'Tempo aproximado entre o início da doença e a morte', "
+    "'Município de residência', 'Município de ocorrência', 'PROVÁVEIS CIRCUNSTÂNCIAS DE MORTE NÃO NATURAL'.\n"
+    "2. Se um campo estiver em branco ou ilegível, retorne string vazia (\"\"). "
+    "NUNCA invente dados nem preencha com o rótulo do campo.\n"
+    "3. NÃO duplique nomes. Se o mesmo nome aparecer repetido no campo, use-o uma única vez.\n"
+    "4. NÃO inclua números de campo (ex.: '3 Elias Pacheco' -> 'Elias Pacheco').\n"
+    "5. Datas: normalize para o formato DD/MM/AAAA. Remova espaços entre dígitos "
+    "(ex.: '2 0 0 3 1 9 7 0' -> '19/03/1970'). Se a data for inválida, retorne string vazia.\n"
+    "6. Horas: normalize para o formato HH:MM. Valide que os minutos sejam <= 59. "
+    "Se a hora for inválida (ex.: '26:12', '02:612'), retorne string vazia.\n"
+    "7. O nome do médico atestante e o CRM devem vir separados, sem texto extra.\n"
+    "8. A causa da morte e a causa básica devem conter APENAS o diagnóstico, "
+    "sem frases como 'Devido ou como consequência de' ou 'Tempo aproximado...'.\n"
+    "\nResponda EXCLUSIVAMENTE com um objeto JSON válido, sem texto antes ou depois, "
+    "sem blocos de código, sem cercas de backtick (
+```), sem a palavra 'json'. "
+    "Use exatamente estas chaves:\n"
+    "{\n"
+    "  \"NOME\": \"\",\n"
+    "  \"NOME_MAE\": \"\",\n"
+    "  \"NASCIMENTO\": \"\",\n"
+    "  \"IDADE_ANOS\": \"\",\n"
+    "  \"DATA_OBITO\": \"\",\n"
+    "  \"HORA_OBITO\": \"\",\n"
+    "  \"CIDADE_OBITO\": \"\",\n"
+    "  \"UF_OBITO\": \"\",\n"
+    "  \"CAUSA_MORTE\": \"\",\n"
+    "  \"CAUSA_BASICA\": \"\",\n"
+    "  \"CID_BASICA\": \"\",\n"
+    "  \"TIPO_OBITO\": \"\",\n"
+    "  \"DO_NUMERO\": \"\",\n"
+    "  \"MEDICO_ATESTANTE\": \"\",\n"
+    "  \"CRM_MEDICO\": \"\",\n"
+    "  \"PARTE_II\": \"\",\n"
+    "  \"INTERVALO_DOENCA_MORTE\": \"\"\n"
+    "}"
+)
 
     payload = {
         "contents": [{
@@ -617,7 +639,127 @@ Normalize datas para DD/MM/AAAA. Ignore carimbos, assinaturas ilegíveis e texto
     if data.get("data_obito"):
         score += 0.3
     return data, score
+# ============================================================
+# PÓS-PROCESSAMENTO DE LIMPEZA DOS CAMPOS EXTRAÍDOS
+# ============================================================
 
+# Rótulos e frases do formulário que NUNCA devem ser tratados como dados
+ROTULOS_FORMULARIO = [
+    "nome do pai", "nome da mãe", "nome do medico", "data de nascimento",
+    "raça/cor", "raca/cor", "sexo", "situação conjugal", "situacao conjugal",
+    "ocupação habitual", "ocupacao habitual", "complexo hospitalar de clínicas",
+    "complexo hospitalar de clinicas", "endereço do local do acidente ou violência",
+    "endereco do local do acidente ou violencia", "causas da morte",
+    "devido ou como consequência de", "devido ou como consequencia de",
+    "tempo aproximado entre o início da doença e a morte",
+    "tempo aproximado entre o inicio da doenca e a morte",
+    "tempo aproximado entre o início da condição e a morte",
+    "tempo aproximado entre o inicio da condicao e a morte",
+    "município de residência", "municipio de residencia",
+    "município de ocorrência", "municipio de ocorrencia",
+    "prováveis circunstâncias de morte não natural",
+    "prováveis circunstancias de morte nao natural",
+    "anote somente uma causa por linha", "anote somente um diagnóstico por linha",
+    "anote somente um diagnostico por linha",
+    "seqüência de causas", "sequencia de causas",
+    "preencha o estado mórbido", "preencha, se assinalado",
+    "condições e causas do óbito", "condicoes e causas do obito",
+    "que contribuíram para a morte", "que contribuiram para a morte",
+    "que não entraram, porém, na cadeia acima", "que nao entraram, porem, na cadeia acima",
+    "que não resultaram, porém", "que nao resultaram, porem",
+    "que causou diretamente a morte", "que causou diretamente",
+    "causa terminal", "causa intermediária", "causa intermediaria", "causa básica", "causa basica",
+    "uso de múltiplas substâncias psicoativas", "uso de multiplas substancias psicoativas",
+    "data do atestado", "meio de contato", "código cbo", "codigo cbo",
+    "número de filhos", "numero de filhos", "tipo de parto", "morte em relação ao parto",
+    "peso ao nascer", "número da declaração de nascido vivo",
+    "numero da declaracao de nascido vivo", "assistência médica", "assistencia medica",
+    "diagnóstico confirmado por", "diagnostico confirmado por", "necropsia",
+    "número de semanas de gestação", "numero de semanas de gestacao", "tipo de gravidez",
+    "nome do contato", "fonte da informação", "fonte da informacao",
+    "descrição sumária do evento", "descricao sumaria do evento",
+    "endereço de residência", "endereco de residencia", "endereço de ocorrência",
+    "endereco de ocorrencia", "logradouro", "bairro/distrito", "complemento",
+    "código cnes", "codigo cnes", "cartório", "cartorio", "registro",
+    "idade", "nível", "nivel", "série", "serie", "ignorado",
+]
+
+def _limpar_texto(valor):
+    """Remove rótulos do formulário, backticks e normaliza espaços."""
+    if not valor or not isinstance(valor, str):
+        return ""
+    texto = valor.strip()
+    texto = texto.replace("
+```", "").replace("`", "")
+    texto = re.sub(r"^\d+\s+", "", texto)
+    texto = re.sub(r"\s+", " ", texto).strip()
+    texto_lower = unicodedata.normalize("NFD", texto.lower())
+    texto_lower = "".join(c for c in texto_lower if unicodedata.category(c) != "Mn")
+    for rotulo in ROTULOS_FORMULARIO:
+        rotulo_norm = unicodedata.normalize("NFD", rotulo.lower())
+        rotulo_norm = "".join(c for c in rotulo_norm if unicodedata.category(c) != "Mn")
+        if rotulo_norm in texto_lower:
+            idx = texto_lower.find(rotulo_norm)
+            texto = texto[:idx].strip()
+            texto_lower = texto_lower[:idx].strip()
+    partes = texto.split()
+    if len(partes) >= 4 and len(set(partes)) < len(partes):
+        meio = len(partes) // 2
+        if partes[:meio] == partes[meio:meio*2]:
+            texto = " ".join(partes[:meio])
+    return texto.strip()
+
+def _normalizar_data(valor):
+    """Normaliza datas para DD/MM/AAAA, removendo espaços entre dígitos."""
+    if not valor or not isinstance(valor, str):
+        return ""
+    texto = re.sub(r"\s+", "", valor.strip())
+    m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{2,4})$", texto)
+    if not m:
+        return ""
+    dia, mes, ano = m.groups()
+    dia, mes = int(dia), int(mes)
+    ano = int(ano)
+    if ano < 100:
+        ano += 2000
+    if dia < 1 or dia > 31 or mes < 1 or mes > 12 or ano < 1900 or ano > 2100:
+        return ""
+    return f"{dia:02d}/{mes:02d}/{ano:04d}"
+
+def _normalizar_hora(valor):
+    """Normaliza horas para HH:MM, validando minutos <= 59."""
+    if not valor or not isinstance(valor, str):
+        return ""
+    texto = valor.strip()
+    m = re.match(r"^(\d{1,2}):(\d{1,2})$", texto)
+    if not m:
+        return ""
+    hora, minuto = int(m.group(1)), int(m.group(2))
+    if hora < 0 or hora > 23 or minuto < 0 or minuto > 59:
+        return ""
+    return f"{hora:02d}:{minuto:02d}"
+
+def limpar_campos_extraidos(campos):
+    """Aplica limpeza em todos os campos extraídos antes de gravar na planilha."""
+    campos_limpos = dict(campos)
+    for chave in ["NOME", "NOME_MAE", "CIDADE_OBITO", "CAUSA_MORTE",
+                  "CAUSA_BASICA", "CID_BASICA", "TIPO_OBITO", "DO_NUMERO",
+                  "MEDICO_ATESTANTE", "CRM_MEDICO", "PARTE_II",
+                  "INTERVALO_DOENCA_MORTE"]:
+        campos_limpos[chave] = _limpar_texto(campos_limpos.get(chave, ""))
+    for chave in ["NASCIMENTO", "DATA_OBITO"]:
+        campos_limpos[chave] = _normalizar_data(campos_limpos.get(chave, ""))
+    campos_limpos["HORA_OBITO"] = _normalizar_hora(campos_limpos.get("HORA_OBITO", ""))
+    uf = _limpar_texto(campos_limpos.get("UF_OBITO", ""))
+    if len(uf) == 2 and uf.isalpha():
+        campos_limpos["UF_OBITO"] = uf.upper()
+    else:
+        campos_limpos["UF_OBITO"] = ""
+    idade = campos_limpos.get("IDADE_ANOS", "")
+    if idade:
+        m = re.search(r"\d+", str(idade))
+        campos_limpos["IDADE_ANOS"] = m.group(0) if m else ""
+    return campos_limpos
 def ocr_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> Tuple[str, float]:
     """Dispatcher: tenta Gemini multimodal primeiro, depois Vision, fallback OpenAI."""
     # ── 1ª tentativa: Gemini multimodal (extrai campos estruturados) ──
@@ -2154,6 +2296,7 @@ def _append_rows_to_sheet(sheet_id: str, rows: List[dict]):
     ).execute()
 def _update_row_in_sheet(sheet_id: str, row_number: int, row: dict):
     """Atualiza uma linha existente (upsert) com os valores do registro."""
+    campos = limpar_campos_extraidos(campos)
     sheets = _get_sheets_service()
     sheet_name = _get_sheet_name()
     values = [[row.get(col, "") for col in AUDIT_COLUMNS]]
