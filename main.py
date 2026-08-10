@@ -23,6 +23,7 @@ Variáveis opcionais:
   AUTO_PROCESS_ENABLED        "true" para monitor automático
   AUDIT_SHEET_TITLE           Título da planilha (padrão: "Auditoria Obito OCR")
 
+"""
 
 import os, re, io, json, base64, hashlib, unicodedata, gc
 import datetime as dt
@@ -44,7 +45,7 @@ from PIL import Image
 import io
 
 def _process_single_image(file_id: str, file_name: str) -> dict:
-   """Pipeline completo: baixar - OCR (melhor de 3 tentativas) - parse - validar."""
+    """Pipeline completo: baixar - OCR (melhor de 3 tentativas) - parse - validar."""
     logger.info(f"Processando: {file_name} ({file_id})")
     try:
         image_bytes, mime_type = _download_image_bytes(file_id)
@@ -595,15 +596,15 @@ Normalize datas para DD/MM/AAAA. Ignore carimbos, assinaturas ilegíveis e texto
         err_msg = result.get("error", {}).get("message", "")
         raise OCRProviderError(f"Gemini API HTTP {resp.status_code}: {err_msg}", 502)
 
-       try:
+    try:
         text = result["candidates"][0]["content"]["parts"][0]["text"]
         text = text.strip()
-        if text.startswith("
-```"):
-            text = re.sub(r"^
-```(?:json)?\s*", "", text)
-            text = re.sub(r"\s*
-```$", "", text)
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+        data = json.loads(text)
+    except Exception:
+        return None, 0.0
         data = json.loads(text)
     except Exception:
         return None, 0.0
@@ -623,7 +624,7 @@ def ocr_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> Tuple[str, f
     if GEMINI_API_KEY:
         try:
             gemini_data, gemini_conf = _ocr_gemini(image_bytes)
-    if gemini_data:
+            if gemini_data:
                 OCR_LAST_PROVIDER = "gemini"
                 return json.dumps(gemini_data, ensure_ascii=False), gemini_conf
         except OCRProviderError as e:
@@ -2501,8 +2502,6 @@ async def diagnose_file(file_id: str, authorization: Optional[str] = Header(None
     structured = parse_obito(raw_text)
     validate_obito(structured)
 
-    return {
-    global OCR_LAST_PROVIDER
     return {
         "file_id": file_id,
         "confidence": confidence,
