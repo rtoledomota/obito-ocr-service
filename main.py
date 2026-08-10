@@ -22,7 +22,7 @@ Variáveis opcionais:
   POLL_INTERVAL_MINUTES       Intervalo do monitor (padrão: 60)
   AUTO_PROCESS_ENABLED        "true" para monitor automático
   AUDIT_SHEET_TITLE           Título da planilha (padrão: "Auditoria Obito OCR")
-"""
+
 
 import os, re, io, json, base64, hashlib, unicodedata, gc
 import datetime as dt
@@ -154,7 +154,7 @@ SHEET_ID = os.environ.get("SHEET_ID", "")
 AUDIT_SHEET_TITLE = os.environ.get("AUDIT_SHEET_TITLE", "Auditoria Obito OCR")
 POLL_INTERVAL_MINUTES = int(os.environ.get("POLL_INTERVAL_MINUTES", "60"))
 AUTO_PROCESS_ENABLED = os.environ.get("AUTO_PROCESS_ENABLED", "false").lower() == "true"
-
+OCR_LAST_PROVIDER = "none"
 # ── HEADER completo (42+ campos) ────────────────────────────────
 HEADER = [
     "NOME", "NOME_SOCIAL", "NASCIMENTO", "SEXO", "RACA_COR", "ESTADO_CIVIL",
@@ -478,61 +478,6 @@ def _ocr_google_vision(image_bytes: bytes) -> Tuple[str, float]:
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")        # nível 0
 GEMINI_MODEL = "gemini-3.5-flash"                       # nível 0
 
-def _ocr_gemini(image_bytes: bytes) -> Tuple[Optional[dict], float]:  # nível 0
-    """Extrai os campos da DO usando Gemini."""          # 4 espaços
-    if not GEMINI_API_KEY:                               # 4 espaços
-        return None, 0.0                                 # 8 espaços
-
-    img_b64 = base64.b64encode(image_bytes).decode("utf-8")  # 4 espaços
-    url = (                                                  # 4 espaços
-        f"https://generativelanguage.googleapis.com/v1beta/models/"  # 8 espaços
-        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"       # 8 espaços
-    )                                                          # 4 espaços
-
-    prompt = """..."""                                      # 4 espaços
-    payload = {
-        "contents": [{
-            "parts": [
-                {"text": prompt},
-                {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
-            ]
-        }],
-        "generationConfig": {
-            "temperature": 0.1,
-            "responseMimeType": "application/json"
-        }
-    }
-
-    try:
-        resp = requests.post(url, json=payload, timeout=120)
-        result = resp.json()
-    except requests.RequestException as e:
-        raise OCRProviderError(f"Falha de comunicação com Gemini API: {e}", 502)
-    except Exception as e:
-        raise OCRProviderError(f"Resposta inválida da Gemini API: {e}", 502)
-
-    if resp.status_code != 200:
-        err_msg = result.get("error", {}).get("message", "")
-        raise OCRProviderError(f"Gemini API HTTP {resp.status_code}: {err_msg}", 502)    
-    try:
-        text = result["candidates"][0]["content"]["parts"][0]["text"]
-        data = json.loads(text)
-    except Exception:
-        return None, 0.0
-
-    if not data.get("valido", False):
-        return data, 0.0
-
-    # Confiança simples baseada em campos críticos preenchidos
-    criticos = [data.get(k) for k in ("nome", "nascimento", "data_obito")]
-    score = 0.0
-    if data.get("nome"):
-        score += 0.4
-    if data.get("nascimento"):
-        score += 0.3
-    if data.get("data_obito"):
-        score += 0.3
-    return data, score
 def _ocr_openai_compatible(image_bytes: bytes, mime_type: str) -> Tuple[str, float]:
     """OCR via OpenAI-compatible API (fallback)."""
     if not OPENAI_API_KEY:
@@ -650,14 +595,18 @@ Normalize datas para DD/MM/AAAA. Ignore carimbos, assinaturas ilegíveis e texto
         err_msg = result.get("error", {}).get("message", "")
         raise OCRProviderError(f"Gemini API HTTP {resp.status_code}: {err_msg}", 502)
 
-    try:
+       try:
         text = result["candidates"][0]["content"]["parts"][0]["text"]
+        text = text.strip()
+        if text.startswith("
+```"):
+            text = re.sub(r"^
+```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*
+```$", "", text)
         data = json.loads(text)
     except Exception:
         return None, 0.0
-
-    if not data.get("valido", False):
-        return data, 0.0
 
     score = 0.0
     if data.get("nome"):
@@ -674,20 +623,22 @@ def ocr_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> Tuple[str, f
     if GEMINI_API_KEY:
         try:
             gemini_data, gemini_conf = _ocr_gemini(image_bytes)
-            if gemini_data:
+    if gemini_data:
+                OCR_LAST_PROVIDER = "gemini"
                 return json.dumps(gemini_data, ensure_ascii=False), gemini_conf
         except OCRProviderError as e:
             logger.warning(f"Gemini falhou ({e}), usando fluxo Vision/parser.")
-
     if OCR_PROVIDER == "openai":
+        OCR_LAST_PROVIDER = "openai"
         return _ocr_openai_compatible(image_bytes, mime_type)
-
-       # Google Vision (vê a imagem — melhor fallback para DO escrita à mão)
+    # Padrão: Google Vision
     try:
+        OCR_LAST_PROVIDER = "google_vision"
         return _ocr_google_vision(image_bytes)
     except OCRProviderError as e:
         logger.warning(f"Google Vision falhou ({e}), tentando fallback OpenAI...")
         if OPENAI_API_KEY:
+            OCR_LAST_PROVIDER = "openai"
             return _ocr_openai_compatible(image_bytes, mime_type)
         raise
            
@@ -2551,9 +2502,11 @@ async def diagnose_file(file_id: str, authorization: Optional[str] = Header(None
     validate_obito(structured)
 
     return {
+    global OCR_LAST_PROVIDER
+    return {
         "file_id": file_id,
         "confidence": confidence,
-        "provider": OCR_PROVIDER,
+        "provider": OCR_LAST_PROVIDER,
         "raw_text": raw_text,
         "structured": structured,
         "is_valid_obito": _is_valid_obito(raw_text),
