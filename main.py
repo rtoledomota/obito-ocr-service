@@ -2296,7 +2296,6 @@ def _append_rows_to_sheet(sheet_id: str, rows: List[dict]):
     ).execute()
 def _update_row_in_sheet(sheet_id: str, row_number: int, row: dict):
     """Atualiza uma linha existente (upsert) com os valores do registro."""
-    campos = limpar_campos_extraidos(campos)
     sheets = _get_sheets_service()
     sheet_name = _get_sheet_name()
     values = [[row.get(col, "") for col in AUDIT_COLUMNS]]
