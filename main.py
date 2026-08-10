@@ -569,8 +569,7 @@ def _ocr_gemini(image_bytes: bytes) -> Tuple[Optional[dict], float]:
     "8. A causa da morte e a causa básica devem conter APENAS o diagnóstico, "
     "sem frases como 'Devido ou como consequência de' ou 'Tempo aproximado...'.\n"
     "\nResponda EXCLUSIVAMENTE com um objeto JSON válido, sem texto antes ou depois, "
-    "sem blocos de código, sem cercas de backtick (
-```), sem a palavra 'json'. "
+    "sem blocos de código, sem cercas de crase, sem a palavra 'json'. "
     "Use exatamente estas chaves:\n"
     "{\n"
     "  \"NOME\": \"\",\n"
