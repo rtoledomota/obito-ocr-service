@@ -2392,7 +2392,7 @@ def _process_single_image(file_id: str, file_name: str) -> dict:
             return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_OCR", "ERROS": str(e)}
         if not _is_valid_obito(texto):
     # Novo: verifica se é o verso da DO (com ressalvas)
-    if detectar_verso(texto):
+        if detectar_verso(texto):
         ressalvas = extrair_ressalvas(texto)
         campos["STATUS"] = "VERSO"
         if ressalvas:
