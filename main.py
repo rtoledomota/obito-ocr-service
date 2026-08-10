@@ -682,14 +682,14 @@ ROTULOS_FORMULARIO = [
     "código cnes", "codigo cnes", "cartório", "cartorio", "registro",
     "idade", "nível", "nivel", "série", "serie", "ignorado",
 ]
-
 def _limpar_texto(valor):
-    """Remove rótulos do formulário, backticks e normaliza espaços."""
+    """Remove rotulos do formulario, backticks e normaliza espacos."""
     if not valor or not isinstance(valor, str):
         return ""
     texto = valor.strip()
-    texto = texto.replace("
-```", "").replace("`", "")
+    # Remove backticks usando chr(96) - evita crases literais no codigo
+    crase = chr(96)
+    texto = texto.replace(crase * 3, "").replace(crase, "")
     texto = re.sub(r"^\d+\s+", "", texto)
     texto = re.sub(r"\s+", " ", texto).strip()
     texto_lower = unicodedata.normalize("NFD", texto.lower())
@@ -707,6 +707,7 @@ def _limpar_texto(valor):
         if partes[:meio] == partes[meio:meio*2]:
             texto = " ".join(partes[:meio])
     return texto.strip()
+
 
 def _normalizar_data(valor):
     """Normaliza datas para DD/MM/AAAA, removendo espaços entre dígitos."""
