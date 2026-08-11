@@ -1238,45 +1238,6 @@ def _is_valid_obito(ocr_text: str) -> bool:
     ]
     text_lower = ocr_text.lower()
     return any(k in text_lower for k in keywords)
-# ============================================================
-# DETECÇÃO DE VERSO E VALIDAÇÃO TOLERANTE DE DO
-# ============================================================
-
-MARCAS_VERSO = [
-    "definições", "definicoes", "legislação", "legislacao",
-    "ressalva", "lei 6.015", "capítulo ix", "capitulo ix",
-]
-
-def detectar_verso(texto):
-    """Retorna True se o texto parece ser o verso de uma DO."""
-    if not texto or not isinstance(texto, str):
-        return False
-    t = texto.lower()
-    for marca in MARCAS_VERSO:
-        if marca in t:
-            return True
-    return False
-
-def extrair_ressalvas(texto):
-    """Extrai as ressalvas do verso no formato 'campo: valor'."""
-    if not texto or not isinstance(texto, str):
-        return []
-    import re as _re
-    padrao = _re.findall(
-        r"[Rr]essalva\s+do\s+campo\s+(\d+)\s*:\s*([^\n]+)",
-        texto
-    )
-    return [{"campo": c.strip(), "valor": v.strip()} for c, v in padrao]
-
-def parece_do(texto):
-    """Validacao tolerante: aceita como DO se tiver os campos essenciais."""
-    if not texto or not isinstance(texto, str):
-        return False
-    t = texto.lower()
-    tem_declaracao = "declaração de óbito" in t or "declaracao de obito" in t
-    tem_causas = "causas da morte" in t or "causa da morte" in t
-    tem_medico = "nome do médico" in t or "nome do medico" in t or "crm" in t
-    return tem_declaracao and (tem_causas or tem_medico)
 def parse_obito(raw_text: str) -> Dict[str, Any]:
     """Parser principal: parser original + fallback por label PT + fallback LLM."""
     structured: Dict[str, Any] = {k: "" for k in HEADER}
@@ -2390,22 +2351,8 @@ def _process_single_image(file_id: str, file_name: str) -> dict:
             raw_text, confidence = ocr_image(image_bytes, mime_type)
         except Exception as e:
             return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_OCR", "ERROS": str(e)}
-        if not _is_valid_obito(texto):
-    # Novo: verifica se é o verso da DO (com ressalvas)
-        if detectar_verso(texto):
-        ressalvas = extrair_ressalvas(texto)
-        campos["STATUS"] = "VERSO"
-        if ressalvas:
-            campos["ERROS"] = "VERSO - Ressalvas: " + "; ".join(
-                f"campo {r['campo']}: {r['valor']}" for r in ressalvas
-            )
-        else:
-            campos["ERROS"] = "VERSO (sem ressalvas identificadas)"
-        logger.info("%s: verso de DO detectado, gravando ressalvas", ...)
-        # segue para gravação (não rejeita)
-    else:
-        logger.warning("%s: texto não reconhecido como DO, pulando", ...)
-        # mantém a lógica de rejeição original (REJEITADO)
+        if not _is_valid_obito(raw_text):
+            logger.warning(f"{file_name}: texto não reconhecido como DO, pulando")
             return {
                 "NOME_ARQUIVO": file_name, "STATUS": "REJEITADO",
                 "ERROS": "Imagem não contém uma Declaração de Óbito válida",
