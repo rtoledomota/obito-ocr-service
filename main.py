@@ -2504,7 +2504,7 @@ def stop_monitor():
 
 # ── FastAPI App ─────────────────────────────────────────────────
 
-app = FastAPI(title="obito-ocr-service", version="2.1.0")"2.0.0")
+app = FastAPI(title="obito-ocr-service", version="2.1.0")
 
 @app.get("/health")
 def health():
