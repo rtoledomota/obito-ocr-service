@@ -69,6 +69,32 @@ def _process_single_image(file_id: str, file_name: str) -> dict:
             raw_text, confidence = ocr_image(image_bytes, mime_type)
 
             if not _is_valid_obito(raw_text):
+                # Alteracao 2: detecta verso da DO
+                if detectar_verso(raw_text):
+                    logger.info(f"{file_name}: tentativa {tentativa+1}/3 - verso de DO detectado")
+                    ressalvas = extrair_ressalvas(raw_text)
+                    if ressalvas:
+                        msg = "VERSO - Ressalvas: " + "; ".join(
+                            f"{r['campo']}: {r['valor']}" for r in ressalvas)
+                    else:
+                        msg = "VERSO (sem ressalvas identificadas)"
+                    return {
+                        "NOME_ARQUIVO": file_name,
+                        "STATUS": "VERSO",
+                        "ERROS": msg,
+                    }
+                # Alteracao 3: validacao tolerante
+                if parece_do(raw_text):
+                    logger.info(f"{file_name}: tentativa {tentativa+1}/3 - parece DO, marcada para revisao")
+                    structured = parse_obito(raw_text)
+                    structured["STATUS"] = "REVISAR"
+                    structured["ERROS"] = "Possivel DO, porem validacao rigida falhou - revisar manualmente"
+                    score = int(structured.get("QUALIDADE_SCORE", 0))
+                    if score > melhor_score:
+                        melhor_score = score
+                        melhor_raw_text = raw_text
+                        melhor_structured = structured
+                    continue
                 logger.info(f"{file_name}: tentativa {tentativa+1}/3 - não reconhecida como DO, pulando")
                 continue
 
@@ -1238,6 +1264,37 @@ def _is_valid_obito(ocr_text: str) -> bool:
     ]
     text_lower = ocr_text.lower()
     return any(k in text_lower for k in keywords)
+# ── Alteracoes 2 e 3: deteccao de verso e validacao tolerante ──────────
+MARCAS_VERSO = ('definições', 'definicoes', 'legislação', 'legislacao', 'ressalva', 'lei 6.015', 'capítulo ix', 'capitulo ix')
+
+def detectar_verso(texto) -> bool:
+    """Retorna True se o texto parece ser o verso de uma DO."""
+    if not texto or not isinstance(texto, str):
+        return False
+    t = texto.lower()
+    for marca in MARCAS_VERSO:
+        if marca in t:
+            return True
+    return False
+
+def extrair_ressalvas(texto) -> list:
+    """Extrai as ressalvas do verso no formato campo: valor."""
+    if not texto or not isinstance(texto, str):
+        return []
+    import re
+    padrao = re.findall(r'[Rr]essalva do campo (\d+)\s*:\s*([^\n]+)', texto)
+    return [{"campo": c.strip(), "valor": v.strip()} for c, v in padrao]
+
+def parece_do(texto) -> bool:
+    """Validacao tolerante: aceita como DO se tiver os campos essenciais."""
+    if not texto or not isinstance(texto, str):
+        return False
+    t = texto.lower()
+    tem_declaracao = ('declaração de óbito' in t) or ('declaracao de obito' in t)
+    tem_causas = ('causas da morte' in t) or ('causa da morte' in t)
+    tem_medico = ('nome do médico' in t) or ('nome do medico' in t) or ('crm' in t)
+    return tem_declaracao and (tem_causas or tem_medico)
+
 def parse_obito(raw_text: str) -> Dict[str, Any]:
     """Parser principal: parser original + fallback por label PT + fallback LLM."""
     structured: Dict[str, Any] = {k: "" for k in HEADER}
@@ -2311,6 +2368,7 @@ def _update_row_in_sheet(sheet_id: str, row_number: int, row: dict):
 def _process_single_image(file_id: str, file_name: str) -> dict:
     """Pipeline completo: baixar → OCR → parse → validar."""
     logger.info(f"Processando: {file_name} ({file_id})")
+    forcar_revisar = False
     try:
         image_bytes, mime_type = _download_image_bytes(file_id)
     except Exception as e:
@@ -2352,11 +2410,30 @@ def _process_single_image(file_id: str, file_name: str) -> dict:
         except Exception as e:
             return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_OCR", "ERROS": str(e)}
         if not _is_valid_obito(raw_text):
-            logger.warning(f"{file_name}: texto não reconhecido como DO, pulando")
-            return {
-                "NOME_ARQUIVO": file_name, "STATUS": "REJEITADO",
-                "ERROS": "Imagem não contém uma Declaração de Óbito válida",
-            }
+            # Alteracao 2: detecta verso da DO
+            if detectar_verso(raw_text):
+                logger.info(f"{file_name}: verso de DO detectado")
+                ressalvas = extrair_ressalvas(raw_text)
+                if ressalvas:
+                    msg = "VERSO - Ressalvas: " + "; ".join(
+                        f"{r['campo']}: {r['valor']}" for r in ressalvas)
+                else:
+                    msg = "VERSO (sem ressalvas identificadas)"
+                return {
+                    "NOME_ARQUIVO": file_name,
+                    "STATUS": "VERSO",
+                    "ERROS": msg,
+                }
+            # Alteracao 3: validacao tolerante
+            if parece_do(raw_text):
+                logger.info(f"{file_name}: parece DO, marcada para revisao")
+                forcar_revisar = True
+            else:
+                logger.warning(f"{file_name}: texto não reconhecido como DO, pulando")
+                return {
+                    "NOME_ARQUIVO": file_name, "STATUS": "REJEITADO",
+                    "ERROS": "Imagem não contém uma Declaração de Óbito válida",
+                }
         try:
             structured = parse_obito(raw_text)
         except Exception as e:
@@ -2366,6 +2443,9 @@ def _process_single_image(file_id: str, file_name: str) -> dict:
     structured["HASH_ARQUIVO"] = _sha256_bytes(image_bytes)
     structured["HASH_CONTEUDO"] = _sha256_text(raw_text)
     validate_obito(structured)
+    if forcar_revisar:
+        structured["STATUS"] = "REVISAR"
+        structured["ERROS"] = "Possivel DO, porem validacao rigida falhou - revisar manualmente"
 
     return {
         "DATA_PROCESSAMENTO": datetime.utcnow().strftime("%d/%m/%Y %H:%M:%S"),
@@ -2504,7 +2584,7 @@ def stop_monitor():
 
 # ── FastAPI App ─────────────────────────────────────────────────
 
-app = FastAPI(title="obito-ocr-service", version="2.1.0")
+app = FastAPI(title="obito-ocr-service", version="2.0.0")
 
 @app.get("/health")
 def health():
