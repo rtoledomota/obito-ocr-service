@@ -765,6 +765,41 @@ def _normalizar_hora(valor):
         return ""
     return f"{hora:02d}:{minuto:02d}"
 
+def _limpeza_avancada(campos):
+    """Remove rotulos de campo, limpa CRM e evita limpar demais."""
+    import re
+    ROTULOS = [
+        'nome do(a):', 'nome do pai:', 'nome da mae:', 'nome da mãe:',
+        'data de nascimento', 'data do obito', 'data do óbito',
+        'causa basica:', 'causa básica:', 'causas da morte:',
+        'devido (ou como consequência de):', 'devido (ou como consequencia de):',
+        'medico assistente', 'médico assistente', 'medico:', 'médico:',
+        'crm:', 'codigo:', 'código:', 'uf:', 'municipio:', 'município:',
+        'assinatura', 'telefone', 'meio de contato', 'nome do médico:', 'nome do medico:',
+    ]
+    for k in campos:
+        v = campos.get(k, "")
+        if not v or not isinstance(v, str):
+            continue
+        v = v.strip()
+        # remove numero de campo inicial (ex: '8 Data de nascimento')
+        v = re.sub(r'^\s*\d+\s+', '', v)
+        vl = v.lower()
+        for lab in ROTULOS:
+            if vl.startswith(lab):
+                v = v[len(lab):].strip(' :')
+                vl = v.lower()
+                break
+        # CRM: remove 'assinatura' e ruido, mantem digitos
+        if k == 'CRM_MEDICO':
+            v = re.sub(r'(?i)assinatura', '', v).strip()
+            v = re.sub(r'[^\d]', '', v)
+        # medico atestante que e rotulo vira vazio
+        if k == 'MEDICO_ATESTANTE' and vl in ('medico', 'médico', 'medico assistente', 'médico assistente', 'dr', 'dra'):
+            v = ''
+        campos[k] = v
+    return campos
+
 def limpar_campos_extraidos(campos):
     """Aplica limpeza em todos os campos extraídos antes de gravar na planilha."""
     campos_limpos = dict(campos)
@@ -2440,6 +2475,7 @@ def _process_single_image(file_id: str, file_name: str) -> dict:
             structured = {k: "" for k in HEADER}
             structured["ERROS"] = f"Erro no parser: {e}"
 
+    structured = limpar_campos_extraidos(_limpeza_avancada(structured))
     structured["HASH_ARQUIVO"] = _sha256_bytes(image_bytes)
     structured["HASH_CONTEUDO"] = _sha256_text(raw_text)
     validate_obito(structured)
