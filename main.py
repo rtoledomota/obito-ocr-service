@@ -567,6 +567,17 @@ def _ocr_gemini(image_bytes: bytes) -> Tuple[Optional[dict], float]:
     if not GEMINI_API_KEY:
         return None, 0.0
 
+    # Alteracao 5: redimensiona a imagem antes de enviar ao Gemini
+    try:
+        from PIL import Image
+        import io as _io
+        _img = Image.open(_io.BytesIO(image_bytes))
+        _img.thumbnail((1568, 1568))
+        _buf = _io.BytesIO()
+        _img.convert("RGB").save(_buf, format="JPEG", quality=85)
+        image_bytes = _buf.getvalue()
+    except Exception:
+        pass
     img_b64 = base64.b64encode(image_bytes).decode("utf-8")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
 
