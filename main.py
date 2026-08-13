@@ -25,7 +25,7 @@ Variáveis opcionais:
 
 """
 
-import os, re, io, json, base64, hashlib, unicodedata, gc
+import os, re, io, json, base64, hashlib, unicodedata, gc, time
 import datetime as dt
 from datetime import datetime, timedelta
 from threading import Thread, Event, Lock
@@ -643,7 +643,11 @@ def _ocr_gemini(image_bytes: bytes) -> Tuple[Optional[dict], float]:
     }
 
     try:
-        resp = requests.post(url, json=payload, timeout=120)
+        _t0 = time.time()
+        resp = requests.post(url, json=payload, timeout=60)
+        _dt = time.time() - _t0
+        logging.info("Gemini HTTP %s em %.1fs | payload=%dKB | modelo=%s",
+                      resp.status_code, _dt, len(img_b64)//1024, GEMINI_MODEL)
         result = resp.json()
     except requests.RequestException as e:
         raise OCRProviderError(f"Falha de comunicação com Gemini API: {e}", 502)
@@ -661,18 +665,17 @@ def _ocr_gemini(image_bytes: bytes) -> Tuple[Optional[dict], float]:
             text = re.sub(r"^```(?:json)?\s*", "", text)
             text = re.sub(r"\s*```$", "", text)
         data = json.loads(text)
-    except Exception:
-        return None, 0.0
-        data = json.loads(text)
-    except Exception:
+        logging.info("Gemini JSON OK: %d chars | chaves=%s", len(text), list(data.keys())[:6])
+    except Exception as _e:
+        logging.warning("Gemini JSON invalido: %s | resp[:400]=%s", _e, str(result)[:400])
         return None, 0.0
 
     score = 0.0
-    if data.get("nome"):
+    if data.get("NOME") or data.get("nome"):
         score += 0.4
-    if data.get("nascimento"):
+    if data.get("NASCIMENTO") or data.get("nascimento"):
         score += 0.3
-    if data.get("data_obito"):
+    if data.get("DATA_OBITO") or data.get("data_obito"):
         score += 0.3
     return data, score
 # ============================================================
