@@ -562,7 +562,7 @@ def _ocr_openai_compatible(image_bytes: bytes, mime_type: str) -> Tuple[str, flo
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = "gemini-3.5-flash"
 
-def _ocr_gemini(image_bytes: bytes) -> Tuple[Optional[dict], float]:
+def _ocr_gemini(image_bytes: bytes, _retry: int = 0) -> Tuple[Optional[dict], float]:
     """Extrai os campos da DO direto da imagem usando Gemini (multimodal)."""
     if not GEMINI_API_KEY:
         return None, 0.0
@@ -667,7 +667,10 @@ def _ocr_gemini(image_bytes: bytes) -> Tuple[Optional[dict], float]:
         data = json.loads(text)
         logging.info("Gemini JSON OK: %d chars | chaves=%s", len(text), list(data.keys())[:6])
     except Exception as _e:
-        logging.warning("Gemini JSON invalido: %s | resp[:400]=%s", _e, str(result)[:400])
+        if _retry < 1:
+            logging.warning("Gemini JSON invalido (%s). Tentando novamente...", _e)
+            return _ocr_gemini(image_bytes, _retry=_retry + 1)
+        logging.warning("Gemini JSON invalido apos retry: %s | resp[:400]=%s", _e, str(result)[:400])
         return None, 0.0
 
     score = 0.0
