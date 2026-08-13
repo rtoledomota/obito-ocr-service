@@ -2428,27 +2428,38 @@ def _process_single_image(file_id: str, file_name: str) -> dict:
     if GEMINI_API_KEY:
         try:
             gemini_data, gemini_conf = _ocr_gemini(image_bytes)
-            if gemini_data and gemini_data.get("valido"):
-                structured = {
-                    "NOME": gemini_data.get("nome", ""),
-                    "NOME_MAE": gemini_data.get("nome_mae", ""),
-                    "NASCIMENTO": gemini_data.get("nascimento", ""),
-                    "IDADE_ANOS": gemini_data.get("idade_anos") or "",
-                    "DATA_OBITO": gemini_data.get("data_obito", ""),
-                    "HORA_OBITO": gemini_data.get("hora_obito", ""),
-                    "CIDADE_OBITO": gemini_data.get("cidade_obito", ""),
-                    "UF_OBITO": gemini_data.get("uf_obito", ""),
-                    "CAUSA_MORTE": gemini_data.get("causa_morte", ""),
-                    "CAUSA_BASICA": gemini_data.get("causa_basica", ""),
-                    "CID_BASICA": gemini_data.get("cid_basica", ""),
-                    "TIPO_OBITO": gemini_data.get("tipo_obito", ""),
-                    "DO_NUMERO": gemini_data.get("do_numero", ""),
-                    "MEDICO_ATESTANTE": gemini_data.get("medico_atestante", ""),
-                    "CRM_MEDICO": gemini_data.get("crm_medico", ""),
-                    "PARTE_II": gemini_data.get("parte_ii", ""),
-                    "INTERVALO_DOENCA_MORTE": gemini_data.get("intervalo_doenca_morte", ""),
+            if gemini_data:
+                _MAP = {
+                    "NOME": ("NOME", "nome"),
+                    "NOME_MAE": ("NOME_MAE", "nome_mae"),
+                    "NASCIMENTO": ("NASCIMENTO", "nascimento"),
+                    "IDADE_ANOS": ("IDADE_ANOS", "idade_anos"),
+                    "DATA_OBITO": ("DATA_OBITO", "data_obito"),
+                    "HORA_OBITO": ("HORA_OBITO", "hora_obito"),
+                    "CIDADE_OBITO": ("CIDADE_OBITO", "cidade_obito"),
+                    "UF_OBITO": ("UF_OBITO", "uf_obito"),
+                    "CAUSA_MORTE": ("CAUSA_MORTE", "causa_morte"),
+                    "CAUSA_BASICA": ("CAUSA_BASICA", "causa_basica"),
+                    "CID_BASICA": ("CID_BASICA", "cid_basica"),
+                    "TIPO_OBITO": ("TIPO_OBITO", "tipo_obito"),
+                    "DO_NUMERO": ("DO_NUMERO", "do_numero"),
+                    "MEDICO_ATESTANTE": ("MEDICO_ATESTANTE", "medico_atestante"),
+                    "CRM_MEDICO": ("CRM_MEDICO", "crm_medico"),
+                    "PARTE_II": ("PARTE_II", "parte_ii"),
+                    "INTERVALO_DOENCA_MORTE": ("INTERVALO_DOENCA_MORTE", "intervalo_doenca_morte"),
                 }
-                logger.info(f"{file_name}: Gemini extraiu {sum(1 for v in structured.values() if v)} campos.")
+                structured = {}
+                for _out, _keys in _MAP.items():
+                    _val = ""
+                    for _k in _keys:
+                        if gemini_data.get(_k):
+                            _val = gemini_data.get(_k)
+                            break
+                    structured[_out] = _val
+                if not any(structured.values()):
+                    structured = None
+                else:
+                    logger.info(f"{file_name}: Gemini extraiu {sum(1 for v in structured.values() if v)} campos.")
         except OCRProviderError as e:
             logger.warning(f"Gemini falhou ({e}), usando fluxo Vision/parser.")
 
