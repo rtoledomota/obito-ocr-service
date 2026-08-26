@@ -709,8 +709,6 @@ def validate_obito(structured: dict) -> None:
 # ── Processamento individual (com dedup) ─────────────────────────
 
 def _process_single_image(file_id, file_name, existing):
-    if file_name in existing["names"]:
-
     logger.info(f"Processando: {file_name} ({file_id})")
     try:
         image_bytes, mime_type = _download_image_bytes(file_id)
