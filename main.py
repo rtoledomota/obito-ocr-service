@@ -788,3 +788,76 @@ def batch_process(request: BatchRequest):
 @app.post("/batch/reprocess")
 def batch_reprocess(limit: int = 10):
     return _run_batch(limit=limit, reprocess=True)
+# ── Admin: dedupe da aba Auditoria ──────────────────────────────
+def _dedupe_auditoria(sheet_id: str = SHEET_ID) -> dict:
+    """Remove duplicatas da aba Auditoria mantendo o melhor registro por HASH_ARQUIVO.
+    Regras:
+      - Linhas com HASH: mantém a de maior QUALIDADE_SCORE (desempate: STATUS=OK, depois mais recente).
+      - Linhas sem HASH (REJEITADO/ERRO): mantém a última ocorrência por NOME_ARQUIVO.
+    Grava o resultado na aba nova 'Auditoria_LIMPA' (não altera a original).
+    """
+    sheets = _get_sheets_service()
+    result = sheets.spreadsheets().values().get(
+        spreadsheetId=sheet_id, range="Auditoria!A1:W1579"
+    ).execute()
+    rows = result.get("values", [])
+    if not rows:
+        return {"success": False, "message": "Aba Auditoria vazia"}
+    header = rows[0]
+    data = rows[1:]
+
+    def _num(v):
+        try:
+            return float(v)
+        except Exception:
+            return -1.0
+
+    def _key(r):
+        return (_num(r[3]), 1 if (r[2] or "").strip() == "OK" else 0, r[0] or "")
+
+    best = {}        # hash -> melhor linha
+    rejected = {}    # nome_arquivo -> última linha sem hash
+    for r in data:
+        r = r + [""] * (len(header) - len(r))
+        h = (r[22] or "").strip()       # HASH_ARQUIVO (W)
+        fname = (r[1] or "").strip()    # NOME_ARQUIVO (B)
+        if not h:
+            if fname:
+                rejected[fname] = r
+            continue
+        if h not in best or _key(r) > _key(best[h]):
+            best[h] = r
+
+    final = list(best.values()) + list(rejected.values())
+
+    info = sheets.spreadsheets().get(spreadsheetId=sheet_id, fields="sheets.properties.title").execute()
+    titles = [s["properties"]["title"] for s in info.get("sheets", [])]
+    if "Auditoria_LIMPA" not in titles:
+        sheets.spreadsheets().batchUpdate(
+            spreadsheetId=sheet_id,
+            body={"requests": [{"addSheet": {"properties": {"title": "Auditoria_LIMPA"}}}]}
+        ).execute()
+
+    sheets.spreadsheets().values().update(
+        spreadsheetId=sheet_id, range="Auditoria_LIMPA!A1",
+        valueInputOption="USER_ENTERED",
+        body={"values": [header] + final}
+    ).execute()
+
+    return {
+        "success": True,
+        "linhas_originais": len(data),
+        "linhas_unicas": len(final),
+        "removidas": len(data) - len(final),
+        "aba": "Auditoria_LIMPA",
+        "observacao": "Revise a aba Auditoria_LIMPA. Se estiver ok, posso substituir a Auditoria pela versao limpa.",
+    }
+
+@app.post("/admin/dedupe")
+def admin_dedupe():
+    """Remove duplicatas da aba Auditoria e grava em Auditoria_LIMPA."""
+    try:
+        return _dedupe_auditoria()
+    except Exception as e:
+        logger.error(f"Erro no dedupe: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
