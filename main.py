@@ -11,22 +11,50 @@ from pydantic import BaseModel
 logger = logging.getLogger("uvicorn")
 logger.setLevel(logging.INFO)
 
+# ── Service account: suporta JSON inline via env var ─────────────
+_SERVICE_ACCOUNT_JSON_ENV = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+if _SERVICE_ACCOUNT_JSON_ENV and _SERVICE_ACCOUNT_JSON_ENV.strip().startswith("{"):
+    _sa_path = "/tmp/service-account.json"
+    with open(_sa_path, "w") as f:
+        f.write(_SERVICE_ACCOUNT_JSON_ENV)
+    os.environ["SERVICE_ACCOUNT_FILE"] = _sa_path
+    logger.info("Service account criada a partir de GOOGLE_SERVICE_ACCOUNT_JSON.")
+
+def _find_service_account():
+    candidates = [
+        os.getenv("SERVICE_ACCOUNT_FILE", ""),
+        os.getenv("GOOGLE_APPLICATION_CREDENTIALS", ""),
+        "./service-account.json",
+        "./src/service-account.json",
+        "/opt/render/project/src/service-account.json",
+        "/opt/render/project/service-account.json",
+        "/etc/secrets/service-account.json",
+    ]
+    for cand in candidates:
+        if not cand or cand.startswith("AIza"):
+            continue  # ignora API key usada como valor da env var
+        if os.path.exists(cand):
+            return cand
+    return "./service-account.json"
+
+SERVICE_ACCOUNT_FILE = _find_service_account()
+
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 SHEET_ID = os.getenv("SHEET_ID", "1ETms0jR61Idqxbfr0nBdTXJGOHeGWFBomQGIZHPUJTM")
 DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID", "1iwc59VnBEhjuYtW-OoOYg-UKioQ81ZfN")
-SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "./service-account.json")
 
 # Chaves Vision: tenta em ordem ate uma funcionar
 VISION_KEYS = [k for k in [
     os.getenv("GOOGLE_VISION_API_KEY", ""),
+    os.getenv("VISION_KEY", ""),
     "AIzaSyCKXbsF8UNL0WSoE4FAh4yVXJ1f9Y2tiSU",   # chave da aba Config
     "AIzaSyB-45eklgCjDOI9XXTqNRFkZtQmCOywgYM",   # chave antiga hardcoded
 ] if k]
 
-# HEADER REAL da aba Auditoria (A-W) - manter identico a planilha
+# HEADER REAL da aba Auditoria (A-W)
 HEADER = [
     "DATA_PROCESSAMENTO", "NOME_ARQUIVO", "STATUS", "QUALIDADE_SCORE",
     "NOME", "NOME_MAE", "NASCIMENTO", "IDADE_ANOS", "DATA_OBITO", "HORA_OBITO",
@@ -35,7 +63,6 @@ HEADER = [
     "PARTE_II", "INTERVALO_DOENCA_MORTE", "ERROS", "HASH_ARQUIVO",
 ]
 
-# Frases do formulario que nunca devem virar valor de campo
 FORM_JUNK = [
     "nome do falecido", "data de nascimento", "data do óbito", "data do obito",
     "endereço do local do acidente", "descrição sumária do evento",
@@ -55,7 +82,6 @@ FORM_JUNK = [
     "meio de contato", "morte em relação", "óbito de mulher",
 ]
 
-# Correcoes de OCR para cidades (hospital e em Sao Caetano do Sul)
 CITY_OCR_FIX = {
     "são cantando do sul": "São Caetano do Sul",
     "são cenário do sul": "São Caetano do Sul",
@@ -257,7 +283,6 @@ def _clean_field(value: str) -> str:
     return v.strip()
 
 def _collapse_repeats(text: str) -> str:
-    """Colapsa repeticoes tipo 'ANTONIO SOLON GERMANO ANTONIO SOLON GERMANO'."""
     prev = None
     while prev != text:
         prev = text
@@ -458,7 +483,6 @@ def _find_name_fallback(text: str) -> str:
     return _sanitize_person_name(best)
 
 def _parsed_do_form(lines: list) -> dict:
-    """Fallback: parse por numeracao de campos (1-7)."""
     field_map = {1: "TIPO_OBITO", 2: "DATA_HORA_OBITO", 3: "CARTAO_SUS",
                  4: "NATURALIDADE", 5: "NOME", 6: "NOME_PAI", 7: "NOME_MAE"}
     field_values = {}
@@ -573,7 +597,6 @@ def _parse_parte_i(text: str) -> dict:
 def parse_obito(text: str) -> dict:
     structured = {k: "" for k in HEADER}
 
-    # NOME: label -> numerado -> fallback heuristico
     nome = _sanitize_person_name(_find_block_value(text, [
         "Nome do Falecido", "Nome do falecido", "Falecido", "Nome",
     ], stop_labels=["Nome do Pai", "Nome da Mãe", "Nome do pai", "Nome da mãe"]))
@@ -770,32 +793,11 @@ def _run_batch(limit: int, reprocess: bool = False) -> dict:
         logger.error(f"Erro no batch: {e}", exc_info=True)
         return {"success": False, "error": str(e), "message": "Erro interno"}
 
-# ── FastAPI App ──────────────────────────────────────────────────
+# ── Dedupe da aba Auditoria ──────────────────────────────────────
 
-app = FastAPI(title="Obito OCR Service", version="3.0")
-
-class BatchRequest(BaseModel):
-    limit: int = 10
-
-@app.get("/")
-def root():
-    return {"status": "running", "service": "Obito OCR Service", "version": "3.0"}
-
-@app.post("/batch/process")
-def batch_process(request: BatchRequest):
-    return _run_batch(limit=request.limit, reprocess=False)
-
-@app.post("/batch/reprocess")
-def batch_reprocess(limit: int = 10):
-    return _run_batch(limit=limit, reprocess=True)
-# ── Admin: dedupe da aba Auditoria ──────────────────────────────
 def _dedupe_auditoria(sheet_id: str = SHEET_ID) -> dict:
-    """Remove duplicatas da aba Auditoria mantendo o melhor registro por HASH_ARQUIVO.
-    Regras:
-      - Linhas com HASH: mantém a de maior QUALIDADE_SCORE (desempate: STATUS=OK, depois mais recente).
-      - Linhas sem HASH (REJEITADO/ERRO): mantém a última ocorrência por NOME_ARQUIVO.
-    Grava o resultado na aba nova 'Auditoria_LIMPA' (não altera a original).
-    """
+    """Remove duplicatas mantendo o melhor registro por HASH_ARQUIVO.
+    Grava em aba nova 'Auditoria_LIMPA' (nao altera a original)."""
     sheets = _get_sheets_service()
     result = sheets.spreadsheets().values().get(
         spreadsheetId=sheet_id, range="Auditoria!A1:W1579"
@@ -815,12 +817,12 @@ def _dedupe_auditoria(sheet_id: str = SHEET_ID) -> dict:
     def _key(r):
         return (_num(r[3]), 1 if (r[2] or "").strip() == "OK" else 0, r[0] or "")
 
-    best = {}        # hash -> melhor linha
-    rejected = {}    # nome_arquivo -> última linha sem hash
+    best = {}
+    rejected = {}
     for r in data:
         r = r + [""] * (len(header) - len(r))
-        h = (r[22] or "").strip()       # HASH_ARQUIVO (W)
-        fname = (r[1] or "").strip()    # NOME_ARQUIVO (B)
+        h = (r[22] or "").strip()
+        fname = (r[1] or "").strip()
         if not h:
             if fname:
                 rejected[fname] = r
@@ -852,6 +854,25 @@ def _dedupe_auditoria(sheet_id: str = SHEET_ID) -> dict:
         "aba": "Auditoria_LIMPA",
         "observacao": "Revise a aba Auditoria_LIMPA. Se estiver ok, posso substituir a Auditoria pela versao limpa.",
     }
+
+# ── FastAPI App ──────────────────────────────────────────────────
+
+app = FastAPI(title="Obito OCR Service", version="3.1")
+
+class BatchRequest(BaseModel):
+    limit: int = 10
+
+@app.get("/")
+def root():
+    return {"status": "running", "service": "Obito OCR Service", "version": "3.1"}
+
+@app.post("/batch/process")
+def batch_process(request: BatchRequest):
+    return _run_batch(limit=request.limit, reprocess=False)
+
+@app.post("/batch/reprocess")
+def batch_reprocess(limit: int = 10):
+    return _run_batch(limit=limit, reprocess=True)
 
 @app.post("/admin/dedupe")
 def admin_dedupe():
