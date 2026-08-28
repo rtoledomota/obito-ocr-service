@@ -263,7 +263,7 @@ def _ocr_image_from_bytes(image_bytes, mime_type="image/jpeg"):
     except Exception as e:
         logger.error(f"[OCR GEMINI] erro: {e}")
         return "", 0.0
-Validacao / limpeza ──────────────────────────────────────────
+# Validacao / limpeza
 
 def _is_valid_obito(ocr_text: str) -> bool:
     if not ocr_text or len(ocr_text.strip()) < 50:
