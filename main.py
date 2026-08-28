@@ -229,35 +229,41 @@ def _sha256_text(text: str) -> str:
 
 def _ocr_image_from_bytes(image_bytes, mime_type="image/jpeg"):
     img_b64 = base64.b64encode(image_bytes).decode("utf-8")
-    last_err = ""
-    for key in VISION_KEYS:
-        try:
-            url = f"https://vision.googleapis.com/v1/images:annotate?key={key}"
-            payload = {"requests": [{
-                "image": {"content": img_b64},
-                "features": [{"type": "DOCUMENT_TEXT_DETECTION"}],
-            }]}
-            resp = requests.post(url, json=payload, timeout=60)
-            if resp.status_code != 200:
-                err = resp.json().get("error", {}).get("message", "")
-                last_err = f"HTTP {resp.status_code}: {err}"
-                logger.warning(f"[OCR] chave {key[:10]}... falhou: {last_err}")
-                continue
-            result = resp.json()
-            annotations = result.get("responses", [{}])[0].get("textAnnotations", [])
-            if not annotations:
-                logger.warning("[OCR] Nenhum texto encontrado na imagem.")
-                return "", 0.0
-            full_text = annotations[0].get("description", "")
-            logger.info(f"[OCR VISION] chave {key[:10]}... OK - texto: {len(full_text)} chars")
-            return full_text, 1.0
-        except Exception as e:
-            last_err = str(e)
-            logger.warning(f"[OCR] erro com chave {key[:10]}...: {e}")
-    logger.error(f"[OCR] todas as chaves falharam: {last_err}")
-    return "", 0.0
-
-# ── Validacao / limpeza ──────────────────────────────────────────
+    gemini_key = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
+    if not gemini_key:
+        logger.error("[OCR] GEMINI_API_KEY nao configurada")
+        return "", 0.0
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+    prompt = (
+        "Transcreva TODO o texto visivel desta Declaracao de Obito, "
+        "incluindo os valores preenchidos a mao (nome, data de nascimento, "
+        "data do obito, municipio, UF, causa da morte, etc.). "
+        "Preserve os rotulos e a ordem do formulario. Nao resuma, transcreva tudo."
+    )
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": mime_type, "data": img_b64}},
+            ]
+        }],
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048},
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=90)
+        if resp.status_code != 200:
+            err = resp.json().get("error", {}).get("message", "")
+            logger.error(f"[OCR GEMINI] HTTP {resp.status_code}: {err}")
+            return "", 0.0
+        data = resp.json()
+        parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+        text = "".join(p.get("text", "") for p in parts).strip()
+        logger.info(f"[OCR GEMINI] OK - texto: {len(text)} chars")
+        return text, 1.0
+    except Exception as e:
+        logger.error(f"[OCR GEMINI] erro: {e}")
+        return "", 0.0
+Validacao / limpeza ──────────────────────────────────────────
 
 def _is_valid_obito(ocr_text: str) -> bool:
     if not ocr_text or len(ocr_text.strip()) < 50:
