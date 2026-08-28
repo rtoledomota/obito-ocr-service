@@ -646,23 +646,20 @@ def parse_obito(text: str) -> dict:
             if structured["NASCIMENTO"]:
                 break
 
-    _raw_data_obito = _find_block_value(text, [
-        "Data do óbito", "Data de óbito", "Data do obito", "Data de obito",
-    ], stop_labels=["Hora", "Local do óbito", "Local do obito",
-                    "Município de ocorrência", "Municipio de ocorrencia"])
-    if not _raw_data_obito:
-        for label in ["Data do óbito", "Data de óbito", "Data do obito", "Data de obito"]:
-            for line in text.split('\n'):
-                if label.lower() in line.lower():
-                    resto = line[line.lower().index(label.lower()) + len(label):].strip()
-                    if resto:
-                        _raw_data_obito = resto
-                        break
-            if _raw_data_obito:
+        _raw_data_obito = ""
+    for label in ["Data do Ã³bito", "Data de Ã³bito", "Data do obito", "Data de obito"]:
+        for line in text.split('\n'):
+            if label.lower() in line.lower():
+                resto = line[line.lower().index(label.lower()) + len(label):].strip()
+                m = re.search(r'(\d{1,2})[/\s](\d{1,2})[/\s](\d{2,4})', resto)
+                if m:
+                    _raw_data_obito = f"{m.group(1)} {m.group(2)} {m.group(3)}"
+                hm = re.search(r'(\d{1,2}):(\d{2})', resto)
+                if hm:
+                    structured["HORA_OBITO"] = _normalize_hora(f"{hm.group(1)}:{hm.group(2)}")
                 break
-    if _raw_data_obito:
-        structured["HORA_OBITO"] = _normalize_hora(_raw_data_obito)
-        _raw_data_obito = re.sub(r'\d{1,2}:\d{2}.*$', '', _raw_data_obito).strip()
+        if _raw_data_obito:
+            break
     structured["DATA_OBITO"] = _normalize_date(_normalize_date_ocr(_raw_data_obito))
 
     _raw_hora = _find_block_value(text, [
