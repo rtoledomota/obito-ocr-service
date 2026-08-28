@@ -235,10 +235,10 @@ def _ocr_image_from_bytes(image_bytes, mime_type="image/jpeg"):
         return "", 0.0
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={gemini_key}"
     prompt = (
-        "Transcreva TODO o texto visivel desta Declaracao de Obito, "
-        "incluindo os valores preenchidos a mao (nome, data de nascimento, "
-        "data do obito, municipio, UF, causa da morte, etc.). "
-        "Preserve os rotulos e a ordem do formulario. Nao resuma, transcreva tudo."
+        "Copie TODO o texto desta Declaracao de Obito EXATAMENTE como aparece, "
+        "sem resumir, sem bullets, sem markdown, sem marcar campos como [Blank]. "
+        "Transcreva cada rotulo e cada valor preenchido a mao, na ordem em que aparecem. "
+        "NAO omita nenhuma linha. Inclua nome do falecido, data de nascimento, data do obito, municipio, UF e todas as causas da morte. Responda apenas com o texto transcrito, sem comentarios."
     )
     payload = {
         "contents": [{
@@ -247,7 +247,7 @@ def _ocr_image_from_bytes(image_bytes, mime_type="image/jpeg"):
                 {"inline_data": {"mime_type": mime_type, "data": img_b64}},
             ]
         }],
-        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048},
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 4096},
     }
     try:
         resp = requests.post(url, json=payload, timeout=90)
