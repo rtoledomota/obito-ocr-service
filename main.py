@@ -647,7 +647,7 @@ def parse_obito(text: str) -> dict:
                 break
 
         _raw_data_obito = ""
-    for label in ["Data do Ã³bito", "Data de Ã³bito", "Data do obito", "Data de obito"]:
+    for label in ["Data do óbito", "Data de óbito", "Data do obito", "Data de obito"]:
         for line in text.split('\n'):
             if label.lower() in line.lower():
                 resto = line[line.lower().index(label.lower()) + len(label):].strip()
