@@ -233,7 +233,7 @@ def _ocr_image_from_bytes(image_bytes, mime_type="image/jpeg"):
     if not gemini_key:
         logger.error("[OCR] GEMINI_API_KEY nao configurada")
         return "", 0.0
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={gemini_key}"
     prompt = (
         "Transcreva TODO o texto visivel desta Declaracao de Obito, "
         "incluindo os valores preenchidos a mao (nome, data de nascimento, "
