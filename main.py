@@ -311,6 +311,13 @@ def _clean_causa(value: str) -> str:
     if not value:
         return ""
     v = str(value).strip()
+    v = re.sub(r'^\(?(?:a\s+)?\w+?\s+ou\s+estado\s+\w+?\s+que\s+causou\s+diretamente\s+a(?:\s+\w+)?\)?[: ]*', '', v, flags=re.IGNORECASE)
+    v = re.sub(r'^[\u2022\u00b7\-\*]\s*', '', v).strip()
+    v = re.sub(r'^99\s*ignorado(\s*99\s*ignorado)?', '', v, flags=re.IGNORECASE).strip()
+    v = re.sub(r'^(?:causa\s+imediata|imediata)\s*[: ]*', '', v, flags=re.IGNORECASE).strip()
+    v = re.sub(r'^a\s+(?=[A-Z\u00c0-\u00da])', '', v).strip()
+    v = re.sub(r'^(?:parte\s+[iv]+)\s*[: ]*', '', v, flags=re.IGNORECASE).strip()
+
     v = re.sub(r'^\(?a doença ou estado mórbido que causou diretamente a morte\)?[: ]*',
                '', v, flags=re.IGNORECASE)
     v = re.sub(r'^(seqüência|sequencia) de causas[^:]*[: ]*', '', v, flags=re.IGNORECASE)
