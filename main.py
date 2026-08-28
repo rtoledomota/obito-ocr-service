@@ -617,6 +617,21 @@ def parse_obito(text: str) -> dict:
         "Data de nascimento", "Data de Nascimento", "Nascimento", "Nasc.",
     ], stop_labels=["Data do óbito", "Data do obito", "Idade"])
     structured["NASCIMENTO"] = _normalize_date(_normalize_date_ocr(_raw_nasc))
+    if not structured["NASCIMENTO"]:
+        _lines_t = text.split("\n")
+        for i, line in enumerate(_lines_t):
+            if "data de nascimento" in line.lower():
+                for j in range(i, min(i + 4, len(_lines_t))):
+                    cand = _lines_t[j].replace(" ", "")
+                    for d in re.findall(r"\d{2}/\d{2}/\d{4}", cand):
+                        parsed = _normalize_date(d)
+                        if parsed:
+                            structured["NASCIMENTO"] = parsed
+                            break
+                    if structured["NASCIMENTO"]:
+                        break
+            if structured["NASCIMENTO"]:
+                break
 
     _raw_data_obito = _find_block_value(text, [
         "Data do óbito", "Data de óbito", "Data do obito", "Data de obito",
