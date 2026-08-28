@@ -235,7 +235,7 @@ def _ocr_image_from_bytes(image_bytes, mime_type="image/jpeg"):
             url = f"https://vision.googleapis.com/v1/images:annotate?key={key}"
             payload = {"requests": [{
                 "image": {"content": img_b64},
-                "features": [{"type": "TEXT_DETECTION"}],
+                "features": [{"type": "DOCUMENT_TEXT_DETECTION"}],
             }]}
             resp = requests.post(url, json=payload, timeout=60)
             if resp.status_code != 200:
