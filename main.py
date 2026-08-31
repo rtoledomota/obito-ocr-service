@@ -280,6 +280,8 @@ def _is_valid_obito(ocr_text: str) -> bool:
     if not ocr_text or len(ocr_text.strip()) < 50:
         return False
     t = ocr_text.lower()
+    if ("definiÃ§Ãµes" in t or "definicoes" in t) and ("cid-10" in t or "nascimento vivo" in t):
+        return False
     strong = ["declaração de óbito", "declaracao de obito", "atestado de óbito",
               "nome do falecido", "causas da morte", "tipo de óbito",
               "tipo de obito", "parte i", "parte ii"]
@@ -351,7 +353,9 @@ def _clean_causa(value: str) -> str:
 def _normalize_date_ocr(raw: str) -> str:
     if not raw or not raw.strip():
         return ""
-    raw = raw.strip().replace(" ", "/").replace("-", "/").replace(".", "/")
+    raw = raw.strip()
+    raw = re.sub(r"\s+", "", raw)
+    raw = raw.replace(",", "/").replace("-", "/").replace(".", "/")
     partes = [p for p in raw.split("/") if p.strip()]
     if len(partes) != 3:
         nums = re.findall(r"\d+", raw)
