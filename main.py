@@ -797,7 +797,7 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
                 try:
                     sheets = _get_sheets_service()
                     res = sheets.spreadsheets().values().get(
-                        spreadsheetId=SHEET_ID, range="Auditoria!B1:D1579"
+                        spreadsheetId=SHEET_ID, range="Auditoria!B:D"
                     ).execute()
                     for r in res.get("values", []):
                         if len(r) < 3:
@@ -807,7 +807,7 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
                             sc = float(r[2])
                         except Exception:
                             continue
-                        if fname and fname != "NOME_ARQUIVO" and sc < min_score:
+                        if fname and fname != "NOME_ARQUIVO" and fname != "STATUS" and sc < min_score:
                             low_names.add(fname)
                 except Exception as e:
                     logger.warning(f"Falha ao ler scores da planilha: {e}")
