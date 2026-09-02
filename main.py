@@ -639,21 +639,21 @@ def parse_obito(text: str) -> dict:
     if not nome:
         nome = _find_name_fallback(text)
     structured["NOME"] = nome
-# --- Ponto 1a: limpar nome poluido com labels do formulario ---
-if nome and any(j in nome.lower() for j in FORM_JUNK):
-    _labels = re.compile(
-        r'descri[çc][ãa]o sum[áa]ria|endere[çc]o|logradouro|n[uú]mero|bairro|'
-        r'munic[ií]pio|c[oó]digo|registro|complemento|cart[oó]rio|'
-        r'ocupa[çc][ãa]o habitual|situa[çc][ãa]o conjugal|ra[çc]a/cor|'
-        r'naturalidade|escolaridade|meio de contato|identifica[çc][ãa]o', re.IGNORECASE)
-    _partes = [p.strip().rstrip("|.,;:") for p in _labels.split(nome) if p.strip()]
-    _nome_limpo = ""
-    for _p in reversed(_partes):
-        if len(_p.split()) >= 2 and not re.fullmatch(r'\d+', _p) \
-           and not any(j in _p.lower() for j in FORM_JUNK):
-            _nome_limpo = _p
-            break
-    structured["NOME"] = _sanitize_person_name(_nome_limpo) if _nome_limpo else ""
+    # --- Ponto 1a: limpar nome poluido com labels do formulario ---
+    if nome and any(j in nome.lower() for j in FORM_JUNK):
+        _labels = re.compile(
+            r'descri[çc][ãa]o sum[áa]ria|endere[çc]o|logradouro|n[uú]mero|bairro|'
+            r'munic[ií]pio|c[oó]digo|registro|complemento|cart[oó]rio|'
+            r'ocupa[çc][ãa]o habitual|situa[çc][ãa]o conjugal|ra[çc]a/cor|'
+            r'naturalidade|escolaridade|meio de contato|identifica[çc][ãa]o', re.IGNORECASE)
+        _partes = [p.strip().rstrip("|.,;:") for p in _labels.split(nome) if p.strip()]
+        _nome_limpo = ""
+        for _p in reversed(_partes):
+            if len(_p.split()) >= 2 and not re.fullmatch(r'\d+', _p) \
+               and not any(j in _p.lower() for j in FORM_JUNK):
+                _nome_limpo = _p
+                break
+        structured["NOME"] = _sanitize_person_name(_nome_limpo) if _nome_limpo else ""
 
     mae = _sanitize_person_name(_find_block_value(text, [
         "Nome da Mãe", "Nome da mãe", "Nome da Mae", "Nome da mae",
@@ -723,20 +723,20 @@ if nome and any(j in nome.lower() for j in FORM_JUNK):
     structured["CAUSA_MORTE_3"] = causas.get("CAUSA_MORTE_3", "")
     structured["CAUSA_MORTE_4"] = causas.get("CAUSA_MORTE_4", "")
     structured["CAUSA_BASICA"] = causas.get("CAUSA_BASICA", "")
-# --- Ponto 1b: deduplicar causas iguais em campos consecutivos ---
-_causas_seq = []
-for _k in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_MORTE_4"]:
-    _v = _clean_causa(structured.get(_k, ""))
-    _v = re.sub(r'^[a-z]\s+(?=[A-ZÀ-Ú])', '', _v, flags=re.IGNORECASE).strip()
-    if _v:
-        _causas_seq.append(_v)
-_causas_dedup = []
-for _c in _causas_seq:
-    if not _causas_dedup or _c.lower() != _causas_dedup[-1].lower():
-        _causas_dedup.append(_c)
-for _idx, _k in enumerate(["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_MORTE_4"]):
-    structured[_k] = _causas_dedup[_idx] if _idx < len(_causas_dedup) else ""
-structured["CAUSA_BASICA"] = _clean_causa(structured.get("CAUSA_BASICA", ""))
+    # --- Ponto 1b: deduplicar causas iguais em campos consecutivos ---
+    _causas_seq = []
+    for _k in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_MORTE_4"]:
+        _v = _clean_causa(structured.get(_k, ""))
+        _v = re.sub(r'^[a-z]\s+(?=[A-ZÀ-Ú])', '', _v, flags=re.IGNORECASE).strip()
+        if _v:
+            _causas_seq.append(_v)
+    _causas_dedup = []
+    for _c in _causas_seq:
+        if not _causas_dedup or _c.lower() != _causas_dedup[-1].lower():
+            _causas_dedup.append(_c)
+    for _idx, _k in enumerate(["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_MORTE_4"]):
+        structured[_k] = _causas_dedup[_idx] if _idx < len(_causas_dedup) else ""
+    structured["CAUSA_BASICA"] = _clean_causa(structured.get("CAUSA_BASICA", ""))
 
     structured["MEDICO_ATESTANTE"] = _clean_field(_find_block_value(text, [
         "Médico", "Medico", "Nome do Médico", "Nome do medico",
@@ -774,27 +774,27 @@ def validate_obito(structured: dict) -> None:
     missing = [f for f in CRITICAL_FIELDS if not structured.get(f)]
     score = round((len(CRITICAL_FIELDS) - len(missing)) / len(CRITICAL_FIELDS) * 100, 1)
     structured["QUALIDADE_SCORE"] = str(score)
-# --- Ponto 2: regras de consistencia cruzada ---
-_erros_extra = []
-_nome = structured.get("NOME", "")
-if _nome and any(j in _nome.lower() for j in FORM_JUNK):
-    _erros_extra.append("Nome contem texto do formulario")
-_nasc = structured.get("NASCIMENTO", "")
-_dob = structured.get("DATA_OBITO", "")
-_idade = structured.get("IDADE_ANOS", "")
-if _nasc and _dob and _idade and _idade.isdigit():
-    try:
-        from datetime import datetime as _dt
-        _calc = (_dt.strptime(_dob, "%d/%m/%Y") - _dt.strptime(_nasc, "%d/%m/%Y")).days // 365
-        if abs(_calc - int(_idade)) > 5:
-            _erros_extra.append(f"Idade inconsistente com datas (calculada ~{_calc})")
-    except Exception:
-        pass
-if structured.get("TIPO_OBITO") == "Fetal" and not structured.get("CAUSA_MORTE"):
-    _erros_extra.append("Obito fetal sem causa de morte")
-if _erros_extra:
-    structured["STATUS"] = "REVISAR"
-    structured["ERROS"] = ((structured.get("ERROS", "") + " | ") if structured.get("ERROS") else "") + " | ".join(_erros_extra)
+    # --- Ponto 2: regras de consistencia cruzada ---
+    _erros_extra = []
+    _nome = structured.get("NOME", "")
+    if _nome and any(j in _nome.lower() for j in FORM_JUNK):
+        _erros_extra.append("Nome contem texto do formulario")
+    _nasc = structured.get("NASCIMENTO", "")
+    _dob = structured.get("DATA_OBITO", "")
+    _idade = structured.get("IDADE_ANOS", "")
+    if _nasc and _dob and _idade and _idade.isdigit():
+        try:
+            from datetime import datetime as _dt
+            _calc = (_dt.strptime(_dob, "%d/%m/%Y") - _dt.strptime(_nasc, "%d/%m/%Y")).days // 365
+            if abs(_calc - int(_idade)) > 5:
+                _erros_extra.append(f"Idade inconsistente com datas (calculada ~{_calc})")
+        except Exception:
+            pass
+    if structured.get("TIPO_OBITO") == "Fetal" and not structured.get("CAUSA_MORTE"):
+        _erros_extra.append("Obito fetal sem causa de morte")
+    if _erros_extra:
+        structured["STATUS"] = "REVISAR"
+        structured["ERROS"] = ((structured.get("ERROS", "") + " | ") if structured.get("ERROS") else "") + " | ".join(_erros_extra)
     if missing:
         structured["STATUS"] = "REVISAR"
         structured["ERROS"] = " | ".join(f"Campo critico ausente: {f}" for f in missing)
