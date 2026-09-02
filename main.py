@@ -941,7 +941,7 @@ def batch_process(request: BatchRequest):
 
 @app.post("/batch/reprocess")
 def batch_reprocess(limit: int = 10, min_score: float = None, files: str = None):
-    return _run_batch(limit=limit, reprocess=True)
+    return _run_batch(limit=limit, reprocess=True, min_score=min_score, files=files)
 
 @app.post("/admin/dedupe")
 def admin_dedupe():
