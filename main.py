@@ -1,1176 +1,518 @@
-﻿"""
-main.py â€” ServiÃ§o OCR para DeclaraÃ§Ãµes de Ã“bito
-================================================
-Stack: FastAPI + Google Cloud Vision (primÃ¡rio) / OpenAI (fallback)
-       Google Drive (imagens) + Google Sheets (auditoria)
-Deploy: Render (qualquer plano)
-
-VariÃ¡veis de ambiente obrigatÃ³rias:
-  GOOGLE_VISION_API_KEY       Chave de API do Google Cloud Vision
-  DRIVE_SERVICE_ACCOUNT_JSON  JSON da service account do Google
-  DRIVE_FOLDER_ID             ID da pasta raiz no Google Drive
-  SHEET_ID                    ID da planilha de auditoria
-
-VariÃ¡veis opcionais:
-  ENDPOINT_AUTH_TOKEN         Token Bearer para autenticar endpoints
-  OCR_PROVIDER                "google_vision" (padrÃ£o) ou "openai"
-  OPENAI_API_KEY              NecessÃ¡rio se OCR_PROVIDER=openai
-  OPENAI_API_URL              URL do provedor OpenAI-compatible
-  OPENAI_MODEL_DEFAULT        Modelo (padrÃ£o: gpt-4o-mini)
-  MAX_FILE_SIZE_MB            Tamanho mÃ¡ximo de arquivo (padrÃ£o: 10)
-  PORT                        Porta HTTP (padrÃ£o: 8000)
-  POLL_INTERVAL_MINUTES       Intervalo do monitor (padrÃ£o: 60)
-  AUTO_PROCESS_ENABLED        "true" para monitor automÃ¡tico
-  AUDIT_SHEET_TITLE           TÃ­tulo da planilha (padrÃ£o: "Auditoria Obito OCR")
-
-"""
-
-import os, re, io, json, base64, hashlib, unicodedata, gc, time
-import datetime as dt
-from datetime import datetime, timedelta
-from threading import Thread, Event, Lock
-from typing import Any, Dict, List, Optional, Tuple
+import os, io, re, uuid, hashlib, logging, time, base64
+from datetime import datetime
 
 import requests
-import uvicorn
-import logging
-
-from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
-
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
-from PIL import Image
-import unicodedata
+from fastapi import FastAPI
+from pydantic import BaseModel
 
-def _process_single_image(file_id: str, file_name: str) -> dict:
-    """Pipeline completo: baixar - OCR (melhor de 3 tentativas) - parse - validar."""
-    logger.info(f"Processando: {file_name} ({file_id})")
-    try:
-        image_bytes, mime_type = _download_image_bytes(file_id)
-    except Exception as e:
-        return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_DRIVE", "ERROS": str(e)}
-     # Validar integridade da imagem
-    try:
-        img = Image.open(io.BytesIO(image_bytes))
-        img.verify()
-    except Exception as e:
-        logger.error(f"Imagem invÃ¡lida/corrompida {file_name}: {e}")
-        return {"NOME_ARQUIVO": file_name, "STATUS": "IMAGEM_INVALIDA", "ERROS": str(e)}       
+logger = logging.getLogger("uvicorn")
+logger.setLevel(logging.INFO)
 
-    # MÃºltiplas tentativas de OCR, fica com o melhor resultado
-    melhor_raw_text = None
-    melhor_structured = None
-    melhor_score = -1
+# ── Service account: suporta JSON inline via env var ─────────────
+_SERVICE_ACCOUNT_JSON_ENV = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+if _SERVICE_ACCOUNT_JSON_ENV and _SERVICE_ACCOUNT_JSON_ENV.strip().startswith("{"):
+    _sa_path = "/tmp/service-account.json"
+    with open(_sa_path, "w") as f:
+        f.write(_SERVICE_ACCOUNT_JSON_ENV)
+    os.environ["SERVICE_ACCOUNT_FILE"] = _sa_path
+    logger.info("Service account criada a partir de GOOGLE_SERVICE_ACCOUNT_JSON.")
 
-    for tentativa in range(3):
-        try:
-            raw_text, confidence = ocr_image(image_bytes, mime_type)
+def _find_service_account():
+    candidates = [
+        os.getenv("SERVICE_ACCOUNT_FILE", ""),
+        os.getenv("GOOGLE_APPLICATION_CREDENTIALS", ""),
+        "./service-account.json",
+        "./src/service-account.json",
+        "/opt/render/project/src/service-account.json",
+        "/opt/render/project/service-account.json",
+        "/etc/secrets/service-account.json",
+    ]
+    for cand in candidates:
+        if not cand or cand.startswith("AIza"):
+            continue  # ignora API key usada como valor da env var
+        if os.path.exists(cand):
+            return cand
+    return "./service-account.json"
 
-            if not _is_valid_obito(raw_text):
-                # Alteracao 2: detecta verso da DO
-                if detectar_verso(raw_text):
-                    logger.info(f"{file_name}: tentativa {tentativa+1}/3 - verso de DO detectado")
-                    ressalvas = extrair_ressalvas(raw_text)
-                    if ressalvas:
-                        msg = "VERSO - Ressalvas: " + "; ".join(
-                            f"{r['campo']}: {r['valor']}" for r in ressalvas)
-                    else:
-                        msg = "VERSO (sem ressalvas identificadas)"
-                    return {
-                        "NOME_ARQUIVO": file_name,
-                        "STATUS": "VERSO",
-                        "ERROS": msg,
-                    }
-                # Alteracao 3: validacao tolerante
-                if parece_do(raw_text):
-                    logger.info(f"{file_name}: tentativa {tentativa+1}/3 - parece DO, marcada para revisao")
-                    structured = parse_obito(raw_text)
-                    structured["STATUS"] = "REVISAR"
-                    structured["ERROS"] = "Possivel DO, porem validacao rigida falhou - revisar manualmente"
-                    score = int(structured.get("QUALIDADE_SCORE", 0))
-                    if score > melhor_score:
-                        melhor_score = score
-                        melhor_raw_text = raw_text
-                        melhor_structured = structured
-                    continue
-                logger.info(f"{file_name}: tentativa {tentativa+1}/3 - nÃ£o reconhecida como DO, pulando")
-                continue
+SERVICE_ACCOUNT_FILE = _find_service_account()
 
-            structured = parse_obito(raw_text)
-            validate_obito(structured)
-            score = int(structured.get("QUALIDADE_SCORE", 0))
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive.readonly",
+]
+SHEET_ID = os.getenv("SHEET_ID", "1ETms0jR61Idqxbfr0nBdTXJGOHeGWFBomQGIZHPUJTM")
+DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID", "1iwc59VnBEhjuYtW-OoOYg-UKioQ81ZfN")
 
-            if score > melhor_score:
-                melhor_score = score
-                melhor_raw_text = raw_text
-                melhor_structured = structured
-                logger.info(f"{file_name}: tentativa {tentativa+1}/3 - score {score}")
+# Chaves Vision: tenta em ordem ate uma funcionar
+VISION_KEYS = [k for k in [
+    os.getenv("GOOGLE_VISION_API_KEY", ""),
+    os.getenv("VISION_KEY", ""),
+    "AIzaSyCKXbsF8UNL0WSoE4FAh4yVXJ1f9Y2tiSU",   # chave da aba Config
+    "AIzaSyB-45eklgCjDOI9XXTqNRFkZtQmCOywgYM",   # chave antiga hardcoded
+] if k]
 
-            if score >= 60:
-                break  # JÃ¡ estÃ¡ bom, nÃ£o precisa tentar mais
-
-        except Exception as e:
-            logger.warning(f"{file_name}: tentativa {tentativa+1}/3 falhou: {e}")
-            continue
-
-    # Se nenhuma tentativa funcionou
-    if melhor_raw_text is None:
-        return {
-            "NOME_ARQUIVO": file_name, "STATUS": "ERRO_OCR",
-            "ERROS": "Todas as 3 tentativas de OCR falharam ou nÃ£o reconheceram DO",
-        }
-
-    # Usa o melhor resultado
-    raw_text = melhor_raw_text
-    structured = melhor_structured
-
-    structured["HASH_ARQUIVO"] = _sha256_bytes(image_bytes)
-    structured["HASH_CONTEUDO"] = _sha256_text(raw_text)
-    validate_obito(structured)
-
-    return {
-        "DATA_PROCESSAMENTO": datetime.utcnow().strftime("%d/%m/%Y %H:%M:%S"),
-        "NOME_ARQUIVO": file_name,
-        "STATUS": structured.get("STATUS", ""),
-        "QUALIDADE_SCORE": str(structured.get("QUALIDADE_SCORE", "")),
-        "NOME": structured.get("NOME", ""),
-        "NOME_MAE": structured.get("NOME_MAE", ""),
-        "NASCIMENTO": structured.get("NASCIMENTO", ""),
-        "IDADE_ANOS": structured.get("IDADE_ANOS", ""),
-        "DATA_OBITO": structured.get("DATA_OBITO", ""),
-        "HORA_OBITO": structured.get("HORA_OBITO", ""),
-        "CIDADE_OBITO": structured.get("CIDADE_OBITO", ""),
-        "UF_OBITO": structured.get("UF_OBITO", ""),
-        "CAUSA_MORTE": structured.get("CAUSA_MORTE", ""),
-        "CAUSA_BASICA": structured.get("CAUSA_BASICA", ""),
-        "CID_BASICA": structured.get("CID_BASICA", ""),
-        "TIPO_OBITO": structured.get("TIPO_OBITO", ""),
-        "DO_NUMERO": structured.get("DO_NUMERO", ""),
-        "MEDICO_ATESTANTE": structured.get("MEDICO_ATESTANTE", ""),
-        "CRM_MEDICO": structured.get("CRM_MEDICO", ""),
-        "PARTE_II": structured.get("PARTE_II", ""),
-        "INTERVALO_DOENCA_MORTE": structured.get("INTERVALO_DOENCA_MORTE", ""),
-        "ERROS": structured.get("ERROS", ""),
-        "HASH_ARQUIVO": structured.get("HASH_ARQUIVO", ""),
-    }
-# â”€â”€ Logger â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-logger = logging.getLogger(__name__)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
-
-# â”€â”€ ConfiguraÃ§Ã£o â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-ENDPOINT_AUTH_TOKEN = os.environ.get("ENDPOINT_AUTH_TOKEN", "")
-GOOGLE_VISION_API_KEY = os.environ.get("GOOGLE_VISION_API_KEY", "")
-OCR_PROVIDER = os.environ.get("OCR_PROVIDER", "google_vision").lower()
-OPENAI_API_URL = os.environ.get(
-    "OPENAI_API_URL", "https://api.openai.com/v1/chat/completions"
-)
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-OPENAI_MODEL_DEFAULT = os.environ.get("OPENAI_MODEL_DEFAULT", "gpt-4o-mini")
-MAX_FILE_SIZE_MB = int(os.environ.get("MAX_FILE_SIZE_MB", "10"))
-MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
-PORT = int(os.environ.get("PORT", "8000"))
-
-DRIVE_SERVICE_ACCOUNT_JSON = os.environ.get("DRIVE_SERVICE_ACCOUNT_JSON", "")
-DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "")
-SHEET_ID = os.environ.get("SHEET_ID", "")
-AUDIT_SHEET_TITLE = os.environ.get("AUDIT_SHEET_TITLE", "Auditoria Obito OCR")
-POLL_INTERVAL_MINUTES = int(os.environ.get("POLL_INTERVAL_MINUTES", "60"))
-AUTO_PROCESS_ENABLED = os.environ.get("AUTO_PROCESS_ENABLED", "false").lower() == "true"
-OCR_LAST_PROVIDER = "none"
-# â”€â”€ HEADER completo (42+ campos) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# HEADER REAL da aba Auditoria (A-W)
 HEADER = [
-    "NOME", "NOME_SOCIAL", "NASCIMENTO", "SEXO", "RACA_COR", "ESTADO_CIVIL",
-    "NACIONALIDADE", "NOME_MAE", "NOME_PAI", "PROFISSAO", "LOGRADOURO",
-    "NUMERO", "COMPLEMENTO", "BAIRRO", "CIDADE", "UF", "CEP",
-    "CIDADE_NASCIMENTO", "UF_NASCIMENTO", "CPF", "RG", "ORGAO_EMISSOR_RG",
-    "DATA_OBITO", "HORA_OBITO", "LOCAL_OBITO", "CIDADE_OBITO", "UF_OBITO",
-    "CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_MORTE_4",
-    "CAUSA_MORTE_5", "CAUSA_BASICA",
-    "CODIGO_CAUSA_BASICA", "CODIGO_CAUSA_MORTE",
-    "CODIGO_CAUSA_MORTE_2", "CODIGO_CAUSA_MORTE_3",
-    "CODIGO_CAUSA_MORTE_4", "CODIGO_CAUSA_MORTE_5",
-    "CID_BASICA", "CID_MORTE", "CID_MORTE_2", "CID_MORTE_3",
-    "CID_MORTE_4", "CID_MORTE_5",
-    "TIPO_OBITO", "ASSISTIDO", "DATA_ATESTADO",
-    "NOMES_OK", "NOME_OK", "GARBAGE_CODES", "QTD_GARBAGE",
-    "PROTOCOLO_TEV", "ERROS", "QUALIDADE_SCORE", "HASH_ARQUIVO",
-    "HASH_CONTEUDO", "STATUS", "NOME_MES", "DATA_PROCESSAMENTO",
-    "DO_NUMERO", "MEDICO_ATESTANTE", "CRM_MEDICO", "IDADE_ANOS",
-    "PARTE_II", "INTERVALO_DOENCA_MORTE",
-]
-
-# Colunas escritas na planilha (subset do HEADER, ordem da aba Auditoria)
-AUDIT_COLUMNS = [
     "DATA_PROCESSAMENTO", "NOME_ARQUIVO", "STATUS", "QUALIDADE_SCORE",
-    "NOME", "NOME_MAE", "NASCIMENTO", "IDADE_ANOS",
-    "DATA_OBITO", "HORA_OBITO", "CIDADE_OBITO", "UF_OBITO",
-    "CAUSA_MORTE", "CAUSA_BASICA", "CID_BASICA", "TIPO_OBITO",
-    "DO_NUMERO", "MEDICO_ATESTANTE", "CRM_MEDICO",
-    "PARTE_II", "INTERVALO_DOENCA_MORTE",
-    "ERROS", "HASH_ARQUIVO",
+    "NOME", "NOME_MAE", "NASCIMENTO", "IDADE_ANOS", "DATA_OBITO", "HORA_OBITO",
+    "CIDADE_OBITO", "UF_OBITO", "CAUSA_MORTE", "CAUSA_BASICA", "CID_BASICA",
+    "TIPO_OBITO", "DO_NUMERO", "MEDICO_ATESTANTE", "CRM_MEDICO",
+    "PARTE_II", "INTERVALO_DOENCA_MORTE", "ERROS", "HASH_ARQUIVO",
 ]
 
-UF_VALIDAS = {
-    "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT",
-    "MS", "MG", "PA", "PB", "PR", "PE", "PI", "RJ", "RN", "RS", "RO",
-    "RR", "SC", "SP", "SE", "TO",
-}
-
-MESES_PT = {
-    "01": "JANEIRO", "02": "FEVEREIRO", "03": "MARCO", "04": "ABRIL",
-    "05": "MAIO", "06": "JUNHO", "07": "JULHO", "08": "AGOSTO",
-    "09": "SETEMBRO", "10": "OUTUBRO", "11": "NOVEMBRO", "12": "DEZEMBRO",
-}
-
-REFUSAL_PHRASES = [
-    "i'm sorry", "i can't assist with that", "i can't assist",
-    "cannot assist", "unable to help", "cannot help with that request",
-    "i can't help with that", "desculpe", "nÃ£o posso ajudar", "nao posso ajudar",
+FORM_JUNK = [
+    "nome do falecido", "data de nascimento", "data do óbito", "data do obito",
+    "endereço do local do acidente", "descrição sumária do evento",
+    "complexo hospitalar de clínicas", "identificação", "cartório",
+    "município de residência", "município de ocorrência", "local de ocorrência",
+    "nome do médico", "situação conjugal", "raça/cor", "ocupação habitual",
+    "logradouro (rua", "bairro/distrito", "nome do pai", "nome da mãe",
+    "data do atestado", "assistência médica", "parte ii", "causas da morte",
+    "condições e causas", "causas externas", "fetal ou menor",
+    "preenchimento exclusivo", "republica federativa", "ministerio da saude",
+    "declaracao de obito", "declaração de óbito", "seqüência de causas",
+    "sequencia de causas", "preencha o estado", "anote a cadeia",
+    "anote somente", "devido ou como consequência", "tempo aproximado entre",
+    "que contribuíram", "outras condições significativas",
+    "nascidos vivos", "número de filhos", "tipo de gravidez", "tipo de parto",
+    "peso ao nascer", "cartão sus", "naturalidade", "escolaridade",
+    "meio de contato", "morte em relação", "óbito de mulher",
 ]
 
-NOISE_LINES = {
-    "parte i", "parte ii", "devido ou como consequÃªncia de", "devido a",
-    "intervalo entre o inÃ­cio e a morte", "cid",
-    "meses dias horas minutos ignorado", "meses", "dias", "horas",
-    "minutos", "ignorado", "nome", "nome do mÃ©dico", "nome do medico",
-    "crm", "assinatura", "carimbo", "uf", "municÃ­pio", "municipio",
-    "data", "hora", "local", "causas da morte", "causa da morte",
-    "causas", "causa", "outras condiÃ§Ãµes significativas",
-    "outras condicoes significativas", "provÃ¡veis circunstÃ¢ncias",
-    "provaveis circunstancias", "Ã³bito atestado por mÃ©dico",
-    "obito atestado por medico", "endereÃ§o", "endereco", "logradouro",
-    "nÃºmero", "numero", "complemento", "bairro", "cep", "cpf", "rg",
-    "sexo", "raÃ§a", "raca", "estado civil", "nacionalidade", "profissÃ£o",
-    "profissao", "ocupaÃ§Ã£o", "ocupacao", "naturalidade",
+CITY_OCR_FIX = {
+    "são cantando do sul": "São Caetano do Sul",
+    "são cenário do sul": "São Caetano do Sul",
+    "são caetano sul": "São Caetano do Sul",
+    "caetano do sul": "São Caetano do Sul",
+    "são carlos do sul": "São Caetano do Sul",
+    "são gabriel do sul": "São Caetano do Sul",
+    "são bernardo do sul": "São Caetano do Sul",
+    "são lourenço do sul": "São Caetano do Sul",
+    "santo antônio do sul": "São Caetano do Sul",
+    "santa paula": "São Caetano do Sul",
+    "são paulo - sp": "São Paulo",
 }
 
-# â”€â”€ UtilitÃ¡rios de texto â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+VALID_UFS = {"AC","AL","AP","AM","BA","CE","DF","ES","GO","MA","MT","MS","MG",
+             "PA","PB","PR","PE","PI","RJ","RN","RS","RO","RR","SC","SP","SE","TO"}
+
+CRITICAL_FIELDS = ["NOME", "NOME_MAE", "NASCIMENTO", "DATA_OBITO",
+                   "CIDADE_OBITO", "UF_OBITO", "CAUSA_MORTE"]
+
+# ── Google API ───────────────────────────────────────────────────
+
+def _get_credentials():
+    return service_account.Credentials.from_service_account_file(
+        SERVICE_ACCOUNT_FILE, scopes=SCOPES
+    )
+
+def _get_drive_service():
+    return build("drive", "v3", credentials=_get_credentials())
+
+def _get_sheets_service():
+    return build("sheets", "v4", credentials=_get_credentials())
+
+def _get_existing_data():
+    """Retorna hashes (coluna W) e nomes de arquivo (coluna B) ja processados."""
+    hashes, names = {}, set()
+    try:
+        sheets = _get_sheets_service()
+        result = sheets.spreadsheets().values().get(
+            spreadsheetId=SHEET_ID, range="Auditoria!B1:W1579"
+        ).execute()
+        for row in result.get("values", []):
+            if not row:
+                continue
+            name = str(row[0]).strip() if len(row) > 0 else ""
+            h = str(row[21]).strip() if len(row) > 21 else ""
+            if name and name != "NOME_ARQUIVO":
+                names.add(name)
+            if h and h != "HASH_ARQUIVO":
+                hashes[h] = True
+    except Exception as e:
+        logger.warning(f"Nao foi possivel ler dados existentes: {e}")
+    return {"hashes": hashes, "names": names}
+
+def _ensure_sheet_header():
+    try:
+        sheets = _get_sheets_service()
+        result = sheets.spreadsheets().values().get(
+            spreadsheetId=SHEET_ID, range="Auditoria!A1:W1"
+        ).execute()
+        vals = result.get("values", [])
+        if vals and vals[0] and any(str(v).strip() for v in vals[0] if v):
+            logger.info("Cabecalho ja existe na planilha.")
+            return True
+        sheets.spreadsheets().values().update(
+            spreadsheetId=SHEET_ID, range="Auditoria!A1",
+            valueInputOption="USER_ENTERED",
+            body={"values": [HEADER]}
+        ).execute()
+        logger.info("Cabecalho escrito na planilha!")
+        return True
+    except Exception as e:
+        logger.error(f"Erro ao garantir cabecalho: {e}")
+        return False
+
+def _append_rows_to_sheet(rows):
+    try:
+        sheets = _get_sheets_service()
+        return sheets.spreadsheets().values().append(
+            spreadsheetId=SHEET_ID,
+            range="Auditoria!A:A",
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body={"values": rows},
+        ).execute()
+    except Exception as e:
+        logger.error(f"Erro ao inserir na planilha: {e}")
+        return None
+
+def _download_image_bytes(file_id):
+    drive = _get_drive_service()
+    request = drive.files().get_media(fileId=file_id)
+    fh = io.BytesIO()
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    while not done:
+        status, done = downloader.next_chunk()
+    metadata = drive.files().get(fileId=file_id, fields="mimeType,name").execute()
+    return fh.getvalue(), metadata.get("mimeType", "image/jpeg")
+
+# ── Busca recursiva em subpastas ─────────────────────────────────
+
+def _list_all_files_recursive(folder_id, drive):
+    files = []
+    page_token = None
+    query = (f"'{folder_id}' in parents and "
+             f"(mimeType contains 'image/' or mimeType='application/pdf') "
+             f"and trashed=false")
+    while True:
+        response = drive.files().list(
+            q=query, spaces="drive",
+            fields="nextPageToken, files(id, name, mimeType, createdTime)",
+            pageToken=page_token, orderBy="createdTime asc",
+        ).execute()
+        files.extend(response.get("files", []))
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+    page_token = None
+    query_folders = (f"'{folder_id}' in parents and "
+                     f"mimeType='application/vnd.google-apps.folder' and trashed=false")
+    while True:
+        response = drive.files().list(
+            q=query_folders, spaces="drive",
+            fields="nextPageToken, files(id, name)",
+            pageToken=page_token,
+        ).execute()
+        for sub in response.get("files", []):
+            logger.info(f"  -> Explorando subpasta: {sub.get('name','unknown')}")
+            files.extend(_list_all_files_recursive(sub["id"], drive))
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+    return files
+
+# ── Hash ─────────────────────────────────────────────────────────
 
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 def _sha256_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-def _unaccent(s: str) -> str:
-    return "".join(
-        c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c)
+# ── OCR via Google Cloud Vision REST API (multi-chave) ───────────
+
+def _ocr_image_from_bytes(image_bytes, mime_type="image/jpeg"):
+    img_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    gemini_key = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
+    if not gemini_key:
+        logger.error("[OCR] GEMINI_API_KEY nao configurada")
+        return "", 0.0
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={gemini_key}"
+    prompt = (
+        "Copie TODO o texto desta Declaracao de Obito EXATAMENTE como aparece, "
+        "sem resumir, sem bullets, sem markdown, sem marcar campos como [Blank]. "
+        "Transcreva cada rotulo e cada valor preenchido a mao, na ordem em que aparecem. "
+        "NAO omita nenhuma linha. Inclua nome do falecido, data de nascimento, data do obito, municipio, UF e todas as causas da morte. Responda apenas com o texto transcrito, sem comentarios."
     )
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": mime_type, "data": img_b64}},
+            ]
+        }],
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 4096},
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=90)
+        if resp.status_code != 200:
+            err = resp.json().get("error", {}).get("message", "")
+            logger.error(f"[OCR GEMINI] HTTP {resp.status_code}: {err}")
+            return "", 0.0
+        data = resp.json()
+        # DUPLA LEITURA: roda o Gemini 2x e mescla os textos
+        try:
+            resp2 = requests.post(url, json=payload, timeout=90)
+            if resp2.status_code == 200:
+                data2 = resp2.json()
+                parts2 = data2.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                text2 = "".join(p.get("text", "") for p in parts2).strip()
+                if len(text2) > len(text):
+                    text = text2
+        except Exception:
+            pass
+        parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+        text = "".join(p.get("text", "") for p in parts).strip()
+        logger.info(f"[OCR GEMINI] OK - texto: {len(text)} chars")
+        return text, 1.0
+    except Exception as e:
+        logger.error(f"[OCR GEMINI] erro: {e}")
+        return "", 0.0
+# Validacao / limpeza
 
-def _norm_label(s: str) -> str:
-    return _unaccent(s).lower().strip()
-
-def _normalize_lines(text: str) -> List[str]:
-    return [line.strip() for line in text.split("\n") if line.strip()]
-
-def _strip_numeric_prefix(line: str) -> str:
-    s = line.strip()
-    m = re.match(r"^(\d+\s*[\.\):\-]?\s*)(.*)$", s)
-    if m and re.search(r"[A-Za-zÃ€-Ãº]", m.group(2)):
-        return m.group(2).strip()
-    return s
-
-def _build_pairs(text: str) -> List[Tuple[str, str]]:
-    return [(_strip_numeric_prefix(l), l) for l in _normalize_lines(text)]
-
-def _is_noise_line(norm_line: str) -> bool:
-    nl = _norm_label(norm_line)
-    if not nl:
+def _is_valid_obito(ocr_text: str) -> bool:
+    if not ocr_text or len(ocr_text.strip()) < 50:
+        return False
+    t = ocr_text.lower()
+    if ("definiÃ§Ãµes" in t or "definicoes" in t) and ("cid-10" in t or "nascimento vivo" in t):
+        return False
+    strong = ["declaração de óbito", "declaracao de obito", "atestado de óbito",
+              "nome do falecido", "causas da morte", "tipo de óbito",
+              "tipo de obito", "parte i", "parte ii"]
+    if any(k in t for k in strong):
         return True
-    if nl in NOISE_LINES:
-        return True
-    if nl.endswith(":") and len(nl) < 40:
-        return True
-    if re.fullmatch(r"[\d\s\.\-:/]+", norm_line) and len(norm_line) < 3:
+    if len(ocr_text.strip()) > 400 and ("óbito" in t or "obito" in t):
         return True
     return False
 
-# â”€â”€ NormalizaÃ§Ã£o de data â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+def _clean_field(value: str) -> str:
+    if not value:
+        return ""
+    v = str(value).strip()
+    v = re.sub(r'\([^)]*\)', '', v).strip()
+    if re.fullmatch(r'\d{4,}', v):
+        return ""
+    v = re.sub(r'(\D)\d{3,}\s*$', r'\1', v).strip()
+    return v.strip()
+
+def _collapse_repeats(text: str) -> str:
+    prev = None
+    while prev != text:
+        prev = text
+        text = re.sub(r'\b([A-ZÁÉÍÓÚÂÊÔÃÕÇ][A-Za-zÁÉÍÓÚÂÊÔÃÕÇ]{8,})\s+\1\b', r'\1', text)
+    return text
+
+def _sanitize_person_name(value: str) -> str:
+    if not value:
+        return ""
+    v = str(value).strip().rstrip("|.,;:")
+    v = re.sub(r'^(nome do falecido|nome do\(a\)|falecido|nome|data de nascimento'
+               r'|nome do pai|nome da mae|nome da mãe)\s*[:\-]?\s*', '', v, flags=re.IGNORECASE)
+    if re.match(r'^\d{1,2}\s+[A-Za-zÀ-ÿ]', v):
+        v = re.sub(r'^\d{1,2}\s+', '', v)
+    v = re.sub(r'\s+(Identificação|Cartório|Médico|Nome do Pai|Nome da Mãe).*$',
+               '', v, flags=re.IGNORECASE)
+    v = _collapse_repeats(v).strip()
+    low = v.lower()
+    if any(j in low for j in FORM_JUNK):
+        return ""
+    if re.fullmatch(r'\d+', v) or len(v) < 5:
+        return ""
+    return v
+
+def _clean_causa(value: str) -> str:
+    if not value:
+        return ""
+    v = str(value).strip()
+    v = re.sub(r'^\(?(?:a\s+)?\w+?\s+ou\s+estado\s+\w+?\s+que\s+causou\s+diretamente\s+a(?:\s+\w+)?\)?[: ]*', '', v, flags=re.IGNORECASE)
+    v = re.sub(r'^[\u2022\u00b7\-\*]\s*', '', v).strip()
+    v = re.sub(r'^99\s*ignorado(\s*99\s*ignorado)?', '', v, flags=re.IGNORECASE).strip()
+    v = re.sub(r'^(?:causa\s+imediata|imediata)\s*[: ]*', '', v, flags=re.IGNORECASE).strip()
+    v = re.sub(r'^a\s+(?=[A-Z\u00c0-\u00da])', '', v).strip()
+    v = re.sub(r'^(?:parte\s+[iv]+)\s*[: ]*', '', v, flags=re.IGNORECASE).strip()
+
+    v = re.sub(r'^\(?a doença ou estado mórbido que causou diretamente a morte\)?[: ]*',
+               '', v, flags=re.IGNORECASE)
+    v = re.sub(r'^(seqüência|sequencia) de causas[^:]*[: ]*', '', v, flags=re.IGNORECASE)
+    v = re.sub(r'^(devido ou como consequência de)[: ]*', '', v, flags=re.IGNORECASE)
+    v = re.sub(r'^(causa básica|causa basica)[: ]*', '', v, flags=re.IGNORECASE)
+    v = v.strip()
+    if re.fullmatch(r'\d+\s*(anos?|meses?|dias?|horas?|min\w*)?', v, re.IGNORECASE):
+        return ""
+    low = v.lower()
+    if any(j in low for j in FORM_JUNK):
+        return ""
+    return v
 
 def _normalize_date_ocr(raw: str) -> str:
-    """Normaliza data do OCR: '31 05 2022', '31/05/2022', DDMMYYYY etc."""
     if not raw or not raw.strip():
         return ""
     raw = raw.strip()
-    # Remove sufixo "Hora 22:45" etc.
-    raw = re.sub(r"\s+Hora.*$", "", raw, flags=re.IGNORECASE)
-    raw = re.sub(r"[\s\-\.]+", "/", raw)
+    raw = re.sub(r"\s+", "", raw)
+    raw = raw.replace(",", "/").replace("-", "/").replace(".", "/")
     partes = [p for p in raw.split("/") if p.strip()]
-    if len(partes) == 3 and all(p.isdigit() for p in partes):
-        return "/".join(partes)
-    # Tenta DDMMYYYY sem separador
-    nums = re.findall(r"\d+", raw)
-    for n in nums:
-        if len(n) == 8:
-            d, m, a = int(n[0:2]), int(n[2:4]), int(n[4:8])
-            if 1 <= d <= 31 and 1 <= m <= 12 and 1900 <= a <= 2100:
-                return f"{d:02d}/{m:02d}/{a}"
-    # Se mÃªs > 12, provavelmente estÃ¡ trocado (dia/mÃªs invertidos)
-    if int(month) > 12:
-        month, day = day, month               
+    if len(partes) != 3:
+        nums = re.findall(r"\d+", raw)
+        for n in nums:
+            if len(n) == 8:
+                d, m, a = int(n[0:2]), int(n[2:4]), int(n[4:8])
+                if 1 <= d <= 31 and 1 <= m <= 12 and 1900 <= a <= 2100:
+                    return f"{d:02d}/{m:02d}/{a}"
+        return ""
+    p1, p2, p3 = partes[0].strip(), partes[1].strip(), partes[2].strip()
+    if not (p1.isdigit() and p2.isdigit() and p3.isdigit()):
+        return ""
+    d, m, y = int(p1), int(p2), int(p3)
+    if len(p3) == 2:
+        y += 2000 if y < 50 else 1900
+    if 1 <= d <= 31 and 1 <= m <= 12 and 1900 <= y <= 2100:
+        return f"{d:02d}/{m:02d}/{y}"
     return ""
 
 def _normalize_date(raw: str) -> str:
-    """Converte data para DD/MM/AAAA. Retorna vazio se invÃ¡lida."""
     if not raw or not raw.strip():
         return ""
-    raw = raw.strip()
-    raw = re.sub(r"\([^)]*\)", "", raw).strip()
-
-    # Detectar formato YYYY MM DD (ex: "2005 19 22" â†’ "22/19/2005")
-    if re.match(r'^\d{4}\s+\d{1,2}\s+\d{1,2}$', raw):
-        partes = raw.split()
-        ano, mes, dia = partes[0], partes[1], partes[2]
-        # CORREÃ‡ÃƒO: se mÃªs > 12, estÃ¡ trocado (dia/mÃªs invertidos)
-        if int(mes) > 12:
-            mes, dia = dia, mes
-        if 1 <= int(mes) <= 12 and 1 <= int(dia) <= 31:
-            return f"{dia.zfill(2)}/{mes.zfill(2)}/{ano}"
-    raw = re.sub(r"[.\s]+", "/", raw)
+    raw = re.sub(r'\([^)]*\)', '', raw.strip())
+    raw = re.sub(r'[.\s]+', '/', raw)
     try:
-        dt.datetime.strptime(raw, "%d/%m/%Y")
+        datetime.strptime(raw, "%d/%m/%Y")
         return raw
     except ValueError:
         pass
     for fmt in ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%m/%d/%Y", "%Y/%m/%d"):
         try:
-            d = dt.datetime.strptime(raw, fmt)
-            if 1900 <= d.year <= dt.datetime.now().year + 1:
-                return d.strftime("%d/%m/%Y")
+            dt = datetime.strptime(raw, fmt)
+            if 1900 <= dt.year <= datetime.now().year + 1:
+                return dt.strftime("%d/%m/%Y")
         except ValueError:
             continue
-    nums = re.findall(r"\d+", raw)
-    if len(nums) >= 3:
-        for a, b in [(0, 1), (1, 0)]:
-            try:
-                dia, mes, ano = int(nums[a]), int(nums[b]), int(nums[-1])
-                if len(nums[-1]) == 2:
-                    ano += 2000 if ano < 50 else 1900
-                if 1 <= dia <= 31 and 1 <= mes <= 12 and 1900 <= ano <= dt.datetime.now().year + 1:
-                    return dt.datetime(ano, mes, dia).strftime("%d/%m/%Y")
-            except (ValueError, IndexError):
-                continue
     return ""
 
-def _normalize_hour(value: str) -> str:
+def _normalize_hora(raw: str) -> str:
+    if not raw:
+        return ""
+    m = re.search(r'(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?!\d)', str(raw))
+    if m:
+        return f"{int(m.group(1)):02d}:{m.group(2)}"
+    return ""
+
+def _normalize_cidade(value: str) -> str:
     if not value:
         return ""
-    v = value.strip()
-    m = re.search(r"(\d{1,2})[:hH]+(\d{2})", v)
-    if m:
-        h, mm = int(m.group(1)), int(m.group(2))
-        if 0 <= h <= 23 and 0 <= mm <= 59:
-            return f"{h:02d}:{mm:02d}"
+    v = str(value).strip().rstrip("|.,;:")
+    low = v.lower()
+    if low in CITY_OCR_FIX:
+        return CITY_OCR_FIX[low]
+    if v.upper() in {"UF", "CEP", "MÉDICO", "MEDICO", "CARTÓRIO", "LOCAL DE OCORRÊNCIA"}:
+        return ""
+    if re.fullmatch(r'\d+', v) or len(v) < 3:
+        return ""
+    if any(j in low for j in FORM_JUNK):
+        return ""
     return v
-
-def _is_valid_hour(value: str) -> bool:
-    return bool(re.fullmatch(r"\d{2}:\d{2}", value or "")) and _normalize_hour(value) == value
 
 def _normalize_uf(value: str) -> str:
     if not value:
         return ""
-    uf = value.strip().upper()
-    return uf if uf in UF_VALIDAS else ""
+    uf = str(value).strip().upper()
+    uf = {"IC": "SP"}.get(uf, uf)
+    return uf if uf in VALID_UFS else ""
 
-def _normalize_cep(value: str) -> str:
-    if not value:
-        return ""
-    digits = re.sub(r"\D", "", value)
-    if len(digits) == 8:
-        return f"{digits[:5]}-{digits[5:]}"
-    return value.strip()
+# ── Parser da DO ─────────────────────────────────────────────────
 
-def _clean_field(value: str) -> str:
-    """Remove instruÃ§Ãµes do formulÃ¡rio e cÃ³digos soltos."""
-    if not value:
-        return ""
-    instructions = [
-        r"ANOTE SOMENTE UM DIAGNÃ“STICO POR LINHA",
-        r"NÃ£o preencher este espaÃ§o",
-        r"PREENCHEMENTO EXCLUSIVO",
-        r"PREENCHEMENTO EXCLUSIVO PARA Ã“BITOS FETAIS E DE ME",
-        r"Menores de 1 ano:", r"Menos de 1 ano:",
-        r"Escolaridade\s*\([^)]*\)",
-    ]
-    for instr in instructions:
-        value = re.sub(instr, "", value, flags=re.IGNORECASE).strip()
-    if re.match(r"^\d{4,}$", value):
-        return ""
-    value = re.sub(r"(\D)\d{3,}\s*$", r"\1", value).strip()
-    return value.strip()
-
-# â”€â”€ OCR â€” Google Cloud Vision (primÃ¡rio) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-class OCRProviderError(Exception):
-    def __init__(self, message: str, status_code: int = 502):
-        super().__init__(message)
-        self.status_code = status_code
-        self.code = "OCR_PROVIDER_ERROR"
-
-def _detect_refusal(text: str) -> bool:
-    if not text:
-        return True
-    low = text.lower().strip()
-    for phrase in REFUSAL_PHRASES:
-        if phrase in low:
-            return True
-    alnum = sum(1 for c in text if c.isalnum())
-    if alnum < 10:
-        return True
-    return False
-
-def _ocr_google_vision(image_bytes: bytes) -> Tuple[str, float]:
-    """OCR via Google Cloud Vision REST API.
-    
-    Tenta OCR sem prÃ©-processamento primeiro.
-    Se o resultado for vazio ou score muito baixo, tenta novamente com OpenCV.
-    """
-    if not GOOGLE_VISION_API_KEY:
-        raise OCRProviderError("GOOGLE_VISION_API_KEY nÃ£o configurada.", 502)
-
-    def _do_ocr(img_bytes: bytes) -> Tuple[str, float]:
-        """Executa a chamada REST ao Google Vision."""
-        img_b64 = base64.b64encode(img_bytes).decode("utf-8")
-        url = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_VISION_API_KEY}"
-        payload = {
-            "requests": [{
-                "image": {"content": img_b64},
-                "features": [{"type": "TEXT_DETECTION"}],
-            }]
-        }
-        try:
-            resp = requests.post(url, json=payload, timeout=120)
-            result = resp.json()
-        except requests.RequestException as e:
-            raise OCRProviderError(f"Falha de comunicaÃ§Ã£o com Vision API: {e}", 502)
-        except Exception as e:
-            raise OCRProviderError(f"Resposta invÃ¡lida da Vision API: {e}", 502)
-        if resp.status_code != 200:
-            err_msg = result.get("error", {}).get("message", "")
-            raise OCRProviderError(
-                f"Vision API HTTP {resp.status_code}: {err_msg}", 502
-            )
-        annotations = result.get("responses", [{}])[0].get("textAnnotations", [])
-        if not annotations:
-            return "", 0.0
-        full_text = annotations[0].get("description", "")
-        return full_text.strip(), 1.0
-
-    # â”€â”€ 1Âª tentativa: SEM prÃ©-processamento â”€â”€
-    text, score = _do_ocr(image_bytes)
-
-    # â”€â”€ Se vazio ou muito baixo, tenta com OpenCV â”€â”€
-    if not text or len(text) < 20:
-        logger.info("OCR sem resultado com imagem original. Tentando com OpenCV...")
-        processed = _preprocess_image(image_bytes)
-        text2, score2 = _do_ocr(processed)
-        if text2 and len(text2) > len(text):
-            logger.info(f"OpenCV melhorou o resultado: {len(text)} â†’ {len(text2)} chars")
-            return text2, score2
-        elif text:
-            return text, score
-        return text2, score2
-
-    return text, score
-    url = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_VISION_API_KEY}"
-    payload = {
-        "requests": [{
-            "image": {"content": img_b64},
-            "features": [{"type": "TEXT_DETECTION"}],
-        }]
+def _find_block_value(text: str, labels: list, stop_labels: list = None) -> str:
+    if stop_labels is None:
+        stop_labels = []
+    skip_headers = {
+        "identificacao", "residencia", "ocorrencia", "cartorio", "medico",
+        "causas externas", "condicoes e causas do obito",
+        "fetal ou menor que 1 ano", "declaracao de obito",
+        "republica federativa do brasil", "ministerio da saude",
+        "hora", "1a via secretaria de saude", "via secretaria de saude",
+        "tipo de obito", "data do obito", "nome do falecido",
+        "nome do pai", "nome da mae", "cartao sus", "naturalidade",
     }
-    try:
-        resp = requests.post(url, json=payload, timeout=120)
-        result = resp.json()
-    except requests.RequestException as e:
-        raise OCRProviderError(f"Falha de comunicaÃ§Ã£o com Vision API: {e}", 502)
-    except Exception as e:
-        raise OCRProviderError(f"Resposta invÃ¡lida da Vision API: {e}", 502)
-    if resp.status_code != 200:
-        err_msg = result.get("error", {}).get("message", "")
-        raise OCRProviderError(
-            f"Vision API HTTP {resp.status_code}: {err_msg}", 502
-        )
-    annotations = result.get("responses", [{}])[0].get("textAnnotations", [])
-    if not annotations:
-        return "", 0.0
-    full_text = annotations[0].get("description", "")
-    return full_text.strip(), 1.0
-# â”€â”€ OCR Gemini Multimodal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")        # nÃ­vel 0
-GEMINI_MODEL = "gemini-3.5-flash"                       # nÃ­vel 0
-
-def _ocr_openai_compatible(image_bytes: bytes, mime_type: str) -> Tuple[str, float]:
-    """OCR via OpenAI-compatible API (fallback)."""
-    if not OPENAI_API_KEY:
-        raise OCRProviderError("OPENAI_API_KEY nÃ£o configurado.", 502)
-    b64 = base64.b64encode(image_bytes).decode("utf-8")
-    data_url = f"data:{mime_type};base64,{b64}"
-    prompt = (
-        "Transcreva fielmente todo o texto visÃ­vel neste documento oficial. "
-        "Mantenha cada campo em uma linha separada no formato 'label: valor'. "
-        "NÃƒO junte o label e o valor na mesma linha se estiverem em linhas separadas. "
-        "Preserve a estrutura original de linhas e a ordem dos campos. "
-        "Retorne APENAS o texto extraÃ­do, sem comentÃ¡rios ou explicaÃ§Ãµes."
-    )
-    payload = {
-        "model": OPENAI_MODEL_DEFAULT,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": data_url}},
-            ],
-        }],
-        "temperature": 0.0,
-        "max_tokens": 4000,
-    }
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    try:
-        resp = requests.post(OPENAI_API_URL, headers=headers, json=payload, timeout=120)
-    except requests.RequestException as e:
-        raise OCRProviderError(f"Falha de comunicaÃ§Ã£o com provedor OCR: {e}", 502)
-    if resp.status_code != 200:
-        raise OCRProviderError(
-            f"Provedor OCR retornou HTTP {resp.status_code}: {resp.text[:500]}", 502
-        )
-    try:
-        data = resp.json()
-        content = data["choices"][0]["message"]["content"]
-    except Exception:
-        raise OCRProviderError("Resposta do provedor OCR sem conteÃºdo esperado.", 502)
-    if not isinstance(content, str) or not content.strip():
-        raise OCRProviderError("Provedor OCR retornou conteÃºdo vazio.", 502)
-    if _detect_refusal(content):
-        return "", 0.0
-    confidence = 0.9
-    try:
-        if data.get("usage"):
-            confidence = 0.92
-    except Exception:
-        pass
-    return content.strip(), confidence
-# â”€â”€ OCR Gemini Multimodal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = "gemini-3.5-flash"
-
-def _ocr_gemini(image_bytes: bytes, _retry: int = 0) -> Tuple[Optional[dict], float]:
-    """Extrai os campos da DO direto da imagem usando Gemini (multimodal)."""
-    if not GEMINI_API_KEY:
-        return None, 0.0
-
-    # Alteracao 5: redimensiona a imagem antes de enviar ao Gemini
-    try:
-        from PIL import Image
-        import io as _io
-        _img = Image.open(_io.BytesIO(image_bytes))
-        _img.thumbnail((1568, 1568))
-        _buf = _io.BytesIO()
-        _img.convert("RGB").save(_buf, format="JPEG", quality=85)
-        image_bytes = _buf.getvalue()
-    except Exception:
-        pass
-    img_b64 = base64.b64encode(image_bytes).decode("utf-8")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-
-    prompt = (
-    "VocÃª Ã© um extrator de dados de DeclaraÃ§Ãµes de Ã“bito (DO) brasileiras. "
-    "Analise a imagem e extraia APENAS os valores preenchidos (manuscritos ou digitados) "
-    "nos campos do formulÃ¡rio. "
-    "\n\nREGRAS OBRIGATÃ“RIAS:\n"
-    "1. IGNORE completamente rÃ³tulos, tÃ­tulos, instruÃ§Ãµes e texto impresso do formulÃ¡rio. "
-    "Extraia SOMENTE o conteÃºdo preenchido em cada campo. "
-    "Exemplos de rÃ³tulos que NUNCA devem ser extraÃ­dos como dados: "
-    "'Nome do pai', 'Nome da MÃ£e', 'Data de nascimento', 'RaÃ§a/Cor', 'Sexo', "
-    "'SituaÃ§Ã£o conjugal', 'OcupaÃ§Ã£o habitual', 'Complexo Hospitalar de ClÃ­nicas', "
-    "'ENDEREÃ‡O DO LOCAL DO ACIDENTE OU VIOLÃŠNCIA', 'Causas da morte', "
-    "'Devido ou como consequÃªncia de', 'Tempo aproximado entre o inÃ­cio da doenÃ§a e a morte', "
-    "'MunicÃ­pio de residÃªncia', 'MunicÃ­pio de ocorrÃªncia', 'PROVÃVEIS CIRCUNSTÃ‚NCIAS DE MORTE NÃƒO NATURAL'.\n"
-    "2. Se um campo estiver em branco ou ilegÃ­vel, retorne string vazia (\"\"). "
-    "NUNCA invente dados nem preencha com o rÃ³tulo do campo.\n"
-    "3. NÃƒO duplique nomes. Se o mesmo nome aparecer repetido no campo, use-o uma Ãºnica vez.\n"
-    "4. NÃƒO inclua nÃºmeros de campo (ex.: '3 Elias Pacheco' -> 'Elias Pacheco').\n"
-    "5. Datas: normalize para o formato DD/MM/AAAA. Remova espaÃ§os entre dÃ­gitos "
-    "(ex.: '2 0 0 3 1 9 7 0' -> '19/03/1970'). Se a data for invÃ¡lida, retorne string vazia.\n"
-    "6. Horas: normalize para o formato HH:MM. Valide que os minutos sejam <= 59. "
-    "Se a hora for invÃ¡lida (ex.: '26:12', '02:612'), retorne string vazia.\n"
-    "7. O nome do mÃ©dico atestante e o CRM devem vir separados, sem texto extra.\n"
-    "8. A causa da morte e a causa bÃ¡sica devem conter APENAS o diagnÃ³stico, "
-    "sem frases como 'Devido ou como consequÃªncia de' ou 'Tempo aproximado...'.\n"
-    "\nResponda EXCLUSIVAMENTE com um objeto JSON vÃ¡lido, sem texto antes ou depois, "
-    "sem blocos de cÃ³digo, sem cercas de crase, sem a palavra 'json'. "
-    "Use exatamente estas chaves:\n"
-    "{\n"
-    "  \"NOME\": \"\",\n"
-    "  \"NOME_MAE\": \"\",\n"
-    "  \"NASCIMENTO\": \"\",\n"
-    "  \"IDADE_ANOS\": \"\",\n"
-    "  \"DATA_OBITO\": \"\",\n"
-    "  \"HORA_OBITO\": \"\",\n"
-    "  \"CIDADE_OBITO\": \"\",\n"
-    "  \"UF_OBITO\": \"\",\n"
-    "  \"CAUSA_MORTE\": \"\",\n"
-    "  \"CAUSA_BASICA\": \"\",\n"
-    "  \"CID_BASICA\": \"\",\n"
-    "  \"TIPO_OBITO\": \"\",\n"
-    "  \"DO_NUMERO\": \"\",\n"
-    "  \"MEDICO_ATESTANTE\": \"\",\n"
-    "  \"CRM_MEDICO\": \"\",\n"
-    "  \"PARTE_II\": \"\",\n"
-    "  \"INTERVALO_DOENCA_MORTE\": \"\"\n"
-    "}"
-)
-
-    payload = {
-        "contents": [{
-            "parts": [
-                {"text": prompt},
-                {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
-            ]
-        }],
-        "generationConfig": {
-            "temperature": 0.1,
-            "responseMimeType": "application/json"
-        }
-    }
-
-    try:
-        _t0 = time.time()
-        resp = requests.post(url, json=payload, timeout=60)
-        _dt = time.time() - _t0
-        logging.info("Gemini HTTP %s em %.1fs | payload=%dKB | modelo=%s",
-                      resp.status_code, _dt, len(img_b64)//1024, GEMINI_MODEL)
-        result = resp.json()
-    except requests.RequestException as e:
-        raise OCRProviderError(f"Falha de comunicaÃ§Ã£o com Gemini API: {e}", 502)
-    except Exception as e:
-        raise OCRProviderError(f"Resposta invÃ¡lida da Gemini API: {e}", 502)
-
-    if resp.status_code != 200:
-        err_msg = result.get("error", {}).get("message", "")
-        raise OCRProviderError(f"Gemini API HTTP {resp.status_code}: {err_msg}", 502)
-
-    try:
-        text = result["candidates"][0]["content"]["parts"][0]["text"]
-        text = text.strip()
-        if text.startswith("```"):
-            text = re.sub(r"^```(?:json)?\s*", "", text)
-            text = re.sub(r"\s*```$", "", text)
-        data = json.loads(text)
-        logging.info("Gemini JSON OK: %d chars | chaves=%s", len(text), list(data.keys())[:6])
-    except Exception as _e:
-        if _retry < 1:
-            logging.warning("Gemini JSON invalido (%s). Tentando novamente...", _e)
-            return _ocr_gemini(image_bytes, _retry=_retry + 1)
-        logging.warning("Gemini JSON invalido apos retry: %s | resp[:400]=%s", _e, str(result)[:400])
-        return None, 0.0
-
-    score = 0.0
-    if data.get("NOME") or data.get("nome"):
-        score += 0.4
-    if data.get("NASCIMENTO") or data.get("nascimento"):
-        score += 0.3
-    if data.get("DATA_OBITO") or data.get("data_obito"):
-        score += 0.3
-    return data, score
-# ============================================================
-# PÃ“S-PROCESSAMENTO DE LIMPEZA DOS CAMPOS EXTRAÃDOS
-# ============================================================
-
-# RÃ³tulos e frases do formulÃ¡rio que NUNCA devem ser tratados como dados
-ROTULOS_FORMULARIO = [
-    "nome do pai", "nome da mÃ£e", "nome do medico", "data de nascimento",
-    "raÃ§a/cor", "raca/cor", "sexo", "situaÃ§Ã£o conjugal", "situacao conjugal",
-    "ocupaÃ§Ã£o habitual", "ocupacao habitual", "complexo hospitalar de clÃ­nicas",
-    "complexo hospitalar de clinicas", "endereÃ§o do local do acidente ou violÃªncia",
-    "endereco do local do acidente ou violencia", "causas da morte",
-    "devido ou como consequÃªncia de", "devido ou como consequencia de",
-    "tempo aproximado entre o inÃ­cio da doenÃ§a e a morte",
-    "tempo aproximado entre o inicio da doenca e a morte",
-    "tempo aproximado entre o inÃ­cio da condiÃ§Ã£o e a morte",
-    "tempo aproximado entre o inicio da condicao e a morte",
-    "municÃ­pio de residÃªncia", "municipio de residencia",
-    "municÃ­pio de ocorrÃªncia", "municipio de ocorrencia",
-    "provÃ¡veis circunstÃ¢ncias de morte nÃ£o natural",
-    "provÃ¡veis circunstancias de morte nao natural",
-    "anote somente uma causa por linha", "anote somente um diagnÃ³stico por linha",
-    "anote somente um diagnostico por linha",
-    "seqÃ¼Ãªncia de causas", "sequencia de causas",
-    "preencha o estado mÃ³rbido", "preencha, se assinalado",
-    "condiÃ§Ãµes e causas do Ã³bito", "condicoes e causas do obito",
-    "que contribuÃ­ram para a morte", "que contribuiram para a morte",
-    "que nÃ£o entraram, porÃ©m, na cadeia acima", "que nao entraram, porem, na cadeia acima",
-    "que nÃ£o resultaram, porÃ©m", "que nao resultaram, porem",
-    "que causou diretamente a morte", "que causou diretamente",
-    "causa terminal", "causa intermediÃ¡ria", "causa intermediaria", "causa bÃ¡sica", "causa basica",
-    "uso de mÃºltiplas substÃ¢ncias psicoativas", "uso de multiplas substancias psicoativas",
-    "data do atestado", "meio de contato", "cÃ³digo cbo", "codigo cbo",
-    "nÃºmero de filhos", "numero de filhos", "tipo de parto", "morte em relaÃ§Ã£o ao parto",
-    "peso ao nascer", "nÃºmero da declaraÃ§Ã£o de nascido vivo",
-    "numero da declaracao de nascido vivo", "assistÃªncia mÃ©dica", "assistencia medica",
-    "diagnÃ³stico confirmado por", "diagnostico confirmado por", "necropsia",
-    "nÃºmero de semanas de gestaÃ§Ã£o", "numero de semanas de gestacao", "tipo de gravidez",
-    "nome do contato", "fonte da informaÃ§Ã£o", "fonte da informacao",
-    "descriÃ§Ã£o sumÃ¡ria do evento", "descricao sumaria do evento",
-    "endereÃ§o de residÃªncia", "endereco de residencia", "endereÃ§o de ocorrÃªncia",
-    "endereco de ocorrencia", "logradouro", "bairro/distrito", "complemento",
-    "cÃ³digo cnes", "codigo cnes", "cartÃ³rio", "cartorio", "registro",
-    "idade", "nÃ­vel", "nivel", "sÃ©rie", "serie", "ignorado",
-]
-def _limpar_texto(valor):
-    """Remove rotulos do formulario, backticks e normaliza espacos."""
-    if not valor or not isinstance(valor, str):
-        return ""
-    texto = valor.strip()
-    # Remove backticks usando chr(96) - evita crases literais no codigo
-    crase = chr(96)
-    texto = texto.replace(crase * 3, "").replace(crase, "")
-    texto = re.sub(r"^\d+\s+", "", texto)
-    texto = re.sub(r"\s+", " ", texto).strip()
-    texto_lower = unicodedata.normalize("NFD", texto.lower())
-    texto_lower = "".join(c for c in texto_lower if unicodedata.category(c) != "Mn")
-    for rotulo in ROTULOS_FORMULARIO:
-        rotulo_norm = unicodedata.normalize("NFD", rotulo.lower())
-        rotulo_norm = "".join(c for c in rotulo_norm if unicodedata.category(c) != "Mn")
-        if rotulo_norm in texto_lower:
-            idx = texto_lower.find(rotulo_norm)
-            texto = texto[:idx].strip()
-            texto_lower = texto_lower[:idx].strip()
-    partes = texto.split()
-    if len(partes) >= 4 and len(set(partes)) < len(partes):
-        meio = len(partes) // 2
-        if partes[:meio] == partes[meio:meio*2]:
-            texto = " ".join(partes[:meio])
-    return texto.strip()
-
-
-def _normalizar_data(valor):
-    """Normaliza datas para DD/MM/AAAA, removendo espaÃ§os entre dÃ­gitos."""
-    if not valor or not isinstance(valor, str):
-        return ""
-    texto = re.sub(r"\s+", "", valor.strip())
-    m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{2,4})$", texto)
-    if not m:
-        return ""
-    dia, mes, ano = m.groups()
-    dia, mes = int(dia), int(mes)
-    ano = int(ano)
-    if ano < 100:
-        ano += 2000
-    if dia < 1 or dia > 31 or mes < 1 or mes > 12 or ano < 1900 or ano > 2100:
-        return ""
-    return f"{dia:02d}/{mes:02d}/{ano:04d}"
-
-def _normalizar_hora(valor):
-    """Normaliza horas para HH:MM, validando minutos <= 59."""
-    if not valor or not isinstance(valor, str):
-        return ""
-    texto = valor.strip()
-    m = re.match(r"^(\d{1,2}):(\d{1,2})$", texto)
-    if not m:
-        return ""
-    hora, minuto = int(m.group(1)), int(m.group(2))
-    if hora < 0 or hora > 23 or minuto < 0 or minuto > 59:
-        return ""
-    return f"{hora:02d}:{minuto:02d}"
-
-def _limpeza_avancada(campos):
-    """Remove rotulos de campo, limpa CRM e evita limpar demais."""
-    import re
-    ROTULOS = [
-        'nome do(a):', 'nome do pai:', 'nome da mae:', 'nome da mÃ£e:',
-        'data de nascimento', 'data do obito', 'data do Ã³bito',
-        'causa basica:', 'causa bÃ¡sica:', 'causas da morte:',
-        'devido (ou como consequÃªncia de):', 'devido (ou como consequencia de):',
-        'medico assistente', 'mÃ©dico assistente', 'medico:', 'mÃ©dico:',
-        'crm:', 'codigo:', 'cÃ³digo:', 'uf:', 'municipio:', 'municÃ­pio:',
-        'assinatura', 'telefone', 'meio de contato', 'nome do mÃ©dico:', 'nome do medico:',
-    ]
-    for k in campos:
-        v = campos.get(k, "")
-        if not v or not isinstance(v, str):
-            continue
-        v = v.strip()
-        # remove numero de campo inicial (ex: '8 Data de nascimento')
-        v = re.sub(r'^\s*\d+\s+', '', v)
-        vl = v.lower()
-        for lab in ROTULOS:
-            if vl.startswith(lab):
-                v = v[len(lab):].strip(' :')
-                vl = v.lower()
-                break
-        # CRM: remove 'assinatura' e ruido, mantem digitos
-        if k == 'CRM_MEDICO':
-            v = re.sub(r'(?i)assinatura', '', v).strip()
-            v = re.sub(r'[^\d]', '', v)
-        # medico atestante que e rotulo vira vazio
-        if k == 'MEDICO_ATESTANTE' and vl in ('medico', 'mÃ©dico', 'medico assistente', 'mÃ©dico assistente', 'dr', 'dra'):
-            v = ''
-        campos[k] = v
-    return campos
-
-def limpar_campos_extraidos(campos):
-    """Aplica limpeza em todos os campos extraÃ­dos antes de gravar na planilha."""
-    campos_limpos = dict(campos)
-    for chave in ["NOME", "NOME_MAE", "CIDADE_OBITO", "CAUSA_MORTE",
-                  "CAUSA_BASICA", "CID_BASICA", "TIPO_OBITO", "DO_NUMERO",
-                  "MEDICO_ATESTANTE", "CRM_MEDICO", "PARTE_II",
-                  "INTERVALO_DOENCA_MORTE"]:
-        campos_limpos[chave] = _limpar_texto(campos_limpos.get(chave, ""))
-    for chave in ["NASCIMENTO", "DATA_OBITO"]:
-        campos_limpos[chave] = _normalizar_data(campos_limpos.get(chave, ""))
-    campos_limpos["HORA_OBITO"] = _normalizar_hora(campos_limpos.get("HORA_OBITO", ""))
-    uf = _limpar_texto(campos_limpos.get("UF_OBITO", ""))
-    if len(uf) == 2 and uf.isalpha():
-        campos_limpos["UF_OBITO"] = uf.upper()
-    else:
-        campos_limpos["UF_OBITO"] = ""
-    idade = campos_limpos.get("IDADE_ANOS", "")
-    if idade:
-        m = re.search(r"\d+", str(idade))
-        campos_limpos["IDADE_ANOS"] = m.group(0) if m else ""
-    return campos_limpos
-def ocr_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> Tuple[str, float]:
-    """Dispatcher: tenta Gemini multimodal primeiro, depois Vision, fallback OpenAI."""
-    # â”€â”€ 1Âª tentativa: Gemini multimodal (extrai campos estruturados) â”€â”€
-    if GEMINI_API_KEY:
-        try:
-            gemini_data, gemini_conf = _ocr_gemini(image_bytes)
-            if gemini_data:
-                OCR_LAST_PROVIDER = "gemini"
-                return json.dumps(gemini_data, ensure_ascii=False), gemini_conf
-        except OCRProviderError as e:
-            logger.warning(f"Gemini falhou ({e}), usando fluxo Vision/parser.")
-    if OCR_PROVIDER == "openai":
-        OCR_LAST_PROVIDER = "openai"
-        return _ocr_openai_compatible(image_bytes, mime_type)
-    # PadrÃ£o: Google Vision
-    try:
-        OCR_LAST_PROVIDER = "google_vision"
-        return _ocr_google_vision(image_bytes)
-    except OCRProviderError as e:
-        logger.warning(f"Google Vision falhou ({e}), tentando fallback OpenAI...")
-        if OPENAI_API_KEY:
-            OCR_LAST_PROVIDER = "openai"
-            return _ocr_openai_compatible(image_bytes, mime_type)
-        raise
-           
-# â”€â”€ Parser: busca por label textual (v1) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-def _find_label_index(
-    pairs: List[Tuple[str, str]], labels: List[str], start_at: int = 0,
-) -> int:
-    labels_norm = [_norm_label(l) for l in labels]
-    for i in range(start_at, len(pairs)):
-        norm, _ = pairs[i]
-        nl = _norm_label(norm)
-        for lab in labels_norm:
-            if nl == lab or nl == lab + ":" or nl.endswith(lab) or nl.endswith(lab + ":"):
-                return i
-    return -1
-
-def _find_next_value_after_label(
-    text: str, labels: List[str],
-    stop_labels: Optional[List[str]] = None,
-    max_distance: int = 5, start_at: int = 0,
-) -> Tuple[str, int]:
-    pairs = _build_pairs(text)
-    stop_norm = [_norm_label(s) for s in (stop_labels or [])]
-    idx = _find_label_index(pairs, labels, start_at=start_at)
-    while idx != -1:
-        for j in range(idx + 1, min(idx + 1 + max_distance, len(pairs))):
-            cnorm, corig = pairs[j]
-            cl = _norm_label(cnorm)
-            if any(cl == s or cl.startswith(s) for s in stop_norm):
-                break
-            if _is_noise_line(cnorm):
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        line_clean = line.strip()
+        for label in labels:
+            idx = line_clean.lower().find(label.lower())
+            if idx == -1:
                 continue
-            if len(corig.strip()) < 2:
+            resto = line_clean[idx + len(label):].strip().rstrip(":")
+            if resto and not any(sl.lower() in resto.lower() for sl in stop_labels):
+                if ":" in resto:
+                    resto = resto.split(":")[-1].strip()
+                val = _clean_field(resto)
+                if val and len(val) > 1:
+                    return val
+            for j in range(i + 1, min(i + 25, len(lines))):
+                candidate = lines[j].strip()
+                if not candidate or len(candidate) < 2:
+                    continue
+                if re.match(r"^\d+\s+[A-ZÁÉÍÓÚÂÊÔÃÕÇ]", candidate):
+                    continue
+                cand_lower = candidate.lower().strip("|.,;:")
+                if cand_lower in skip_headers:
+                    continue
+                if any(junk in cand_lower for junk in FORM_JUNK):
+                    continue
+                if len(candidate.split()) <= 1 and len(candidate) < 5:
+                    continue
+                if any(sl.lower() in candidate.lower() for sl in stop_labels):
+                    break
+                val = _clean_field(candidate)
+                if val:
+                    return val
+            break
+    return ""
+
+def _find_name_fallback(text: str) -> str:
+    lines = text.split("\n")
+    candidates = []
+    for line in lines:
+        line = line.strip().rstrip("|.,;:")
+        if not line or len(line) < 10:
+            continue
+        if re.match(r"^\d+\s", line):
+            continue
+        low = line.lower()
+        if any(j in low for j in FORM_JUNK):
+            continue
+        if sum(1 for c in line if not c.isalpha() and not c.isspace()) > len(line) * 0.3:
+            continue
+        words = line.split()
+        if len(words) < 2:
+            continue
+        parts = {"de", "da", "do", "das", "dos", "e", "van", "von"}
+        caps = 0
+        ok = True
+        for w in words:
+            wc = w.strip(".,;:")
+            if not wc:
                 continue
-            return corig.strip(), idx
-        idx = _find_label_index(pairs, labels, start_at=idx + 1)
-    return "", -1
-
-def _find_inline_value(text: str, labels: List[str]) -> str:
-    pairs = _build_pairs(text)
-    labels_norm = [_norm_label(l) for l in labels]
-    for norm, orig in pairs:
-        nl = _norm_label(norm)
-        for lab in labels_norm:
-            if nl == lab or nl.startswith(lab):
-                rest = norm[len(lab):].lstrip(": -\t").strip()
-                if rest and _norm_label(rest) != "uf" and len(rest) > 1 and not _is_noise_line(rest):
-                    return rest
-    return ""
-
-def _find_block_value(
-    text: str, labels: List[str],
-    stop_labels: Optional[List[str]] = None, max_distance: int = 5,
-) -> str:
-    inline = _find_inline_value(text, labels)
-    if inline:
-        return inline
-    value, _ = _find_next_value_after_label(
-        text, labels, stop_labels=stop_labels, max_distance=max_distance
-    )
-    return value
-
-def _find_hora_obito(text: str) -> str:
-    pairs = _build_pairs(text)
-    for i, (norm, _) in enumerate(pairs):
-        nl = _norm_label(norm)
-        if nl == "hora":
-            for j in range(i + 1, min(i + 1 + 5, len(pairs))):
-                cnorm, corig = pairs[j]
-                cl = _norm_label(cnorm)
-                if cl == "hora" or cl.startswith("horas"):
-                    break
-                if _is_noise_line(cnorm):
-                    continue
-                candidate = corig.strip()
-                hour = _normalize_hour(candidate)
-                if _is_valid_hour(hour):
-                    return hour
-                if not _is_noise_line(cnorm):
-                    break
-    return ""
-
-def _find_uf_after(text: str, after_labels: List[str], max_distance: int = 10) -> str:
-    pairs = _build_pairs(text)
-    start = _find_label_index(pairs, after_labels)
-    if start == -1:
-        start = 0
-    for i in range(start, len(pairs)):
-        norm, _ = pairs[i]
-        if _norm_label(norm) == "uf":
-            for j in range(i + 1, min(i + 1 + max_distance, len(pairs))):
-                cnorm, corig = pairs[j]
-                cl = _norm_label(cnorm)
-                if cl == "uf":
-                    continue
-                if _is_noise_line(cnorm):
-                    continue
-                uf = _normalize_uf(corig)
-                if uf:
-                    return uf
-                if not _is_noise_line(cnorm):
-                    break
-    return ""
-def _preprocess_image(image_bytes: bytes) -> bytes:
-    """Aplica prÃ©-processamento OpenCV para melhorar OCR em DOs digitalizadas."""
-    try:
-        import cv2
-        import numpy as np
-    except ImportError:
-        return image_bytes
-
-    nparr = np.frombuffer(image_bytes, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    if img is None:
-        return image_bytes
-
-    # 1. Escala de cinza
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-    # 2. Aumentar contraste (CLAHE) â€” clareia texto desbotado
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(gray)
-
-    # 3. Remover ruÃ­do preservando bordas
-    denoised = cv2.bilateralFilter(enhanced, 9, 75, 75)
-
-    # 4. BinarizaÃ§Ã£o adaptativa â€” texto nÃ­tido, fundo limpo
-    binary = cv2.adaptiveThreshold(
-        denoised, 255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY, 31, 2
-    )
-
-    # 5. Corrigir inclinaÃ§Ã£o (deskew) â€” fotos tortas
-    coords = np.column_stack(np.where(binary > 0))
-    if len(coords) > 0:
-        angle = cv2.minAreaRect(coords)[-1]
-        if angle < -45:
-            angle = 90 + angle
-        if abs(angle) > 0.5:
-            h, w = binary.shape
-            center = (w // 2, h // 2)
-            M = cv2.getRotationMatrix2D(center, angle, 1.0)
-            binary = cv2.warpAffine(
-                binary, M, (w, h),
-                flags=cv2.INTER_CUBIC,
-                borderMode=cv2.BORDER_REPLICATE
-            )
-
-    # 6. Codificar de volta para JPEG
-    success, buffer = cv2.imencode('.jpg', binary, [cv2.IMWRITE_JPEG_QUALITY, 95])
-    if not success:
-        return image_bytes
-
-    return buffer.tobytes()
-# â”€â”€ Parser: causas da morte (Parte I) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-_CAUSA_BASICA_BLACKLIST = [
-    "outras condiÃ§Ãµes significativas", "outras condicoes significativas",
-    "nome do mÃ©dico", "nome do medico", "crm",
-    "Ã³bito atestado", "obito atestado", "medico", "mÃ©dico",
-    "outras afecÃ§Ãµes", "outras afeccoes",
-]
-
-def _causa_valida(c: str) -> bool:
-    if not c or not c.strip():
-        return False
-    cl = _norm_label(c)
-    if len(cl) < 3:
-        return False
-    if re.fullmatch(r"[<>]?\s*\d+\s*[dhm]?", cl):
-        return False
-    if "intervalo entre o inicio e a morte" in cl:
-        return False
-    for proibido in _CAUSA_BASICA_BLACKLIST:
-        if proibido in cl:
-            return False
-    if _is_noise_line(c):
-        return False
-    return True
-
-_CID_RE = re.compile(r"\b([A-TV-Z]\d{2}(?:\.\s*\d{1,4})?)\b", re.IGNORECASE)
-
-def _extract_causes_v1(text: str) -> List[str]:
-    """Extrai causas usando o parser de pares (v1)."""
-    pairs = _build_pairs(text)
-    start_markers = ["causas da morte", "causa da morte"]
-    stop_markers = [
-        "parte ii", "outras condiÃ§Ãµes significativas", "outras condicoes significativas",
-        "nome do mÃ©dico", "nome do medico", "crm", "Ã³bito atestado por mÃ©dico",
-        "obito atestado por medico", "provÃ¡veis circunstÃ¢ncias", "provaveis circunstancias",
-    ]
-    ignore_markers = [
-        "parte i", "devido ou como consequÃªncia de", "devido a",
-        "intervalo entre o inÃ­cio e a morte", "intervalo entre o inicio e a morte",
-        "cid", "meses dias horas minutos ignorado", "causas da morte", "causa da morte",
-        "outras afecÃ§Ãµes", "outras afeccoes","seqÃ¼Ãªncia de causas", "sequencia de causas",
-        "estados mÃ³rbidos que causaram diretamente a morte","anote somente um diagnÃ³stico por linha",
-        "doenÃ§a ou estado mÃ³rbido que causou diretamente a morte","sequÃªncia de causas mÃ³rbidas que ocasionaram diretamente a morte",
-        "parte i", "parte ii", "anote somente um diagnÃ³stico por linha", "doenÃ§a ou estado mÃ³rbido que causou diretamente a morte",
-        "sequÃªncia de causas mÃ³rbidas que ocasionaram diretamente a morte",  "causas antecedentes","afecÃ§Ãµes mÃ³rbidas, se houver",
-        "outra condiÃ§Ã£o significativa","condiÃ§Ã£o significativa que contribuiu","nÃ£o relacionadas diretamente","afeccoes que originaram as causas acima",
-        "afecÃ§Ãµes que originaram as causas acima","afeccoes que originaram","afecÃ§Ãµes que originaram", "produziram a causa bÃ¡sica",
-        "outra condiÃ§Ã£o significativa","condiÃ§Ã£o significativa que contribuiu", "nÃ£o relacionadas diretamente", "doenÃ§a ou estado mÃ³rbido que causou diretamente a morte","devido ou como consequÃªncia de", "doenca ou estado morbido que causou diretamente a morte","imediatA",
-        "causa imediata","devido ou como consequÃªncia", "consequÃªncia","parte i","parte ii", "doenÃ§a ou estado mÃ³rbido que causou diretamente a morte", "doenÃ§a ou condiÃ§Ã£o significativa que contribuiu",
-        "condiÃ§Ãµes ou causas mÃ³rbidas que ocasionaram diretamente", "afeccoes mÃ³rbidas, se houver, que produziram a causa acima", "afecÃ§Ãµes mÃ³rbidas, se houver, que produziram a causa acima",
-        "outra condiÃ§Ã£o significativa", "condiÃ§Ã£o significativa que contribuiu", "nÃ£o relacionadas diretamente", "que contribuÃ­ram para a morte", "que nÃ£o entraram", "que nÃ£o entram", "outras condiÃ§Ãµes significativas",
-        "nÃ£o relacionadas Ã  doenÃ§a",  ]
-    start_idx = -1
-    for i, (norm, _) in enumerate(pairs):
-        nl = _norm_label(norm)
-        if any(m in nl for m in start_markers):
-            start_idx = i
-            break
-    if start_idx == -1:
-        return []
-    causes: List[str] = []
-    for norm, orig in pairs[start_idx + 1:]:
-        nl = _norm_label(norm)
-        if any(nl == s or nl.startswith(s) for s in stop_markers):
-            break
-        if any(nl == s or nl.startswith(s) for s in ignore_markers):
-            continue
-        if re.fullmatch(r"\([a-eA-E]\)", norm):
-            continue
-        if _is_noise_line(norm):
-            continue
-        if len(orig.strip()) < 3:
-            continue
-        causes.append(orig.strip())
-    return [c.strip() for c in causes if _causa_valida(c)]
-
-def _parse_parte_i_regex(text: str) -> dict:
-    """Extrai causas via regex na seÃ§Ã£o PARTE I (v2)."""
-    result = {
-        "CAUSA_MORTE": "", "CAUSA_MORTE_2": "", "CAUSA_MORTE_3": "",
-        "CAUSA_MORTE_4": "", "CAUSA_BASICA": "",
-    }
-    parte_i_match = re.search(
-        r"PARTE\s+I[:\s]*\n?(.*?)(?:PARTE\s+II|Intervalo|PREENCHEMENTO|$)",
-        text, re.DOTALL | re.IGNORECASE
-    )
-    if not parte_i_match:
-        parte_i_match = re.search(
-            r"Causas?\s+da?\s+morte[:\s]*\n?(.*?)(?:PARTE\s+II|Outras condiÃ§Ãµes|"
-            r"Nome do mÃ©dico|CRM|$)",
-            text, re.DOTALL | re.IGNORECASE
-        )
-    if not parte_i_match:
-        return result
-    parte_i_text = parte_i_match.group(1)
-    linhas = re.findall(
-        r"^(?:\d+[\)\.]\s*|[a-dA-D][\)\.]\s*|[IVXivx]+[\)\.]\s*)(.+?)$",
-        parte_i_text, re.MULTILINE
-    )
-    if not linhas:
-        linhas = re.findall(
-            r"(?:\d[\)\.]\s*|[a-dA-D][\)\.]\s*|I[\)\.]\s*|II[\)\.]\s*|"
-            r"III[\)\.]\s*|IV[\)\.]\s*)(.+)",
-            parte_i_text
-        )
-    causas = []
-    for l in linhas:
-        linha = l.strip()
-        if not linha or len(linha) < 3:
-            continue
-        if re.match(r"^(anote|preencher|nÃ£o|nao|ignore|cid)", linha, re.IGNORECASE):
-            continue
-        causas.append(linha)
-    for i, causa in enumerate(causas):
-        if i == 0:
-            result["CAUSA_MORTE"] = causa
-            result["CAUSA_BASICA"] = causa
-        elif i == 1:
-            result["CAUSA_MORTE_2"] = causa
-        elif i == 2:
-            result["CAUSA_MORTE_3"] = causa
-        elif i == 3:
-            result["CAUSA_MORTE_4"] = causa
-    if len(causas) > 1:
-        result["CAUSA_BASICA"] = causas[-1]
-    return result
-
-def _extract_causes(text: str) -> dict:
-    """Tenta parser por regex primeiro, fallback para parser de pares."""
-    result = _parse_parte_i_regex(text)
-    if result.get("CAUSA_MORTE"):
-        return result
-    causes = _extract_causes_v1(text)
-    if causes:
-        out = {
-            "CAUSA_MORTE": causes[0] if len(causes) >= 1 else "",
-            "CAUSA_MORTE_2": causes[1] if len(causes) >= 2 else "",
-            "CAUSA_MORTE_3": causes[2] if len(causes) >= 3 else "",
-            "CAUSA_MORTE_4": causes[3] if len(causes) >= 4 else "",
-            "CAUSA_MORTE_5": causes[4] if len(causes) >= 5 else "",
-        }
-        validas = [c for c in causes if _causa_valida(c)]
-        out["CAUSA_BASICA"] = validas[-1] if validas else ""
-        return out
-    return result
-
-# â”€â”€ Parser: formulÃ¡rio numerado (campos 1-7, v2) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            if wc[0].isupper() or wc.lower() in parts:
+                if wc[0].isupper():
+                    caps += 1
+            else:
+                ok = False
+                break
+        if ok and caps >= 2:
+            candidates.append(" ".join(w.strip("|.,;:") for w in words))
+    if not candidates:
+        return ""
+    best = max(candidates, key=len)
+    return _sanitize_person_name(best)
 
 def _parsed_do_form(lines: list) -> dict:
-    """Parse usando numeraÃ§Ã£o de campos 1-7 (mais robusto que label textual)."""
-    field_map = {
-        1: "TIPO_OBITO", 2: "DATA_HORA_OBITO", 3: "CARTAO_SUS",
-        4: "NATURALIDADE", 5: "NOME", 6: "NOME_PAI", 7: "NOME_MAE",
-    }
+    field_map = {1: "TIPO_OBITO", 2: "DATA_HORA_OBITO", 3: "CARTAO_SUS",
+                 4: "NATURALIDADE", 5: "NOME", 6: "NOME_PAI", 7: "NOME_MAE"}
     field_values = {}
     current_field = None
     current_lines = []
@@ -1178,7 +520,7 @@ def _parsed_do_form(lines: list) -> dict:
         line = line.strip()
         if not line:
             continue
-        m = re.match(r"^(\d{1,2})\s+[A-Za-zÃ€-Ã¿]", line)
+        m = re.match(r"^(\d{1,2})\s+[A-Za-zÀ-ÿ]", line)
         if m:
             if current_field and current_lines:
                 field_values[current_field] = "\n".join(current_lines)
@@ -1193,5780 +535,388 @@ def _parsed_do_form(lines: list) -> dict:
         field_values[current_field] = "\n".join(current_lines)
     result = {}
     if 2 in field_values:
-        text = field_values[2]
-        date_match = re.search(r"(\d{2})(\d{2})(\d{4})", text)
-        if date_match:
-            d, m, y = date_match.group(1), date_match.group(2), date_match.group(3)
-            if 1 <= int(d) <= 31 and 1 <= int(m) <= 12:
-                result["DATA_OBITO"] = f"{d}/{m}/{y}"
-        hour_match = re.search(r"(\d{1,2}):(\d{2})", text)
-        if hour_match:
-            h, mi = hour_match.group(1), hour_match.group(2)
-            if int(h) <= 23 and int(mi) <= 59:
-                result["HORA_OBITO"] = f"{h.zfill(2)}:{mi}"
+        txt = field_values[2]
+        dm = re.search(r"(\d{2})(\d{2})(\d{4})", txt)
+        if dm and 1 <= int(dm.group(2)) <= 12 and 1 <= int(dm.group(1)) <= 31:
+            result["DATA_OBITO"] = f"{int(dm.group(1)):02d}/{int(dm.group(2)):02d}/{dm.group(3)}"
+        hm = re.search(r"(\d{1,2}):(\d{2})", txt)
+        if hm:
+            hora = _normalize_hora(f"{hm.group(1)}:{hm.group(2)}")
+            if hora:
+                result["HORA_OBITO"] = hora
     if 5 in field_values:
-        text = field_values[5]
-        lines_f = text.strip().split("\n")
-        nome = ""
-        for l in lines_f:
-            l = l.strip().rstrip("|.")
-            if len(l) > 5 and not re.match(r"^\d+\s+[A-Z]", l):
-                nome += " " + l
-        nome = nome.strip()
-        if len(nome) > 5:
+        nome = _sanitize_person_name(field_values[5].replace("\n", " "))
+        if nome:
             result["NOME"] = nome
-    if 6 in field_values:
-        pai = _clean_field(field_values[6])
-        if pai and len(pai) > 3:
-            result["NOME_PAI"] = pai
     if 7 in field_values:
-        mae = _clean_field(field_values[7])
-        if mae and len(mae) > 3:
+        mae = _sanitize_person_name(field_values[7].replace("\n", " "))
+        if mae:
             result["NOME_MAE"] = mae
     return result
 
-# â”€â”€ Fallback inteligente para nome (v2) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-def _find_name_fallback(text: str) -> str:
-    """Busca nome no texto quando parser por label falha."""
-    lines = text.split("\n")
-    candidates = []
-    skip = {
-        "identificacao", "residencia", "ocorrencia", "cartorio", "medico",
-        "causas externas", "condicoes e causas", "fetal ou menor",
-        "declaracao de obito", "republica federativa", "ministerio da saude",
-        "tipo de obito", "data do obito", "hora", "nome do falecido",
-        "nome do pai", "nome da mae", "cartao sus", "naturalidade",
-        "municipio", "secretaria de saude", "via secretaria",
-        "definicoes", "nascimento vivo",
-    }
-    for line in lines:
-        line = line.strip().rstrip("|.,;:")
-        if not line or len(line) < 10:
-            continue
-        if re.match(r"^\d+\s", line):
-            continue
-        if line.lower().strip() in skip:
-            continue
-        if sum(1 for c in line if not c.isalpha() and not c.isspace()) > len(line) * 0.3:
-            continue
-        words = line.split()
-        if len(words) < 2:
-            continue
-        parts = {"de", "da", "do", "das", "dos", "e", "van", "von"}
-        ok = True
-        caps = 0
-        for w in words:
-            wc = w.strip(".,;:")
-            if not wc:
-                continue
-            if wc[0].isupper() or wc.lower() in parts:
-                if wc[0].isupper():
-                    caps += 1
-            else:
-                ok = False
-                break
-        if ok and caps >= 2:
-            candidates.append(" ".join(w.strip("|.,;:") for w in words))
-    return max(candidates, key=len) if candidates else ""
-
-# â”€â”€ UtilitÃ¡rios diversos para parser â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+def _detect_obito_type(text: str) -> str:
+    if re.search(r'X\s*(Nao|Não)\s*fetal', text, re.IGNORECASE):
+        return "Não Fetal"
+    if re.search(r'X\s*Fetal', text) and not re.search(r'X\s*(Nao|Não)\s*fetal', text, re.IGNORECASE):
+        return "Fetal"
+    if re.search(r'\bFatal\b', text, re.IGNORECASE):
+        return "Não Fetal"
+    if re.search(r'\b(Nao|Não)\s*fetal\b', text, re.IGNORECASE):
+        return "Não Fetal"
+    if re.search(r'\bFetal\b', text, re.IGNORECASE):
+        return "Fetal"
+    return ""
 
 def _extract_uf_ocorrencia(text: str) -> str:
     if not text:
         return ""
-    
-    # Encontra TODOS os "UF: XX" no texto
-    todos_ufs = re.findall(r"UF\s*[:\s]*([A-Z]{2})", text)
-    
-    # Remove matches que tenham "MunicÃ­pio" antes (atÃ© 30 caracteres antes)
-    ufs_validos = []
-    for match in re.finditer(r"UF\s*[:\s]*([A-Z]{2})", text):
-        start = max(0, match.start() - 40)
-        before = text[start:match.start()]
-        if "MunicÃ­pio" not in before and "municÃ­pio" not in before:
-            ufs_validos.append(match.group(1))
-    
-    # Pega o Ãºltimo UF vÃ¡lido (geralmente UF_OBITO)
-    return ufs_validos[-1] if ufs_validos else ""
-
-def _detect_obito_type(text: str) -> str:
-    """Detecta tipo de Ã³bito (Fetal/Fatal)."""
-    if re.search(r"(?<!NÃ£o\s)(Fetal|fetal)", text) and "NÃ£o fetal" not in text:
-        return "Fetal"
-    if re.search(r"Fatal|NÃ£o fetal|NÃ£o Fetal|NÃ£o\s+fetal", text, re.IGNORECASE):
-        if "Fatal" in text and "NÃ£o Fetal" not in text and "NÃ£o fetal" not in text and "Nao fetal" not in text:
-            return ""
-        return "NÃ£o Fetal"
-    if re.search(r"X\s*Fetal", text) and not re.search(r"X\s*NÃ£o\s+fetal", text):
-        return "Fetal"
-    if re.search(r"X\s*(Nao|NÃ£o)\s+fetal", text, re.IGNORECASE):
-        return "Fatal"
+    ocorrencia_match = re.search(
+        r'Local de ocorrência do óbito[:\s]*\n?(.*?)(?:III[\)\.\s]|PREENCHEMENTO|IV[\)\.\s]|$)',
+        text, re.DOTALL | re.IGNORECASE
+    )
+    if ocorrencia_match:
+        uf_match = re.search(r'UF\s*[:\s]*([A-Z]{2})', ocorrencia_match.group(1))
+        if uf_match:
+            return _normalize_uf(uf_match.group(1))
+    ufs = re.findall(r'(?<!Município\s.*)UF\s*[:\s]*([A-Z]{2})', text)
+    if ufs:
+        return _normalize_uf(ufs[-1])
     return ""
 
-def _is_valid_obito(ocr_text: str) -> bool:
-    """Verifica se o texto contÃ©m uma DO vÃ¡lida."""
-    if not ocr_text or len(ocr_text.strip()) < 50:
-        return False
-    keywords = [
-        "declaraÃ§Ã£o de Ã³bito", "atestado de Ã³bito",
-        "nome do falecido", "causas da morte",
-        "parte i", "declaraÃ§Ã£o de obito",
-        "tipo de Ã³bito", "tipo de obito",
-    ]
-    text_lower = ocr_text.lower()
-    return any(k in text_lower for k in keywords)
-# â”€â”€ Alteracoes 2 e 3: deteccao de verso e validacao tolerante â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-MARCAS_VERSO = ('definiÃ§Ãµes', 'definicoes', 'legislaÃ§Ã£o', 'legislacao', 'ressalva', 'lei 6.015', 'capÃ­tulo ix', 'capitulo ix')
-
-def detectar_verso(texto) -> bool:
-    """Retorna True se o texto parece ser o verso de uma DO."""
-    if not texto or not isinstance(texto, str):
-        return False
-    t = texto.lower()
-    for marca in MARCAS_VERSO:
-        if marca in t:
-            return True
-    return False
-
-def extrair_ressalvas(texto) -> list:
-    """Extrai as ressalvas do verso no formato campo: valor."""
-    if not texto or not isinstance(texto, str):
-        return []
-    import re
-    padrao = re.findall(r'[Rr]essalva do campo (\d+)\s*:\s*([^\n]+)', texto)
-    return [{"campo": c.strip(), "valor": v.strip()} for c, v in padrao]
-
-def parece_do(texto) -> bool:
-    """Validacao tolerante: aceita como DO se tiver os campos essenciais."""
-    if not texto or not isinstance(texto, str):
-        return False
-    t = texto.lower()
-    tem_declaracao = ('declaraÃ§Ã£o de Ã³bito' in t) or ('declaracao de obito' in t)
-    tem_causas = ('causas da morte' in t) or ('causa da morte' in t)
-    tem_medico = ('nome do mÃ©dico' in t) or ('nome do medico' in t) or ('crm' in t)
-    return tem_declaracao and (tem_causas or tem_medico)
-
-
-# â”€â”€ Validacao de NOME (rejeita labels, DO_NUMERO e data/hora) â”€â”€
-def _validar_nome(valor):
-    """Retorna True se o valor parece um nome real de falecido."""
-    if not valor:
-        return False
-    v = valor.strip()
-    if not v:
-        return False
-    # Rejeita labels de formulario
-    labels = ["do pai", "da mÃ£e", "da mae", "anos completos", "nome do falecido",
-              "nome do pai", "nome da mÃ£e", "nome da mae", "republica federativa",
-              "municipio/uf", "menores de 1 ano", "ignorado", "descricao sumaria"]
-    vl = v.lower()
-    for lb in labels:
-        if vl.startswith(lb):
-            return False
-    # Rejeita numero de DO (9 digitos com hifen)
-    if re.match(r'^\d{9}-\d(raw_text: str) -> Dict[str, Any]:
-    """Parser principal: parser original + fallback por label PT + fallback LLM."""
-    structured: Dict[str, Any] = {k: "" for k in HEADER}
-
-    if not raw_text:
-        return structured
-    # â”€â”€ DicionÃ¡rio de correÃ§Ã£o de OCR â”€â”€
-    correcoes_ocr = {
-        "cheguei ": "choque ",
-        "cheguei ": "choque ",
-        "cheque ": "choque ",
-        "chequei ": "choque ",
-        "chocume ": "choque ",
-        "sepses ": "sepse ",
-        "septicemia": "sepse",
-        "pu ": "de foco ",
-        "pu foco": "de foco",
-        "isoscomica": "nosocomial",
-        "isquÃªmica": "isquÃªmica",  # manter se jÃ¡ estÃ¡ correto
-    }
-
-    for campo_texto in ["CAUSA_MORTE", "CAUSA_BASICA", "PARTE_II"]:
-        valor = structured.get(campo_texto, "")
-        if valor:
-            valor_lower = valor.lower()
-            for errado, correto in correcoes_ocr.items():
-                valor_lower = valor_lower.replace(errado.lower(), correto)
-            # Preservar capitalizaÃ§Ã£o original aproximada
-            if valor_lower != valor.lower():
-                # Reconstruir mantendo a primeira letra maiÃºscula se original era
-                palavras = valor_lower.split()
-                if palavras and valor[0].isupper():
-                    palavras[0] = palavras[0].capitalize()
-                structured[campo_texto] = " ".join(palavras)
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    # 1. PARSER ORIGINAL
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-
-    numbered = _parsed_do_form(raw_text.split("\n"))
-    if numbered.get("NOME"):
-        for k, v in numbered.items():
-            if k in structured and v:
-                structured[k] = v
-
-    if not structured["NOME"]:
-        structured["NOME"] = _find_block_value(raw_text,
-           ["Nome do Falecido", "Nome do falecido", "Nome do(a) Falecido(a)", "Nome do(a) falecido(a)", "Nome da falecida"],
-            stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Nome da mÃ£e", "Nome da mae", "Nome do pai", "Nome social", "Data"],
-        )
-    if not structured["NOME"]:
-        for label in ["Nome do Falecido", "Nome do falecido"]:
-            for line in raw_text.split("\n"):
-                if label.lower() in line.lower():
-                    resto = line[line.lower().index(label.lower()) + len(label):].strip()
-                    if resto and not any(kw in resto.lower() for kw in ["nome", "data", "hora"]):
-                        structured["NOME"] = resto
-                        break
-            if structured["NOME"]:
-                break
-    if not structured["NOME"]:
-        fb = _find_name_fallback(raw_text)
-        if fb:
-            structured["NOME"] = fb
-
-    structured["NOME_SOCIAL"] = _find_block_value(
-        raw_text, ["Nome social", "Nome Social"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Nome do falecido", "Nome da mÃ£e", "Nome da mae", "Nome do pai"],
+def _parse_parte_i(text: str) -> dict:
+    result = {"CAUSA_MORTE": "", "CAUSA_MORTE_2": "", "CAUSA_MORTE_3": "",
+              "CAUSA_MORTE_4": "", "CAUSA_BASICA": ""}
+    parte_i_match = re.search(
+        r'PARTE\s+I[:\s]*\n?(.*?)(?:PARTE\s+II|Intervalo|PREENCHEMENTO|$)',
+        text, re.DOTALL | re.IGNORECASE
     )
-
-    if not structured["NOME_MAE"]:
-        structured["NOME_MAE"] = _find_block_value(
-            raw_text,
-            ["Nome da MÃ£e", "Nome da mÃ£e", "Nome da mae", "Nome da Mae"],
-            stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Nome do pai", "ProfissÃ£o", "Profissao", "EndereÃ§o", "Endereco", "Nacionalidade"],
+    if not parte_i_match:
+        parte_i_match = re.search(
+            r'Causas?\s+da?\s+morte[:\s]*\n?(.*?)(?:PARTE\s+II|Outras condições|'
+            r'Nome do médico|CRM|$)',
+            text, re.DOTALL | re.IGNORECASE
         )
+    if not parte_i_match:
+        return result
+    linhas = re.findall(
+        r'^(?:\d+[\)\.]\s*|[a-dA-D][\)\.]\s*|[IVXivx]+[\)\.]\s*)(.+?)$',
+        parte_i_match.group(1), re.MULTILINE
+    ) or re.findall(
+        r'(?:\d[\)\.]\s*|[a-dA-D][\)\.]\s*|I[\)\.]\s*|II[\)\.]\s*|III[\)\.]\s*|IV[\)\.]\s*)(.+)',
+        parte_i_match.group(1)
+    )
+    causas = []
+    for l in linhas:
+        c = _clean_causa(l)
+        if c and len(c) >= 3:
+            causas.append(c)
+    if not causas:
+        return result
+    result["CAUSA_MORTE"] = causas[0]
+    result["CAUSA_BASICA"] = causas[-1]
+    if len(causas) > 1:
+        result["CAUSA_MORTE_2"] = causas[1]
+    if len(causas) > 2:
+        result["CAUSA_MORTE_3"] = causas[2]
+    if len(causas) > 3:
+        result["CAUSA_MORTE_4"] = causas[3]
+    return result
 
-    if not structured["NOME_PAI"]:
-        structured["NOME_PAI"] = _find_block_value(
-            raw_text,
-            ["Nome do Pai", "Nome do pai"],
-            stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","ProfissÃ£o", "Profissao", "EndereÃ§o", "Endereco", "Nacionalidade", "Nome da mÃ£e", "Nome da mae"],
-        )
+def parse_obito(text: str) -> dict:
+    structured = {k: "" for k in HEADER}
 
+    nome = _sanitize_person_name(_find_block_value(text, [
+        "Nome do Falecido", "Nome do falecido", "Falecido", "Nome",
+    ], stop_labels=["Nome do Pai", "Nome da Mãe", "Nome do pai", "Nome da mãe"]))
+    if not nome:
+        nome = _sanitize_person_name(_parsed_do_form(text.split("\n")).get("NOME", ""))
+    if not nome:
+        nome = _find_name_fallback(text)
+    structured["NOME"] = nome
+
+    mae = _sanitize_person_name(_find_block_value(text, [
+        "Nome da Mãe", "Nome da mãe", "Nome da Mae", "Nome da mae",
+    ], stop_labels=["Nome do Pai", "Nome do pai", "Endereço", "Logradouro"]))
+    if not mae:
+        mae = _sanitize_person_name(_parsed_do_form(text.split("\n")).get("NOME_MAE", ""))
+    structured["NOME_MAE"] = mae
+
+    _raw_nasc = _find_block_value(text, [
+        "Data de nascimento", "Data de Nascimento", "Nascimento", "Nasc.",
+    ], stop_labels=["Data do óbito", "Data do obito", "Idade"])
+    structured["NASCIMENTO"] = _normalize_date(_normalize_date_ocr(_raw_nasc))
     if not structured["NASCIMENTO"]:
-        structured["NASCIMENTO"] = _normalize_date(
-            _find_block_value(raw_text,
-                ["Data de nascimento", "Data de Nascimento", "Nascimento"],
-                stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Data do Ã³bito", "Data do obito", "Sexo", "RaÃ§a", "Raca"],
-            )
-        )
-
-    if not structured["DATA_OBITO"]:
-        structured["DATA_OBITO"] = _normalize_date(
-            _find_block_value(raw_text,
-                ["Data do Ã³bito", "Data de Ã³bito", "Data do obito", "Data de obito"],
-                stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Hora", "Local do Ã³bito", "Local do obito", "MunicÃ­pio de ocorrÃªncia", "Municipio de ocorrencia"],
-            )
-        )
-    if not structured["DATA_OBITO"]:
-        for label in ["Data do Ã³bito", "Data de Ã³bito", "Data do obito", "Data de obito"]:
-            for line in raw_text.split("\n"):
-                if label.lower() in line.lower():
-                    resto = line[line.lower().index(label.lower()) + len(label):].strip()
-                    if resto:
-                        structured["DATA_OBITO"] = _normalize_date(_normalize_date_ocr(resto))
+        _lines_t = text.split("\n")
+        for i, line in enumerate(_lines_t):
+            if "data de nascimento" in line.lower():
+                for j in range(i, min(i + 4, len(_lines_t))):
+                    cand = _lines_t[j].replace(" ", "")
+                    for d in re.findall(r"\d{2}/\d{2}/\d{4}", cand):
+                        parsed = _normalize_date(d)
+                        if parsed:
+                            structured["NASCIMENTO"] = parsed
+                            break
+                    if structured["NASCIMENTO"]:
                         break
-            if structured["DATA_OBITO"]:
+            if structured["NASCIMENTO"]:
                 break
 
-    structured["HORA_OBITO"] = _find_hora_obito(raw_text)
+        _raw_data_obito = ""
+    for label in ["Data do óbito", "Data de óbito", "Data do obito", "Data de obito"]:
+        for line in text.split('\n'):
+            if label.lower() in line.lower():
+                resto = line[line.lower().index(label.lower()) + len(label):].strip()
+                m = re.search(r'(\d{1,2})[/\s](\d{1,2})[/\s](\d{2,4})', resto)
+                if m:
+                    _raw_data_obito = f"{m.group(1)} {m.group(2)} {m.group(3)}"
+                hm = re.search(r'(\d{1,2}):(\d{2})', resto)
+                if hm:
+                    structured["HORA_OBITO"] = _normalize_hora(f"{hm.group(1)}:{hm.group(2)}")
+                break
+        if _raw_data_obito:
+            break
+    structured["DATA_OBITO"] = _normalize_date(_normalize_date_ocr(_raw_data_obito))
 
-    structured["DATA_ATESTADO"] = _normalize_date(
-        _find_block_value(raw_text, ["Data do atestado", "Data de emissÃ£o", "Data da emissÃ£o"])
-    )
+    _raw_hora = _find_block_value(text, [
+        "Hora do óbito", "Hora do obito", "Hora",
+    ], stop_labels=["Data do óbito", "Data do obito", "Local do óbito", "Local do obito"])
+    if _raw_hora:
+        hora = _normalize_hora(_raw_hora)
+        if hora:
+            structured["HORA_OBITO"] = hora
 
-    structured["LOCAL_OBITO"] = _find_block_value(
-        raw_text, ["Local do Ã³bito", "Local de Ã³bito", "Local do obito", "Local de obito"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","MunicÃ­pio de ocorrÃªncia", "Municipio de ocorrencia", "UF"],
-    )
-
-    if not structured["CIDADE_OBITO"]:
-        structured["CIDADE_OBITO"] = _find_block_value(
-            raw_text,
-            ["MunicÃ­pio de ocorrÃªncia", "Municipio de ocorrÃªncia", "MunicÃ­pio de ocorrencia", "Municipio de ocorrencia"],
-            stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","UF", "Estado", "Data", "CEP", "Cep"],
-        )
-
-    structured["UF_OBITO"] = _find_uf_after(raw_text, ["MunicÃ­pio de ocorrÃªncia", "Municipio de ocorrencia"])
+    structured["CIDADE_OBITO"] = _normalize_cidade(_find_block_value(text, [
+        "Município de ocorrência", "Municipio de ocorrencia", "Município de Ocorrência",
+    ]))
+    structured["UF_OBITO"] = _normalize_uf(_extract_uf_ocorrencia(text))
     if not structured["UF_OBITO"]:
-        structured["UF_OBITO"] = _extract_uf_ocorrencia(raw_text)
+        structured["UF_OBITO"] = _normalize_uf(_find_block_value(text, ["UF"]))
 
-    structured["LOGRADOURO"] = _find_block_value(
-        raw_text, ["Logradouro", "EndereÃ§o", "Endereco"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","NÃºmero", "Numero", "Complemento", "Bairro"],
-    )
-    structured["NUMERO"] = _find_block_value(
-        raw_text, ["NÃºmero", "Numero"], stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Complemento", "Bairro"],
-    )
-    structured["COMPLEMENTO"] = _find_block_value(
-        raw_text, ["Complemento"], stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Bairro", "MunicÃ­pio", "Municipio"],
-    )
-    structured["BAIRRO"] = _find_block_value(
-        raw_text, ["Bairro"], stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","MunicÃ­pio", "Municipio", "Cidade", "UF"],
-    )
-    structured["CIDADE"] = _find_block_value(
-        raw_text, ["MunicÃ­pio", "Municipio", "Cidade"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","UF", "CEP", "Cep"],
-    )
-    structured["UF"] = _find_uf_after(
-        raw_text, ["EndereÃ§o", "Endereco", "Logradouro", "Bairro", "MunicÃ­pio", "Municipio", "Cidade"],
-    )
-    structured["CEP"] = _normalize_cep(_find_block_value(raw_text, ["CEP", "Cep"]))
+    structured["TIPO_OBITO"] = _detect_obito_type(text)
+    if structured["TIPO_OBITO"] not in ("Fetal", "Não Fetal", ""):
+        structured["TIPO_OBITO"] = ""
 
-    structured["CIDADE_NASCIMENTO"] = _find_block_value(
-        raw_text, ["Naturalidade", "MunicÃ­pio de nascimento", "Municipio de nascimento", "Cidade de nascimento"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","UF de nascimento", "Nacionalidade"],
-    )
-    structured["UF_NASCIMENTO"] = _find_uf_after(
-        raw_text, ["Naturalidade", "MunicÃ­pio de nascimento", "Municipio de nascimento"],
-    )
-
-    structured["CPF"] = _find_block_value(raw_text, ["CPF"])
-    structured["RG"] = _find_block_value(raw_text, ["RG", "Registro Geral"])
-    structured["ORGAO_EMISSOR_RG"] = _find_block_value(
-        raw_text, ["Ã“rgÃ£o emissor", "Orgao emissor", "Ã“rgÃ£o expedidor", "Orgao expedidor"],
-    )
-
-    structured["SEXO"] = _find_block_value(raw_text, ["Sexo"], stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","RaÃ§a", "Raca", "Cor"])
-    structured["RACA_COR"] = _find_block_value(
-        raw_text, ["RaÃ§a/Cor", "RaÃ§a", "Raca/Cor", "Raca", "Cor"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","SituaÃ§Ã£o", "Situacao", "Escolaridade", "OcupaÃ§Ã£o", "Ocupacao"],
-    )
-    structured["ESTADO_CIVIL"] = _find_block_value(
-    raw_text, ["Estado civil", "SituaÃ§Ã£o conjugal", "Situacao conjugal"],
-    stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Escolaridade", "OcupaÃ§Ã£o", "Ocupacao", "RaÃ§a", "Raca"],
-    )
-    structured["NACIONALIDADE"] = _find_block_value(raw_text, ["Nacionalidade"])
-    structured["PROFISSAO"] = _find_block_value(raw_text, ["ProfissÃ£o", "Profissao", "OcupaÃ§Ã£o", "Ocupacao"])
-
-    structured["TIPO_OBITO"] = _detect_obito_type(raw_text)
-
-    causas = _extract_causes(raw_text)
+    causas = _parse_parte_i(text)
     structured["CAUSA_MORTE"] = causas.get("CAUSA_MORTE", "")
     structured["CAUSA_MORTE_2"] = causas.get("CAUSA_MORTE_2", "")
     structured["CAUSA_MORTE_3"] = causas.get("CAUSA_MORTE_3", "")
     structured["CAUSA_MORTE_4"] = causas.get("CAUSA_MORTE_4", "")
-    structured["CAUSA_MORTE_5"] = causas.get("CAUSA_MORTE_5", "")
     structured["CAUSA_BASICA"] = causas.get("CAUSA_BASICA", "")
 
-    cid_basica = ""
-    if structured.get("CAUSA_BASICA"):
-        cids = _CID_RE.findall(structured["CAUSA_BASICA"])
-        if cids:
-            cid_basica = cids[-1].upper()
-    if not cid_basica:
-        cids = _CID_RE.findall(raw_text)
-        if cids:
-            cid_basica = cids[-1].upper()
-    structured["CID_BASICA"] = cid_basica
+    structured["MEDICO_ATESTANTE"] = _clean_field(_find_block_value(text, [
+        "Médico", "Medico", "Nome do Médico", "Nome do medico",
+    ], stop_labels=["CRM"]))
+    structured["CRM_MEDICO"] = _clean_field(_find_block_value(text, ["CRM"]))
 
-    structured["DO_NUMERO"] = _find_block_value(
-    raw_text,
-     [r"D\.O\.", "DO nÂº", "DO NÂº", "NÂº DO", "Numero DO", "NÃºmero DO"],
-    stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Nome", "Data", "Tipo", "Logradouro", "EndereÃ§o", "Endereco",
-                 "Outras", "condiÃ§Ãµes", "CondiÃ§Ãµes", "CAUSAS", "Causa", "Parte",
-                 "OcupaÃ§Ã£o", "Ocup", "ProfissÃ£o", "Profissao",
-                 "Escolaridade", "Naturalidade", "CartÃ£o", "RG", "CPF","Dr[a.]", "MÃ©dico", "CRM", "Telefone", "Data do atestado"],
+    do_match = re.search(r'Declaração\s+de\s+Óbito\s+(\d+(?:-\d+)?)', text, re.IGNORECASE)
+    if do_match:
+        structured["DO_NUMERO"] = do_match.group(1)
+
+    parte_ii_match = re.search(
+        r'PARTE\s+II[:\s]*\n?(.*?)(?:Outros episódios|Nome do médico|CRM|$)',
+        text, re.DOTALL | re.IGNORECASE
     )
-    if not structured["DO_NUMERO"]:
-        do_match = re.search(
-            r"DeclaraÃ§Ã£o\s+de\s+Ã“bito\s+(\d+(?:-\d+)?)", raw_text, re.IGNORECASE
-        )
-        if do_match:
-            structured["DO_NUMERO"] = do_match.group(1)
+    if parte_ii_match:
+        p2 = re.sub(r'^que contribuíram para a morte[^:]*[: ]*', '',
+                    parte_ii_match.group(1).strip(), flags=re.IGNORECASE)
+        p2 = re.sub(r'^outras condições significativas[^:]*[: ]*', '', p2, flags=re.IGNORECASE)
+        p2 = _clean_field(p2[:200])
+        if p2 and not any(j in p2.lower() for j in FORM_JUNK):
+            structured["PARTE_II"] = p2
+            structured["INTERVALO_DOENCA_MORTE"] = p2
 
-    structured["MEDICO_ATESTANTE"] = _find_block_value(
-        raw_text,
-        ["MÃ©dico atestante", "Medico atestante", "Nome do mÃ©dico", "Nome do medico"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","CRM", "Registro", "Assinatura"],
-    )
-    structured["CRM_MEDICO"] = _find_block_value(
-        raw_text, ["CRM", "C.R.M.", "C.R.M"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Assinatura", "Carimbo", "UF"],
-    )
+    idade_raw = _find_block_value(text, ["Idade", "IDADE"])
+    if idade_raw:
+        nums = re.findall(r'\d+', idade_raw)
+        if nums:
+            structured["IDADE_ANOS"] = nums[0]
 
-    structured["PARTE_II"] = _find_block_value(
-        raw_text,
-        ["Parte II", "Parte 2", "Outras condiÃ§Ãµes significativas", "Outras condicoes significativas"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Oportunidade", "Notificado", "ProvidÃªncias", "Nome do auditor", "Nome do medico"],
-        max_distance=20,
-    )
-    if not structured["PARTE_II"]:
-        parte_ii_match = re.search(
-            r"PARTE\s+II[:\s]*\\n?(.*?)(?:Outros episÃ³dios|Nome do mÃ©dico|CRM|$)",
-            raw_text, re.DOTALL | re.IGNORECASE
-        )
-        if parte_ii_match:
-            structured["PARTE_II"] = _clean_field(parte_ii_match.group(1).strip()[:200])
-
-    structured["INTERVALO_DOENCA_MORTE"] = _find_block_value(
-        raw_text,
-        ["Tempo aproximado", "Intervalo entre o inÃ­cio", "Intervalo entre o inicio"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Causas", "Parte", "Nome"],
-        max_distance=8,
-    )
-    # â”€â”€ Deduplicar mÃ©dico atestante â”€â”€
-    medico = structured.get("MEDICO_ATESTANTE", "")
-    if medico:
-        linhas = [l.strip() for l in medico.split("\n") if l.strip()]
-        linhas_unicas = []
-        for l in linhas:
-            if l not in linhas_unicas:
-                linhas_unicas.append(l)
-        structured["MEDICO_ATESTANTE"] = " ".join(linhas_unicas)
-    
-    # â”€â”€ Remover cabeÃ§alhos de formulÃ¡rio do NOME â”€â”€
-    nome = structured.get("NOME", "")
-    if nome:
-        nome_original = nome
-        nome = re.sub(
-            r'^(RepÃºblica Federativa do Brasil|CAPÃTULO IX|ENDEREÃ‡O DO LOCAL|'
-            r'Estabelecimento\s+|PROVÃVEIS CIRCUNSTÃ‚NCIAS|Nome do (Pai|MÃ©dico)|'
-            r'Data de nascimento|CÃ³digo CNES|NÃºmero da DeclaraÃ§Ã£o|'
-            r'Cidade e procedÃªncia|Nome da MÃ£e|'
-            r'Ã“BITO DE MULHER|ASSISTÃŠNCIA MÃ‰DICA|'
-            r'II\s+IdentificaÃ§Ã£o|III\s+OcorrÃªncia).*',
-            '', nome, flags=re.IGNORECASE | re.DOTALL
-        ).strip()
-        if nome != nome_original:
-            logger.info(f"NOME limpo: '{nome_original[:50]}...' â†’ '{nome[:50]}...'")
-        structured["NOME"] = nome
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    # 2. FALLBACK: MAPEAMENTO POR LABEL EM PORTUGUÃŠS
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-
-    label_map = {
-        "nome do falecido": "NOME",
-        "nome do falecida": "NOME",
-        "nome do paciente": "NOME",
-        "nome da mÃ£e": "NOME_MAE",
-        "nome da mae": "NOME_MAE",
-        "nome do pai": "NOME_PAI",
-        "data de nascimento": "NASCIMENTO",
-        "data de nasc": "NASCIMENTO",
-        "data nascimento": "NASCIMENTO",
-        "data do Ã³bito": "DATA_OBITO",
-        "data do obito": "DATA_OBITO",
-        "data do falecimento": "DATA_OBITO",
-        "hora do Ã³bito": "HORA_OBITO",
-        "hora do obito": "HORA_OBITO",
-        "hora:": "HORA_OBITO",
-        "sexo:": "SEXO",
-        "naturalidade": "CIDADE_NASCIMENTO",
-        "raÃ§a/cor": "RACA_COR",
-        "raca/cor": "RACA_COR",
-        "estado civil": "ESTADO_CIVIL",
-        "escolaridade": "ESCOLARIDADE",
-        "ocupaÃ§Ã£o habitual": "PROFISSAO",
-        "ocupacao habitual": "PROFISSAO",
-        "profissÃ£o": "PROFISSAO",
-        "profissao": "PROFISSAO",
-        "endereÃ§o": "LOGRADOURO",
-        "endereco": "LOGRADOURO",
-        "logradouro": "LOGRADOURO",
-        "nÃºmero": "NUMERO",
-        "numero": "NUMERO",
-        "nÂº": "NUMERO",
-        "complemento": "COMPLEMENTO",
-        "bairro": "BAIRRO",
-        "bairro/distrito": "BAIRRO",
-        "municÃ­pio de residÃªncia": "CIDADE",
-        "municipio de residencia": "CIDADE",
-        "municÃ­pio de ocorrÃªncia": "CIDADE_OBITO",
-        "municipio de ocorrencia": "CIDADE_OBITO",
-        "cidade": "CIDADE_OBITO",
-        "uf residÃªncia": "UF",
-        "uf ocorrÃªncia": "UF_OBITO",
-        "uf ocorrencia": "UF_OBITO",
-        "uf:": "UF_OBITO",
-        "cep:": "CEP",
-        "causa bÃ¡sica": "CAUSA_BASICA",
-        "causa basica": "CAUSA_BASICA",
-        "causa da morte": "CAUSA_MORTE",
-        "nome do mÃ©dico": "MEDICO_ATESTANTE",
-        "nome do medico": "MEDICO_ATESTANTE",
-        "crm:": "CRM_MEDICO",
-        "crm": "CRM_MEDICO",
-        "data do atestado": "DATA_ATESTADO",
-        "tipo de Ã³bito": "TIPO_OBITO",
-        "tipo de obito": "TIPO_OBITO",
-    }
-
-    lines = raw_text.split('\n')
-    current_field = None
-    continuation_count = {}
-
-    for line in lines:
-        line_stripped = line.strip()
-        if not line_stripped:
-            continue
-
-        line_lower = line_stripped.lower()
-
-        matched = False
-        for label, field in label_map.items():
-            if line_lower.startswith(label):
-                value = line_stripped[len(label):].strip()
-                if value.startswith(':'):
-                    value = value[1:].strip()
-                if value and not structured.get(field):
-                    structured[field] = value
-                current_field = field
-                continuation_count[current_field] = 0
-                matched = True
-                break
-
-        # NÃƒO continua se a linha tiver ":" (provavelmente Ã© outro campo)
-        if not matched and current_field and structured.get(current_field):
-            if ":" in line_stripped:
-                current_field = None
-            else:
-                cont_key = f"cont_{current_field}"
-                continuation_count[cont_key] = continuation_count.get(cont_key, 0) + 1
-                if continuation_count[cont_key] <= 2:
-                    structured[current_field] += " " + line_stripped
-                else:
-                    current_field = None
-    # Limpar prefixos "A - ", "B - ", "C - " das causas
-    for campo in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_BASICA"]:
-        val = structured.get(campo, "")
-        if val:
-            val = re.sub(r'^[A-E]\s*[-â€“â€”:]\s*', '', val).strip()
-            structured[campo] = val
-    # Normalizar datas "30 05 2020" â†’ "30/05/2020"
-    for campo_data in ["NASCIMENTO", "DATA_OBITO", "DATA_ATESTADO"]:
-        val = structured.get(campo_data, "")
-        if val and re.match(r'^\d{2}\s+\d{2}\s+\d{4}$', val):
-            partes = val.split()
-            structured[campo_data] = f"{partes[0]}/{partes[1]}/{partes[2]}"
-
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    # 3. LIMPEZA DE PREFIXOS NOS CAMPOS
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-
-    prefixos_para_remover = [
-    (r"^Descrição sumária do evento[:\s]*", ""),
-    (r"^DIAGNÓSTICO CONFIRMADO POR[:\s]*", ""),
-    (r"^Descricao sumaria do evento[:\s]*", ""),
-    (r"^DescriÃ§Ã£o sumÃ¡ria do evento[:\s]*", ""),
-    (r"^Nome do Falecido[:\s]*", ""),
-    (r"^DiagnÃ³stico confirmado por[:\s]*", ""),
-    (r"^DIAGNÃ“STICO CONFIRMADO POR[:\s]*", ""),
-    (r"^Devido ou como de[:\s]*", ""),
-    (r"^b\s*", ""),
-        (r"^\(rua,\s*praÃ§a,\s*avenida,\s*etc\):\s*", ""),
-        (r"^\(rua,\s*praca,\s*avenida,\s*etc\):\s*", ""),
-        (r"^de residÃªncia:\s*", ""),
-        (r"^de residencia:\s*", ""),
-        (r"^de ocorrÃªncia:\s*", ""),
-        (r"^de ocorrencia:\s*", ""),
-        (r"^/Distrito:\s*", ""),
-        (r"^/distrito:\s*", ""),
-        (r"^habitual:\s*", ""),
-        (r"^\(Ãºltima sÃ©rie concluÃ­da\):\s*", ""),
-        (r"^\(ultima serie concluida\):\s*", ""),
-        (r"\s+Idade:\s*\d+$", ""),
-        (r"\s+Idade\s*\d+$", ""),
-        (r"\s+CartÃ£o\s+SUS:?.*$", ""),
-        (r"\s+Cartao\s+SUS:?.*$", ""),
-        (r"^e a morte:\s*", ""),
-        (r"^UF do CRM:\s*", ""),
-        (r"^Devido ou como consequÃªncia de:\s*", ""),
-        (r"^Intervalo entre o inÃ­cio e o Ã³bito:\s*", ""),
-        (r"^Intervalo entre o inÃ­cio e a morte:\s*", ""),
-        (r"^e o Ã³bito:\s*", ""),
-        (r"^\(que contribuÃ­ram para a morte, mas nÃ£o relacionadas Ã  doenÃ§a ou condiÃ§Ã£o que a causou\):\s*", ""),
-        (r"^\(que contribuiram para a morte, mas nao relacionadas a doenca ou condicao que a causou\):\s*", ""),
-        (r"^habitual \(Informar anterior, se aposentado / desempregado\):\s*", ""),
-        (r"^habitual \(Informar anterior, se aposentada / desempregada\):\s*", ""),
-        (r"^que contribuÃ­ram para a morte, mas (?:que )?nÃ£o (?:entram (?:diretamente na seqÃ¼Ãªncia acima|relacionadas Ã  doenÃ§a ou condiÃ§Ã£o que a causou)|relacionadas Ã  doenÃ§a ou condiÃ§Ã£o que a causou)[^:]*:?\s*", ""),
-        (r"^imediatA[:\s]*", ""),
-        (r"^causa imediata[:\s]*", ""),
-        (r"^DoenÃ§a ou estado mÃ³rbido que causou diretamente a morte[:\s]*", ""),
-        (r"^CondiÃ§Ãµes ou causas mÃ³rbidas que ocasionaram diretamente[:\s]*", ""),
-        (r"^Afeccoes mÃ³rbidas, se houver, que produziram a causa acima[:\s]*", ""),
-        (r"^AfecÃ§Ãµes mÃ³rbidas, se houver, que produziram a causa acima[:\s]*", ""),
-        (r"^Parte\s+I[:\s]*", ""),
-        (r"^Imediata[:\s]*", ""),
-        (r"^Causa imediata[:\s]*", ""),
-        (r"^ANOTE SOMENTE UM DIAGNÃ“STICO POR LINHA\s*", ""),
-        (r"^Anote somente um diagnÃ³stico por linha\s*", ""),
-        (r"^NÃ£o preencher este espaÃ§o\s*", ""),
-        (r"^PREENCHEMENTO EXCLUSIVO[:\s]*", ""),
-        (r"^Nome:\s*", ""),
-        (r"^CondiÃ§Ãµes ou causas mÃ³rbidas que deram origem Ã  sequÃªncia de eventos que produziram a morte[:\s]*", ""),
-        (r"^DoenÃ§a ou condiÃ§Ãµes significativas[:\s]*", ""),
-        (r"^CondiÃ§Ãµes ou causas mÃ³rbidas que ocasionaram diretamente[:\s]*", ""),
-        (r":\s*\d+\s*$", ""),
-        (r"\s+\d{2,3}\s*$", ""),
-        (r"^:\s*", ""),
-        (r"^CÃ³digo:\s*", ""),
-        (r"^CÃ³digo\s+CID[:\s]*", ""),
-        (r"^Tempo aproximado entre o inÃ­cio e a morte[:\s]*", ""),
-        (r"^entre o inÃ­cio e[:\s]*", ""),
-        (r"^como consequÃªncia de:\s*", ""),
-        (r"^ou como consequÃªncia de:\s*", ""),
-        (r"^Devido ou como consequÃªncia de:\s*", ""),
-        (r"^,\s*mas\s+nÃ£o\s+", ""),
-        (r"^\d+:\s*", ""),         
-        (r"^Aponte\s+(a\s+)?(cadeia|doenÃ§a|eventos|condiÃ§Ã£o).*", ""),
-        (r"^Preencha\s+(o\s+)?(atestado|cada|a\s+cadeia).*", ""),
-        (r"^Coloque,\s*em\s+cada\s+linha.*", ""),
-        (r"^Denote\s+o\s+evento.*", ""),
-        (r"^SeÃ§Ã£o\s+mÃ©dica.*", ""),
-        (r"^Estado\s+mÃ³rbido\s+que\s+causou.*", ""),
-        (r"^DoenÃ§a,\s+lesÃ£o\s+ou\s+estado.*", ""),
-        (r"^CondiÃ§Ãµes\s+morbosas.*", ""),
-        (r"^Causas\s+mÃ³rbidas.*", ""),
-        (r"^ANOTE\s+SOMENTE\s+UM\s+DIAGNÃ“STICO.*", ""),
-        (r"^Deve\s+ser\s+usada\s+esta\s+parte.*", ""),
-        (r"^:\s*", ""),
-        (r"^NÃºmero[:\s]*", ""),
-        (r"^CÃ³digo[:\s]*", ""),
-        (r"^CÃ³digo\s+CID[:\s]*", ""),
-        (r"^\(a doenÃ§a ou estado mÃ³rbido que causou diretamente a morte\)[:\s]*", ""),
-        (r"^\(Ãºltima doenÃ§a ou condiÃ§Ã£o que causou diretamente a morte\)[:\s]*", ""),
-        (r"^Tempo aproximado entre o inÃ­cio e a morte[:\s]*", ""),
-        (r"^entre o inÃ­cio[:\s]*", ""),
-        (r"^:\s*", ""),
-        (r"^NÃºmero[:\s]*", ""),
-        (r"^CÃ³digo[:\s]*", ""),
-        (r"^CÃ³digo\s+CID[:\s]*", ""),
-        (r"^\(a doenÃ§a ou estado mÃ³rbido que causou diretamente a morte\)[:\s]*", ""),
-        (r"^\(Ãºltima doenÃ§a ou condiÃ§Ã£o que causou diretamente a morte\)[:\s]*", ""),
-        (r"^Tempo aproximado entre o inÃ­cio e a morte[:\s]*", ""),
-        (r"^entre o inÃ­cio[:\s]*", ""),
-           
-    ]
-
-    campos_para_limpar = [
-        "NOME", "NOME_MAE", "NOME_PAI", "PROFISSAO",
-        "LOGRADOURO", "NUMERO", "COMPLEMENTO", "BAIRRO",
-        "CIDADE", "CIDADE_OBITO", "CIDADE_NASCIMENTO",
-        "NASCIMENTO", "DATA_OBITO", "HORA_OBITO",
-        "CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3",
-        "CAUSA_MORTE_4", "CAUSA_MORTE_5", "CAUSA_BASICA",
-        "LOCAL_OBITO", "MEDICO_ATESTANTE", "PARTE_II",
-        "INTERVALO_DOENCA_MORTE", "DATA_ATESTADO",
-        "CRM_MEDICO", "RACA_COR",
-    ]
-
-    for campo in campos_para_limpar:
-        val = structured.get(campo, "")
-        if val:
-            for padrao, substituto in prefixos_para_remover:
-                val = re.sub(padrao, substituto, val, flags=re.IGNORECASE)
-            structured[campo] = val.strip()
-
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    # 4. PÃ“S-PROCESSAMENTO ADICIONAL
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-
-    # Se CAUSA_MORTE ou CAUSA_BASICA estÃ£o com nome de mÃ©dico, limpar
-    nomes_medicos_conhecidos = ["julia lins fabbri", "julia lins fabbi", "julia"]
-    for campo_causa in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_BASICA"]:
-        val = structured.get(campo_causa, "")
-        if val:
-            val = re.sub(r'\s+PARTE\s+(I|II)\s+.*$', '', val, flags=re.IGNORECASE).strip()
-            structured[campo_causa] = val
-
-    # â”€â”€ Validar HORA_OBITO â”€â”€
-    hora = structured.get("HORA_OBITO", "")
-    if hora and (len(hora) > 5 or re.search(r'\s{2,}', hora.strip()) or ':' not in hora):
-        structured["HORA_OBITO"] = ""
-       
-    # Se DATA_ATESTADO tem texto extra depois da data, limpar
-    data_atestado = structured.get("DATA_ATESTADO", "")
-    if data_atestado:
-        match_data = re.match(r'^(\d{2}/\d{2}/\d{4})', data_atestado)
-        if match_data:
-            structured["DATA_ATESTADO"] = match_data.group(1)
-    # â”€â”€ Extrair primeira data vÃ¡lida em NASCIMENTO â”€â”€
-    nasc = structured.get("NASCIMENTO", "")
-    if nasc:
-        match_data = re.search(r'(\d{2}/\d{2}/\d{4})', nasc)
-        if match_data:
-            structured["NASCIMENTO"] = match_data.group(1)
-        else:
-            # Tentar extrair data no formato YYYY MM DD
-            match_ymd = re.search(r'(\d{4})\s+(\d{1,2})\s+(\d{1,2})', nasc)
-            if match_ymd:
-                ano, mes, dia = match_ymd.group(1), match_ymd.group(2), match_ymd.group(3)
-                if int(mes) > 12:
-                    mes, dia = dia, mes
-                if 1 <= int(mes) <= 12 and 1 <= int(dia) <= 31:
-                    structured["NASCIMENTO"] = f"{dia.zfill(2)}/{mes.zfill(2)}/{ano}"
-
-    # â”€â”€ Extrair primeira data vÃ¡lida em DATA_OBITO â”€â”€
-    data_obito = structured.get("DATA_OBITO", "")
-    if data_obito:
-        match_data = re.search(r'(\d{2}/\d{2}/\d{4})', data_obito)
-        if match_data:
-            structured["DATA_OBITO"] = match_data.group(1)
-        else:
-            match_ymd = re.search(r'(\d{4})\s+(\d{1,2})\s+(\d{1,2})', data_obito)
-            if match_ymd:
-                ano, mes, dia = match_ymd.group(1), match_ymd.group(2), match_ymd.group(3)
-                if int(mes) > 12:
-                    mes, dia = dia, mes
-                if 1 <= int(mes) <= 12 and 1 <= int(dia) <= 31:
-                    structured["DATA_OBITO"] = f"{dia.zfill(2)}/{mes.zfill(2)}/{ano}"
-
-    # Limpar RACA_COR se tiver ":" ou for muito longo
-    raca = structured.get("RACA_COR", "")
-    if raca and (":" in raca or len(raca) > 20):
-        structured["RACA_COR"] = ""
-
-    # â”€â”€ Limpeza de UF_OBITO â”€â”€
-    uf_obito = structured.get("UF_OBITO", "")
-    if uf_obito:
-        uf_obito = re.sub(r'[`\s]', '', uf_obito)
-        match_uf = re.search(r'([A-Za-z]{2})', uf_obito)
-        if match_uf:
-            structured["UF_OBITO"] = match_uf.group(1).upper()
-
-    # Se COMPLEMENTO contiver "CEP:", limpar
-    compl = structured.get("COMPLEMENTO", "")
-    if compl and re.search(r'CEP:\s', compl, re.IGNORECASE):
-        structured["COMPLEMENTO"] = ""
-
-    # â”€â”€ Limpeza de cidade duplicada â”€â”€
-    for campo_cidade in ["CIDADE_OBITO"]:
-        val = structured.get(campo_cidade, "")
-        if val:
-            partes = val.split()
-            # Se a mesma palavra aparece repetida, manter sÃ³ uma
-            palavras_vistas = []
-            resultado = []
-            for p in partes:
-                if p not in palavras_vistas:
-                    palavras_vistas.append(p)
-                    resultado.append(p)
-            if len(resultado) < len(partes):
-                structured[campo_cidade] = " ".join(resultado)
-    # â”€â”€ Limpar CIDADE_OBITO com labels capturadas â”€â”€
-    cidade = structured.get("CIDADE_OBITO", "")
-    if cidade:
-        cidade = re.sub(
-            r'\s+(?:CAUSAS\s+DA\s+MORTE|CÃ³digo|UF|CEP).*$',
-            '', cidade, flags=re.IGNORECASE
-        ).strip()
-        structured["CIDADE_OBITO"] = cidade
-    # â”€â”€ Normalizar HORA_OBITO â”€â”€
-    hora = structured.get("HORA_OBITO", "")
-    if hora:
-        # Remover labels
-        hora = re.sub(r'(Hora|hora|HORA)\s*', '', hora).strip()
-        # "2 6" â†’ "02:06"
-        hora = re.sub(r'^(\d{1})\s+(\d{2})$', r'0\1:\2', hora)
-        # "06 19" â†’ "06:19"
-        hora = re.sub(r'^(\d{2})\s+(\d{2})$', r'\1:\2', hora)
-        # "02 06" â†’ "02:06"
-        hora = re.sub(r'^(\d{2})\s+(\d{2})$', r'\1:\2', hora)
-        # "20 12 03" â†’ "20:12:03"
-        hora = re.sub(r'^(\d{2}):(\d{2})\s+(\d{2})$', r'\1:\2:\3', hora)
-        # "2 6" com espaÃ§os variados
-        hora = re.sub(r'^(\d{1,2})\s+(\d{2})$', lambda m: f"{int(m.group(1)):02d}:{m.group(2)}", hora)
-        structured["HORA_OBITO"] = hora
-    # â”€â”€ Limpeza de CRM_MEDICO â”€â”€
-    crm = structured.get("CRM_MEDICO", "")
-    if crm:
-        crm = re.sub(r'[`\s]+', ' ', crm).strip()
-        crm = re.sub(
-            r'(?:Data do atestado|Ã“bito atestado por|MunicÃ­pio|Meio de contato|SP \d+|RQE).*',
-            '', crm, flags=re.IGNORECASE
-        ).strip()
-        structured["CRM_MEDICO"] = crm
-
-    # â”€â”€ Limpeza de INTERVALO_DOENCA_MORTE â”€â”€
-    intervalo = structured.get("INTERVALO_DOENCA_MORTE", "")
-    if intervalo:
-        intervalo = re.sub(
-            r'^(?:entre\s+)?o\s+in[iÃ­]cio\s+(?:da\s+doen[cÃ§]a\s+)?e\s+(?:a\s+)?morte[:\s]*',
-            '', intervalo, flags=re.IGNORECASE
-        ).strip()
-        structured["INTERVALO_DOENCA_MORTE"] = intervalo
-
-    # â”€â”€ IDADE (calcular) â”€â”€
-    idade_calc = ""
-    if structured.get("NASCIMENTO") and structured.get("DATA_OBITO"):
-        try:
-            dn = dt.datetime.strptime(structured["NASCIMENTO"], "%d/%m/%Y")
-            do = dt.datetime.strptime(structured["DATA_OBITO"], "%d/%m/%Y")
-            anos = do.year - dn.year - ((do.month, do.day) < (dn.month, dn.day))
-            if 0 <= anos <= 130:
-                idade_calc = str(anos)
-        except Exception:
-            pass
-    structured["IDADE_ANOS"] = idade_calc
-
-    # NOME_MES
-    if structured["DATA_OBITO"]:
-        partes = structured["DATA_OBITO"].split("/")
-        if len(partes) == 3:
-            mes = partes[1].zfill(2)
-            structured["NOME_MES"] = MESES_PT.get(mes, "")
-
-    # Hashes
-    structured["HASH_ARQUIVO"] = ""
-    structured["HASH_CONTEUDO"] = _sha256_text(raw_text)
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    # 5. VALIDAÃ‡ÃƒO
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    validate_obito(structured)
-
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    # 6. FALLBACK LLM (se QUALIDADE_SCORE < 50)
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    score = int(structured.get("QUALIDADE_SCORE", 0))
-    if score < 50 and raw_text and OPENAI_API_KEY:
-        try:
-            llm_data = _llm_parse_fallback(raw_text)
-            for k, v in llm_data.items():
-                if v and not structured.get(k):
-                    structured[k] = v
-        except Exception:
-            pass
-    # Limpar sufixo "PARTE I" / "PARTE II" das causas
-    for campo in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_BASICA"]:
-        val = structured.get(campo, "")
-        if val:
-            val = re.sub(r'\s+PARTE\s+(I|II)\s*$', '', val, flags=re.IGNORECASE).strip()
-            structured[campo] = val
-    # â”€â”€ PÃ³s-processamento: limpar labels dos campos â”€â”€
-    
-    # Limpar PARTE_II
-        parte_ii = structured.get("PARTE_II", "")
-    if parte_ii:
-        parte_ii = re.sub(
-            r'(?:Outras\s+)?condi[cÃ§][Ãµo]es?\s+significativas?\s+que\s+contribu[iÃ­]ram\s+para\s+a\s+morte.*?(?:acima:|acima\s)',
-            '', parte_ii, flags=re.IGNORECASE | re.DOTALL
-        ).strip()
-        parte_ii = re.sub(
-            r'que\s+contribu[iÃ­]ram\s+para\s+a\s+morte.*?(?:acima:|acima\s|eventos:)',
-            '', parte_ii, flags=re.IGNORECASE | re.DOTALL
-        ).strip()
-        structured["PARTE_II"] = parte_ii
-    
-    # Limpar CAUSA_MORTE de labels como "A - Imediata:", "A - DoenÃ§a ou estado mÃ³rbido..."
-    for campo in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_BASICA"]:
-        val = structured.get(campo, "")
-        if val:
-            # Remove prefixos como "A - Imediata:", "B - Devido ou como consequÃªncia de:", "C - Covid-19"
-            val = re.sub(r'^[A-Da-d][\s)*.:-]+\s*(?:Imediata|Devido|Devida|ConsequÃªncia|DoenÃ§a|Causa)[^:]*:\s*', '', val, flags=re.IGNORECASE).strip()
-            val = re.sub(r'^[A-Da-d][\s)*.:-]+\s*', '', val).strip()
-            structured[campo] = val
-    
-    # Limpar sufixo "PARTE I" / "PARTE II" das causas
-    for campo in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_BASICA"]:
-        val = structured.get(campo, "")
-        if val:
-            val = re.sub(r'\s+PARTE\s+(I|II)\s*$', '', val, flags=re.IGNORECASE).strip()
-            structured[campo] = val               
     return structured
-    # â”€â”€ Remover instruÃ§Ãµes do formulÃ¡rio dos campos de causa â”€â”€
-    instrucoes = [
-        "anote somente um diagnÃ³stico por linha",
-        "nÃ£o preencher este espaÃ§o",
-        "preenchimento exclusivo",
-    ]
-    for campo in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_BASICA"]:
-        val = structured.get(campo, "")
-        if val:
-            for inst in instrucoes:
-                if inst in val.lower():
-                    structured[campo] = ""
-                    break
-    # â”€â”€ Limpar PARTE_II â”€â”€
-    parte_ii = structured.get("PARTE_II", "")
-    if parte_ii:
-        # Remove labels do formulÃ¡rio no inÃ­cio
-        parte_ii = re.sub(
-            r'^\(?que\s+contribu[iÃ­]ram\s+para\s+a\s+morte.*?(?:acima:|acima\s|eventos:|seq[uÃ¼e]ncia\s+acima)\)?\s*',
-            '', parte_ii, flags=re.IGNORECASE | re.DOTALL
-        ).strip()
-        parte_ii = re.sub(
-            r'^\(?(?:Outras\s+)?condi[cÃ§][Ãµo]es?\s+significativas?\s+que\s+contribu[iÃ­]ram.*?(?:acima:|acima\s)\)?\s*',
-            '', parte_ii, flags=re.IGNORECASE | re.DOTALL
-        ).strip()
-        structured["PARTE_II"] = parte_ii
-           
-def _llm_parse_fallback(raw_text: str) -> Dict[str, str]:
-    """Usa GPT-4o-mini para extrair campos de DO quando o parser tradicional falha."""
-    prompt = f"""Extraia os campos abaixo deste texto de DeclaraÃ§Ã£o de Ã“bito.
-Retorne APENAS um JSON vÃ¡lido com os campos encontrados (string vazia se nÃ£o encontrar).
 
-Campos: NOME, NOME_MAE, NOME_PAI, NASCIMENTO (DD/MM/AAAA), DATA_OBITO (DD/MM/AAAA),
-HORA_OBITO, CIDADE_OBITO, UF_OBITO, CAUSA_MORTE, CAUSA_BASICA,
-DO_NUMERO, MEDICO_ATESTANTE, CRM_MEDICO, TIPO_OBITO, SEXO,
-LOGRADOURO, NUMERO, BAIRRO, CIDADE, CEP, PROFISSAO
+# ── Validacao ────────────────────────────────────────────────────
 
-Texto OCR:
-{raw_text}
-"""
-    try:
-        resp = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            json={
-                "model": "gpt-4o-mini",
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.0,
-                "response_format": {"type": "json_object"},
-            },
-            headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            timeout=120,
-        )
-        result = resp.json()
-        content = result["choices"][0]["message"]["content"]
-        return json.loads(content)
-    except Exception as e:
-        print(f"[LLM_FALLBACK] Erro: {e}")
-        return {}
-# â”€â”€ ValidaÃ§Ã£o â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-def _valid_date(value: str) -> bool:
-    if not value:
-        return False
-    try:
-        d, m, y = value.split("/")
-        dt.date(int(y), int(m), int(d))
-        return True
-    except Exception:
-        return False
-
-def _valid_uf(value: str) -> bool:
-    return bool(value) and value.upper() in UF_VALIDAS
-
-def _valid_cep(value: str) -> bool:
-    return bool(re.fullmatch(r"\d{5}-\d{3}", value or ""))
-
-def _age_coherence(nasc: str, obito: str) -> Tuple[Optional[str], Optional[int]]:
-    if not (_valid_date(nasc) and _valid_date(obito)):
-        return None, None
-    try:
-        dn = dt.datetime.strptime(nasc, "%d/%m/%Y")
-        do = dt.datetime.strptime(obito, "%d/%m/%Y")
-        if do < dn:
-            return "Data de Ã³bito anterior Ã  data de nascimento", None
-        idade = int((do - dn).days / 365.25)
-        if idade < 0 or idade > 130:
-            return f"Idade incoerente: {idade} anos", None
-        return None, idade
-    except Exception:
-        return None, None
-
-def validate_obito(structured: Dict[str, Any]) -> Dict[str, Any]:
-    """Gera validaÃ§Ã£o e preenche campos derivados."""
-    errors: List[str] = []
-    warnings: List[str] = []
-
-    campos_criticos = ["NOME", "NOME_MAE", "NASCIMENTO", "DATA_OBITO", "CIDADE_OBITO", "UF_OBITO"]
-    for campo in campos_criticos:
-        if not structured.get(campo):
-            errors.append(f"Campo crÃ­tico ausente: {campo}")
-
-    if structured.get("NASCIMENTO") and not _valid_date(structured["NASCIMENTO"]):
-        errors.append("NASCIMENTO com data invÃ¡lida")
-    if structured.get("DATA_OBITO") and not _valid_date(structured["DATA_OBITO"]):
-        errors.append("DATA_OBITO com data invÃ¡lida")
-    if structured.get("HORA_OBITO") and not _is_valid_hour(structured["HORA_OBITO"]):
-        warnings.append("HORA_OBITO com formato invÃ¡lido")
-    if structured.get("UF_OBITO") and not _valid_uf(structured["UF_OBITO"]):
-        warnings.append("UF_OBITO invÃ¡lida")
-    if structured.get("UF") and not _valid_uf(structured["UF"]):
-        warnings.append("UF do endereÃ§o invÃ¡lida")
-    if structured.get("CEP") and not _valid_cep(structured["CEP"]):
-        warnings.append("CEP com formato invÃ¡lido")
-
-    age_err, idade = _age_coherence(
-        structured.get("NASCIMENTO", ""), structured.get("DATA_OBITO", "")
-    )
-    if age_err:
-        errors.append(age_err)
-
-    structured["NOME_OK"] = "SIM" if structured.get("NOME") else "NAO"
-    structured["NOMES_OK"] = "SIM" if (structured.get("NOME") and structured.get("NOME_MAE")) else "NAO"
-
-    total_campos = len(HEADER)
-    preenchidos = sum(1 for k in HEADER if structured.get(k))
-    score = int((preenchidos / total_campos) * 100)
-    score = max(0, score - len(errors) * 10)
-    structured["QUALIDADE_SCORE"] = score
-
-    if errors:
-        status = "REVISAR"
-    elif not structured.get("CAUSA_BASICA"):
-        status = "REVISAR"
+def validate_obito(structured: dict) -> None:
+    missing = [f for f in CRITICAL_FIELDS if not structured.get(f)]
+    score = round((len(CRITICAL_FIELDS) - len(missing)) / len(CRITICAL_FIELDS) * 100, 1)
+    structured["QUALIDADE_SCORE"] = str(score)
+    if missing:
+        structured["STATUS"] = "REVISAR"
+        structured["ERROS"] = " | ".join(f"Campo critico ausente: {f}" for f in missing)
     else:
-        status = "OK"
-    structured["STATUS"] = status
-    structured["ERROS"] = " | ".join(errors)
+        structured["STATUS"] = "OK"
+        structured["ERROS"] = ""
 
-    return {
-        "ok": len(errors) == 0,
-        "errors": errors,
-        "warnings": warnings,
-    }
+# ── Processamento individual (com dedup) ─────────────────────────
 
-# â”€â”€ Google Drive / Sheets â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-def _get_credentials(scopes: List[str]):
-    if not DRIVE_SERVICE_ACCOUNT_JSON:
-        raise RuntimeError("DRIVE_SERVICE_ACCOUNT_JSON nÃ£o configurado.")
-    return service_account.Credentials.from_service_account_info(
-        json.loads(DRIVE_SERVICE_ACCOUNT_JSON), scopes=scopes,
-    )
-
-def _get_drive_service():
-    return build(
-        "drive", "v3",
-        credentials=_get_credentials(["https://www.googleapis.com/auth/drive.readonly"]),
-    )
-
-def _get_sheets_service():
-    return build(
-        "sheets", "v4",
-        credentials=_get_credentials(["https://www.googleapis.com/auth/spreadsheets"]),
-    )
-
-def _get_sheet_name() -> str:
-    return "Auditoria"
-
-def _list_images_in_folder(
-    folder_id: str, since: Optional[datetime] = None, _depth: int = 0
-) -> List[dict]:
-    """Lista imagens recursivamente com limite de profundidade."""
-    MAX_DEPTH = 5
-    if _depth > MAX_DEPTH:
-        logger.warning(f"Profundidade mÃ¡xima ({MAX_DEPTH}) atingida na pasta {folder_id}")
-        return []
-
-    drive = _get_drive_service()
-    query = (
-        f"'{folder_id}' in parents and "
-        f"(mimeType='image/jpeg' or mimeType='image/png' or "
-        f"mimeType='image/gif' or mimeType='image/bmp' or "
-        f"mimeType='image/tiff') and trashed=false"
-    )
-    files = []
-    page_token = None
-    while True:
-        resp = drive.files().list(
-            q=query,
-            fields="files(id, name, mimeType, modifiedTime, parents)",
-            pageToken=page_token,
-            pageSize=200,
-        ).execute()
-        batch = resp.get("files", [])
-        if since:
-            batch = [
-                f for f in batch
-                if _parse_rfc3339(f.get("modifiedTime", "")) > since
-            ]
-        files.extend(batch)
-        page_token = resp.get("nextPageToken")
-        if not page_token:
-            break
-
-    # Subpastas (recursÃ£o controlada)
-    folder_query = (
-        f"'{folder_id}' in parents and "
-        f"mimeType='application/vnd.google-apps.folder' and trashed=false"
-    )
-    page_token = None
-    while True:
-        folders_resp = drive.files().list(
-            q=folder_query,
-            fields="files(id, name)",
-            pageToken=page_token,
-            pageSize=100,
-        ).execute()
-        for subfolder in folders_resp.get("files", []):
-            logger.info(f"Explorando subpasta (depth {_depth+1}): {subfolder['name']}")
-            sub_files = _list_images_in_folder(
-                subfolder["id"], since=since, _depth=_depth + 1
-            )
-            files.extend(sub_files)
-        page_token = folders_resp.get("nextPageToken")
-        if not page_token:
-            break
-    return files
-
-def _parse_rfc3339(ts: str) -> Optional[datetime]:
-    try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    except Exception:
-        return None
-
-def _download_image_bytes(file_id: str) -> Tuple[bytes, str]:
-    drive = _get_drive_service()
-    meta = drive.files().get(fileId=file_id, fields="name, mimeType").execute()
-    request = drive.files().get_media(fileId=file_id)
-    fh = io.BytesIO()
-    downloader = MediaIoBaseDownload(fh, request)
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
-    return fh.getvalue(), meta.get("mimeType", "image/jpeg")
-
-def _ensure_sheet_exists() -> str:
-    """Cria/verifica planilha e aba 'Auditoria' com cabeÃ§alhos."""
-    sheets = _get_sheets_service()
-    if SHEET_ID:
-        try:
-            metadata = sheets.spreadsheets().get(
-                spreadsheetId=SHEET_ID,
-                fields="sheets.properties.title",
-            ).execute()
-        except Exception as e:
-            raise RuntimeError(
-                f"Planilha {SHEET_ID} nÃ£o acessÃ­vel. Verifique SHEET_ID e permissÃµes da service account. Erro: {e}"
-            )
-        tab_names = [s["properties"]["title"] for s in metadata.get("sheets", [])]
-        if "Auditoria" not in tab_names:
-            sheets.spreadsheets().batchUpdate(
-                spreadsheetId=SHEET_ID,
-                body={"requests": [{"addSheet": {"properties": {"title": "Auditoria"}}}]},
-            ).execute()
-            sheets.spreadsheets().values().update(
-                spreadsheetId=SHEET_ID,
-                range="Auditoria!A1",
-                valueInputOption="RAW",
-                body={"values": [AUDIT_COLUMNS]},
-            ).execute()
-            logger.info(f"Aba 'Auditoria' criada na planilha {SHEET_ID}")
-        else:
-            # Verifica se cabeÃ§alho existe
-            existing = sheets.spreadsheets().values().get(
-                spreadsheetId=SHEET_ID,
-                range="Auditoria!A1:Z1",
-            ).execute()
-            values = existing.get("values", [])
-            if not values or not values[0] or not values[0][0]:
-                sheets.spreadsheets().values().update(
-                    spreadsheetId=SHEET_ID,
-                    range="Auditoria!A1",
-                    valueInputOption="RAW",
-                    body={"values": [AUDIT_COLUMNS]},
-                ).execute()
-                logger.info(f"CabeÃ§alhos escritos na aba 'Auditoria' da planilha {SHEET_ID}")
-        return SHEET_ID
-
-    # Cria nova planilha
-    spreadsheet = {
-        "properties": {"title": AUDIT_SHEET_TITLE},
-        "sheets": [{"properties": {"title": "Auditoria"}}],
-    }
-    sheet = sheets.spreadsheets().create(body=spreadsheet, fields="spreadsheetId").execute()
-    sid = sheet.get("spreadsheetId")
-    sheets.spreadsheets().values().update(
-        spreadsheetId=sid,
-        range="Auditoria!A1",
-        valueInputOption="RAW",
-        body={"values": [AUDIT_COLUMNS]},
-    ).execute()
-    logger.info(f"Nova planilha criada: {sid}")
-    return sid
-
-def _get_existing_data(sheet_id: str) -> Tuple[dict, set]:
-    """LÃª TODAS as colunas da planilha e retorna (dict_nome_para_linha, hashes)."""
-    try:
-        sheets = _get_sheets_service()
-        sheet_name = _get_sheet_name()
-        result = sheets.spreadsheets().values().get(
-            spreadsheetId=sheet_id,
-            range=f"{sheet_name}!A:Z",
-        ).execute()
-        values = result.get("values", [])
-        nomes = {}  # nome_arquivo â†’ nÃºmero da linha (1-based)
-        hashes = set()
-        try:
-            idx_nome = AUDIT_COLUMNS.index("NOME_ARQUIVO")
-            idx_hash = AUDIT_COLUMNS.index("HASH_ARQUIVO")
-        except ValueError:
-            return {}, set()
-        for i, row in enumerate(values):
-            if not row:
-                continue
-            if row and row[0] == "DATA_PROCESSAMENTO":
-                continue
-            if len(row) > idx_nome and row[idx_nome].strip():
-                nomes[row[idx_nome].strip()] = i + 1  # +1 porque planilha Ã© 1-based
-            if len(row) > idx_hash and row[idx_hash].strip():
-                hashes.add(row[idx_hash].strip())
-        return nomes, hashes
-    except Exception as e:
-        logger.warning(f"NÃ£o foi possÃ­vel ler dados existentes: {e}")
-        return {}, set()
-
-def _col_to_letter(col: int) -> str:
-    letters = ""
-    while col > 0:
-        col -= 1
-        letters = chr(ord("A") + col % 26) + letters
-        col //= 26
-    return letters
-
-def _append_rows_to_sheet(sheet_id: str, rows: List[dict]):
-    if not rows:
-        return
-    sheets = _get_sheets_service()
-    sheet_name = _get_sheet_name()
-    values = []
-    for row in rows:
-        values.append([row.get(col, "") for col in AUDIT_COLUMNS])
-    sheets.spreadsheets().values().append(
-        spreadsheetId=sheet_id,
-        range=f"{sheet_name}!A1",
-        valueInputOption="RAW",
-        insertDataOption="INSERT_ROWS",
-        body={"values": values},
-    ).execute()
-def _update_row_in_sheet(sheet_id: str, row_number: int, row: dict):
-    """Atualiza uma linha existente (upsert) com os valores do registro."""
-    sheets = _get_sheets_service()
-    sheet_name = _get_sheet_name()
-    values = [[row.get(col, "") for col in AUDIT_COLUMNS]]
-    sheets.spreadsheets().values().update(
-        spreadsheetId=sheet_id,
-        range=f"{sheet_name}!A{row_number}",
-        valueInputOption="RAW",
-        body={"values": values},
-    ).execute()
-       
-# â”€â”€ Processamento individual â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-def _process_single_image(file_id: str, file_name: str) -> dict:
-    """Pipeline completo: baixar â†’ OCR â†’ parse â†’ validar."""
+def _process_single_image(file_id, file_name, existing):
     logger.info(f"Processando: {file_name} ({file_id})")
-    forcar_revisar = False
     try:
         image_bytes, mime_type = _download_image_bytes(file_id)
     except Exception as e:
         return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_DRIVE", "ERROS": str(e)}
-    # â”€â”€ 1Âª tentativa: Gemini multimodal (campos estruturados) â”€â”€
-    structured = None
-    raw_text = ""
-    if GEMINI_API_KEY:
-        try:
-            gemini_data, gemini_conf = _ocr_gemini(image_bytes)
-            if gemini_data:
-                _MAP = {
-                    "NOME": ("NOME", "nome"),
-                    "NOME_MAE": ("NOME_MAE", "nome_mae"),
-                    "NASCIMENTO": ("NASCIMENTO", "nascimento"),
-                    "IDADE_ANOS": ("IDADE_ANOS", "idade_anos"),
-                    "DATA_OBITO": ("DATA_OBITO", "data_obito"),
-                    "HORA_OBITO": ("HORA_OBITO", "hora_obito"),
-                    "CIDADE_OBITO": ("CIDADE_OBITO", "cidade_obito"),
-                    "UF_OBITO": ("UF_OBITO", "uf_obito"),
-                    "CAUSA_MORTE": ("CAUSA_MORTE", "causa_morte"),
-                    "CAUSA_BASICA": ("CAUSA_BASICA", "causa_basica"),
-                    "CID_BASICA": ("CID_BASICA", "cid_basica"),
-                    "TIPO_OBITO": ("TIPO_OBITO", "tipo_obito"),
-                    "DO_NUMERO": ("DO_NUMERO", "do_numero"),
-                    "MEDICO_ATESTANTE": ("MEDICO_ATESTANTE", "medico_atestante"),
-                    "CRM_MEDICO": ("CRM_MEDICO", "crm_medico"),
-                    "PARTE_II": ("PARTE_II", "parte_ii"),
-                    "INTERVALO_DOENCA_MORTE": ("INTERVALO_DOENCA_MORTE", "intervalo_doenca_morte"),
-                }
-                structured = {}
-                for _out, _keys in _MAP.items():
-                    _val = ""
-                    for _k in _keys:
-                        if gemini_data.get(_k):
-                            _val = gemini_data.get(_k)
-                            break
-                    structured[_out] = _val
-                if not any(structured.values()):
-                    structured = None
-                else:
-                    logger.info(f"{file_name}: Gemini extraiu {sum(1 for v in structured.values() if v)} campos.")
-        except OCRProviderError as e:
-            logger.warning(f"Gemini falhou ({e}), usando fluxo Vision/parser.")
-
-    # â”€â”€ Se Gemini nÃ£o funcionou, fluxo atual (Vision + parser) â”€â”€
-    if structured is None:
-        try:
-            raw_text, confidence = ocr_image(image_bytes, mime_type)
-        except Exception as e:
-            return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_OCR", "ERROS": str(e)}
-        if not _is_valid_obito(raw_text):
-            # Alteracao 2: detecta verso da DO
-            if detectar_verso(raw_text):
-                logger.info(f"{file_name}: verso de DO detectado")
-                ressalvas = extrair_ressalvas(raw_text)
-                if ressalvas:
-                    msg = "VERSO - Ressalvas: " + "; ".join(
-                        f"{r['campo']}: {r['valor']}" for r in ressalvas)
-                else:
-                    msg = "VERSO (sem ressalvas identificadas)"
-                return {
-                    "NOME_ARQUIVO": file_name,
-                    "STATUS": "VERSO",
-                    "ERROS": msg,
-                }
-            # Alteracao 3: validacao tolerante
-            if parece_do(raw_text):
-                logger.info(f"{file_name}: parece DO, marcada para revisao")
-                forcar_revisar = True
-            else:
-                logger.warning(f"{file_name}: texto nÃ£o reconhecido como DO, pulando")
-                return {
-                    "NOME_ARQUIVO": file_name, "STATUS": "REJEITADO",
-                    "ERROS": "Imagem nÃ£o contÃ©m uma DeclaraÃ§Ã£o de Ã“bito vÃ¡lida",
-                }
-        try:
-            structured = parse_obito(raw_text)
-        except Exception as e:
-            structured = {k: "" for k in HEADER}
-            structured["ERROS"] = f"Erro no parser: {e}"
-
-    structured = limpar_campos_extraidos(_limpeza_avancada(structured))
-    structured["HASH_ARQUIVO"] = _sha256_bytes(image_bytes)
-    structured["HASH_CONTEUDO"] = _sha256_text(raw_text)
-    validate_obito(structured)
-    if forcar_revisar:
-        structured["STATUS"] = "REVISAR"
-        structured["ERROS"] = "Possivel DO, porem validacao rigida falhou - revisar manualmente"
-
-    return {
-        "DATA_PROCESSAMENTO": datetime.utcnow().strftime("%d/%m/%Y %H:%M:%S"),
-        "NOME_ARQUIVO": file_name,
-        "STATUS": structured.get("STATUS", ""),
-        "QUALIDADE_SCORE": str(structured.get("QUALIDADE_SCORE", "")),
-        "NOME": structured.get("NOME", ""),
-        "NOME_MAE": structured.get("NOME_MAE", ""),
-        "NASCIMENTO": structured.get("NASCIMENTO", ""),
-        "IDADE_ANOS": structured.get("IDADE_ANOS", ""),
-        "DATA_OBITO": structured.get("DATA_OBITO", ""),
-        "HORA_OBITO": structured.get("HORA_OBITO", ""),
-        "CIDADE_OBITO": structured.get("CIDADE_OBITO", ""),
-        "UF_OBITO": structured.get("UF_OBITO", ""),
-        "CAUSA_MORTE": structured.get("CAUSA_MORTE", ""),
-        "CAUSA_BASICA": structured.get("CAUSA_BASICA", ""),
-        "CID_BASICA": structured.get("CID_BASICA", ""),
-        "TIPO_OBITO": structured.get("TIPO_OBITO", ""),
-        "DO_NUMERO": structured.get("DO_NUMERO", ""),
-        "MEDICO_ATESTANTE": structured.get("MEDICO_ATESTANTE", ""),
-        "CRM_MEDICO": structured.get("CRM_MEDICO", ""),
-        "PARTE_II": structured.get("PARTE_II", ""),
-        "INTERVALO_DOENCA_MORTE": structured.get("INTERVALO_DOENCA_MORTE", ""),
-        "ERROS": structured.get("ERROS", ""),
-        "HASH_ARQUIVO": structured.get("HASH_ARQUIVO", ""),
-    }
-
-# â”€â”€ Batch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-def run_batch(
-    folder_id: str = None, force_reprocess: bool = False, limit: int = 0
-) -> dict:
-    """Pipeline completo do lote: lista â†’ OCR â†’ planilha."""
-    fid = folder_id or DRIVE_FOLDER_ID
-    if not fid:
-        return {"success": False, "error": "Nenhum DRIVE_FOLDER_ID configurado."}
-    if not SHEET_ID:
-        return {
-            "success": False,
-            "error": "SHEET_ID nÃ£o configurado. Configure a variÃ¡vel de ambiente SHEET_ID.",
-        }
-
-    images = _list_images_in_folder(fid)
-    sheet_id = _ensure_sheet_exists()
-
-    # Planilha como Ãºnica fonte da verdade para deduplicaÃ§Ã£o
-    existing_names, existing_hashes = _get_existing_data(sheet_id)
-
-    new_images = []
-    for img in images:
-        if not force_reprocess:
-            if img["name"] in existing_names:
-                logger.info(f"{img['name']} jÃ¡ estÃ¡ na planilha, pulando...")
-                continue
-        new_images.append(img)
-
-    if not new_images:
-        return {
-            "success": True,
-            "total": len(images),
-            "processed": 0,
-            "new": 0,
-            "message": "Nenhuma imagem nova encontrada.",
-        }
-
-    if limit > 0:
-        new_images = new_images[:limit]
-
-    success_count = 0
-    fail_count = 0
-    last_error = None
-
-    for img in new_images:
-        if limit > 0 and len(new_images) > limit:
-            break
-        try:
-            row = _process_single_image(img["id"], img["name"])
-            nome = img["name"].strip()
-            # UPSERT: se o arquivo jÃ¡ existe na planilha, atualiza a linha; senÃ£o, adiciona
-            if nome in existing_names:
-                linha = existing_names[nome]   # nÃºmero da linha (1-based)
-                _update_row_in_sheet(sheet_id, linha, row)
-                logger.info(f"{nome} atualizado (upsert) na linha {linha}.")
-            else:
-                _append_rows_to_sheet(sheet_id, [row])
-            success_count += 1
-            gc.collect()
-        except Exception as e:
-            fail_count += 1
-            last_error = str(e)
-            logger.error(f"Falha ao processar {img['name']}: {e}")
-    return {
-        "success": True,
-        "total": len(images),
-        "new": len(new_images),
-        "processed": success_count,
-        "failed": fail_count,
-        "sheet_id": sheet_id,
-        "message": f"{success_count} imagens processadas, {fail_count} falhas.",
-    }
-
-# â”€â”€ Monitor (thread de polling) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-_monitor_thread: Optional[Thread] = None
-_monitor_stop = Event()
-_monitor_lock = Lock()
-_monitor_force = False
-
-def _monitor_worker():
-    global _monitor_force
-    logger.info(f"Monitor iniciado: a cada {POLL_INTERVAL_MINUTES} minuto(s).")
-    while not _monitor_stop.is_set():
-        if not _monitor_lock.acquire(blocking=False):
-            logger.warning("Batch anterior ainda estÃ¡ executando, pulando ciclo...")
-            _monitor_stop.wait(POLL_INTERVAL_MINUTES * 60)
-            continue
-        try:
-            result = run_batch(limit=3, force_reprocess=_monitor_force)
-            import gc
-            gc.collect()
-            if result.get("new", 0) > 0:
-                logger.info(f"Monitor: {result['message']}")
-        except Exception as e:
-            logger.error(f"Erro no monitor: {e}")
-        finally:
-            _monitor_lock.release()
-        _monitor_stop.wait(POLL_INTERVAL_MINUTES * 60)
-
-
-
-def stop_monitor():
-    _monitor_stop.set()
-    if _monitor_thread:
-        _monitor_thread.join(timeout=10)
-    logger.info("Monitor parado.")
-
-# â”€â”€ FastAPI App â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-app = FastAPI(title="obito-ocr-service", version="2.0.0")
-
-@app.get("/health")
-def health():
-    return {"status": "ok", "service": "obito-ocr-service", "version": "2.0.0"}
-
-# â”€â”€ AutenticaÃ§Ã£o â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-def _check_auth(authorization: Optional[str]) -> None:
-    if not ENDPOINT_AUTH_TOKEN:
-        return
-    if not authorization:
-        raise HTTPException(status_code=401, detail={
-            "code": "UNAUTHORIZED",
-            "message": "CabeÃ§alho Authorization ausente.",
-            "requestId": None,
-        })
-    parts = authorization.split(" ", 1)
-    if len(parts) != 2 or parts[0].lower() != "bearer" or parts[1] != ENDPOINT_AUTH_TOKEN:
-        raise HTTPException(status_code=401, detail={
-            "code": "UNAUTHORIZED",
-            "message": "Token Bearer invÃ¡lido.",
-            "requestId": None,
-        })
-
-# â”€â”€ Endpoint /ocr â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-@app.post("/ocr")
-async def ocr_endpoint(request: Request, authorization: Optional[str] = Header(None)):
-    _check_auth(authorization)
+    h = _sha256_bytes(image_bytes)
+    if h in existing["hashes"]:
+        logger.info(f"{file_name}: hash ja existente, pulando")
+        return {"NOME_ARQUIVO": file_name, "STATUS": "DUPLICADO", "ERROS": ""}
     try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse(status_code=400, content={
-            "code": "INVALID_JSON",
-            "message": "Corpo da requisiÃ§Ã£o nÃ£o Ã© JSON vÃ¡lido.",
-            "requestId": None,
-        })
-
-    request_id = body.get("requestId") or body.get("request_id") or None
-    file_b64 = body.get("file")
-    mime_type = body.get("mimeType") or body.get("mime_type")
-    file_name = body.get("fileName") or body.get("file_name") or ""
-
-    if not file_b64:
-        return JSONResponse(status_code=400, content={
-            "code": "MISSING_FILE",
-            "message": "Campo 'file' (base64) Ã© obrigatÃ³rio.",
-            "requestId": request_id,
-        })
-    if not mime_type:
-        return JSONResponse(status_code=400, content={
-            "code": "MISSING_MIME_TYPE",
-            "message": "Campo 'mimeType' Ã© obrigatÃ³rio.",
-            "requestId": request_id,
-        })
-    if "pdf" in mime_type.lower() or file_name.lower().endswith(".pdf"):
-        return JSONResponse(status_code=422, content={
-            "code": "PDF_NOT_SUPPORTED",
-            "message": "PDF nÃ£o Ã© suportado. Envie imagem (PNG/JPG).",
-            "requestId": request_id,
-        })
-
-    try:
-        file_bytes = base64.b64decode(file_b64, validate=False)
-    except Exception:
-        return JSONResponse(status_code=400, content={
-            "code": "INVALID_BASE64",
-            "message": "NÃ£o foi possÃ­vel decodificar o base64 de 'file'.",
-            "requestId": request_id,
-        })
-    if len(file_bytes) > MAX_FILE_SIZE_BYTES:
-        return JSONResponse(status_code=413, content={
-            "code": "FILE_TOO_LARGE",
-            "message": f"Arquivo excede o limite de {MAX_FILE_SIZE_MB} MB.",
-            "requestId": request_id,
-        })
-
-    hash_arquivo = _sha256_bytes(file_bytes)
-    try:
-        raw_text, confidence = ocr_image(file_bytes, mime_type)
-    except OCRProviderError as e:
-        return JSONResponse(status_code=e.status_code, content={
-            "code": e.code, "message": str(e), "requestId": request_id,
-        })
+        raw_text, confidence = _ocr_image_from_bytes(image_bytes, mime_type)
+        if raw_text:
+            logger.info(f"[OCR RESPONSE] {file_name}: {raw_text[:300]}")
     except Exception as e:
-        return JSONResponse(status_code=502, content={
-            "code": "OCR_PROVIDER_ERROR",
-            "message": f"Erro inesperado no OCR: {e}",
-            "requestId": request_id,
-        })
-
+        return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_OCR", "ERROS": str(e)}
+    if not _is_valid_obito(raw_text):
+        logger.warning(f"{file_name}: nao reconhecido como DO, pulando")
+        return {"NOME_ARQUIVO": file_name, "STATUS": "REJEITADO",
+                "ERROS": "Imagem nao contem uma Declaracao de Obito valida"}
     try:
         structured = parse_obito(raw_text)
     except Exception as e:
         structured = {k: "" for k in HEADER}
         structured["ERROS"] = f"Erro no parser: {e}"
-
-    structured["HASH_ARQUIVO"] = hash_arquivo
+    structured["HASH_ARQUIVO"] = h
     structured["HASH_CONTEUDO"] = _sha256_text(raw_text)
-    validation = validate_obito(structured)
-
-    warnings = list(validation.get("warnings", []))
-    if validation.get("errors"):
-        warnings.extend([f"ERRO: {e}" for e in validation["errors"]])
-
-    return JSONResponse(status_code=200, content={
-        "text": raw_text,
-        "confidence": confidence,
-        "provider": OCR_PROVIDER,
-        "requestId": request_id,
-        "warnings": warnings,
-        "rawText": raw_text,
-        "structured": structured,
-        "validation": validation,
-        "headerOrder": HEADER,
-    })
-# â”€â”€ DiagnÃ³stico (OCR bruto para debug) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-# â”€â”€ DiagnÃ³stico por file_id do Drive â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-@app.post("/diagnose/{file_id}")
-async def diagnose_file(file_id: str, authorization: Optional[str] = Header(None)):
-    _check_auth(authorization)
-    try:
-        image_bytes, mime_type = _download_image_bytes(file_id)
-    except Exception as e:
-        return JSONResponse(status_code=502, content={
-            "code": "DRIVE_ERROR",
-            "message": f"Erro ao baixar imagem do Drive: {e}",
-        })
-
-    try:
-        raw_text, confidence = ocr_image(image_bytes, mime_type)
-    except Exception as e:
-        return {"file_id": file_id, "error": str(e), "raw_text": "", "confidence": 0}
-
-    structured = parse_obito(raw_text)
     validate_obito(structured)
-
-    return {
-        "file_id": file_id,
-        "confidence": confidence,
-        "provider": OCR_LAST_PROVIDER,
-        "raw_text": raw_text,
-        "structured": structured,
-        "is_valid_obito": _is_valid_obito(raw_text),
-    }
-       
-# â”€â”€ Endpoints Batch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-@app.post("/batch/process")
-async def batch_process(request: Request, authorization: Optional[str] = Header(None)):
-    _check_auth(authorization)
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    folder_id = body.get("folderId") or body.get("folder_id") or None
-    force = body.get("force_reprocess", body.get("force", False))
-    request_id = body.get("requestId") or body.get("request_id") or None
-    limit = int(request.query_params.get("limit", 5))
-    result = run_batch(folder_id=folder_id, force_reprocess=force, limit=limit)
-    result["requestId"] = request_id
-    status_code = 200 if result.get("success") else 500
-    return JSONResponse(status_code=status_code, content=result)
-
-@app.get("/batch/status")
-async def batch_status(authorization: Optional[str] = Header(None)):
-    _check_auth(authorization)
-    return {
-        "monitor_running": _monitor_thread is not None and _monitor_thread.is_alive(),
-        "drive_folder_id": DRIVE_FOLDER_ID,
-        "sheet_id": SHEET_ID,
-        "auto_process_enabled": AUTO_PROCESS_ENABLED,
-        "poll_interval_minutes": POLL_INTERVAL_MINUTES,
-        "ocr_provider": OCR_PROVIDER,
-    }
-
-@app.post("/batch/monitor/start")
-def start_monitor(force_reprocess=False):
-    global _monitor_thread, _monitor_force
-    # Se existe uma thread, garante que ela estÃ¡ realmente parada
-    if _monitor_thread and _monitor_thread.is_alive():
-        _monitor_stop.set()          # sinaliza parada
-        _monitor_thread.join(timeout=5)  # aguarda encerrar (mÃ¡x 5s)
-    _monitor_force = force_reprocess
-    _monitor_stop.clear()
-    _monitor_thread = Thread(target=_monitor_worker, daemon=True)
-    _monitor_thread.start()
-@app.post("/batch/monitor/stop")
-async def monitor_stop(authorization: Optional[str] = Header(None)):
-    _check_auth(authorization)
-    stop_monitor()
-    return {"success": True, "message": "Monitor parado."}
-
-@app.post("/batch/config/sheet")
-async def config_sheet(request: Request, authorization: Optional[str] = Header(None)):
-    _check_auth(authorization)
-    try:
-        sheet_id = _ensure_sheet_exists()
-        return {"success": True, "sheet_id": sheet_id}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={
-            "success": False, "error": str(e),
-        })
-
-# â”€â”€ Tratamento de erros global â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
-    detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
-    if "code" not in detail:
-        detail["code"] = "HTTP_ERROR"
-    if "requestId" not in detail:
-        detail["requestId"] = None
-    return JSONResponse(status_code=exc.status_code, content=detail)
-
-# â”€â”€ Entry point â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-if AUTO_PROCESS_ENABLED and DRIVE_FOLDER_ID and DRIVE_SERVICE_ACCOUNT_JSON and SHEET_ID:
-    start_monitor()
-
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=False)
-
-# â”€â”€ Listar imagens da pasta (para diagnÃ³stico) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-@app.get("/diagnose/files")
-async def diagnose_list_files(authorization: Optional[str] = Header(None)):
-    _check_auth(authorization)
-    folder_id = os.getenv("DRIVE_FOLDER_ID")
-    if not folder_id:
-        return JSONResponse(status_code=400, content={"error": "DRIVE_FOLDER_ID nÃ£o configurado"})
-    
-    images = _list_images_in_folder(folder_id)
-    return {
-        "total": len(images),
-        "files": [
-            {
-                "id": img["id"],
-                "name": img["name"],
-                "mimeType": img.get("mimeType", "unknown"),
-            }
-            for img in images[:20]  # primeiras 20
-        ]
-    }
-# â”€â”€ Salvar/Atualizar resultado na planilha â”€â”€
-def _save_or_update_result(sheet, result: dict, existing_data: dict):
-    """Salva ou atualiza uma linha na planilha. Se jÃ¡ existe para o mesmo arquivo, atualiza."""
-    nome_arquivo = result.get("NOME_ARQUIVO", "")
-    linha_existente = existing_data.get("nomes", {}).get(nome_arquivo)
-
-    novaLinha = [[result.get(col, "") for col in AUDIT_COLUMNS]]
-
-    if linha_existente:
-        # Atualizar linha existente
-        sheet.update(f'A{linha_existente}:W{linha_existente}', novaLinha)
-        logger.info(f"Atualizada linha {linha_existente} para {nome_arquivo}")
-    else:
-        # Inserir nova linha
-        sheet.append_rows(novaLinha)
-        logger.info(f"Inserida nova linha para {nome_arquivo}"), v) or re.match(r'^\d{8,10}(raw_text: str) -> Dict[str, Any]:
-    """Parser principal: parser original + fallback por label PT + fallback LLM."""
-    structured: Dict[str, Any] = {k: "" for k in HEADER}
-
-    if not raw_text:
-        return structured
-    # â”€â”€ DicionÃ¡rio de correÃ§Ã£o de OCR â”€â”€
-    correcoes_ocr = {
-        "cheguei ": "choque ",
-        "cheguei ": "choque ",
-        "cheque ": "choque ",
-        "chequei ": "choque ",
-        "chocume ": "choque ",
-        "sepses ": "sepse ",
-        "septicemia": "sepse",
-        "pu ": "de foco ",
-        "pu foco": "de foco",
-        "isoscomica": "nosocomial",
-        "isquÃªmica": "isquÃªmica",  # manter se jÃ¡ estÃ¡ correto
-    }
-
-    for campo_texto in ["CAUSA_MORTE", "CAUSA_BASICA", "PARTE_II"]:
-        valor = structured.get(campo_texto, "")
-        if valor:
-            valor_lower = valor.lower()
-            for errado, correto in correcoes_ocr.items():
-                valor_lower = valor_lower.replace(errado.lower(), correto)
-            # Preservar capitalizaÃ§Ã£o original aproximada
-            if valor_lower != valor.lower():
-                # Reconstruir mantendo a primeira letra maiÃºscula se original era
-                palavras = valor_lower.split()
-                if palavras and valor[0].isupper():
-                    palavras[0] = palavras[0].capitalize()
-                structured[campo_texto] = " ".join(palavras)
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    # 1. PARSER ORIGINAL
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-
-    numbered = _parsed_do_form(raw_text.split("\n"))
-    if numbered.get("NOME"):
-        for k, v in numbered.items():
-            if k in structured and v:
-                structured[k] = v
-
-    if not structured["NOME"]:
-        structured["NOME"] = _find_block_value(raw_text,
-           ["Nome do Falecido", "Nome do falecido", "Nome do(a) Falecido(a)", "Nome do(a) falecido(a)", "Nome da falecida"],
-            stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Nome da mÃ£e", "Nome da mae", "Nome do pai", "Nome social", "Data"],
-        )
-    if not structured["NOME"]:
-        for label in ["Nome do Falecido", "Nome do falecido"]:
-            for line in raw_text.split("\n"):
-                if label.lower() in line.lower():
-                    resto = line[line.lower().index(label.lower()) + len(label):].strip()
-                    if resto and not any(kw in resto.lower() for kw in ["nome", "data", "hora"]):
-                        structured["NOME"] = resto
-                        break
-            if structured["NOME"]:
-                break
-    if not structured["NOME"]:
-        fb = _find_name_fallback(raw_text)
-        if fb:
-            structured["NOME"] = fb
-
-    structured["NOME_SOCIAL"] = _find_block_value(
-        raw_text, ["Nome social", "Nome Social"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Nome do falecido", "Nome da mÃ£e", "Nome da mae", "Nome do pai"],
-    )
-
-    if not structured["NOME_MAE"]:
-        structured["NOME_MAE"] = _find_block_value(
-            raw_text,
-            ["Nome da MÃ£e", "Nome da mÃ£e", "Nome da mae", "Nome da Mae"],
-            stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Nome do pai", "ProfissÃ£o", "Profissao", "EndereÃ§o", "Endereco", "Nacionalidade"],
-        )
-
-    if not structured["NOME_PAI"]:
-        structured["NOME_PAI"] = _find_block_value(
-            raw_text,
-            ["Nome do Pai", "Nome do pai"],
-            stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","ProfissÃ£o", "Profissao", "EndereÃ§o", "Endereco", "Nacionalidade", "Nome da mÃ£e", "Nome da mae"],
-        )
-
-    if not structured["NASCIMENTO"]:
-        structured["NASCIMENTO"] = _normalize_date(
-            _find_block_value(raw_text,
-                ["Data de nascimento", "Data de Nascimento", "Nascimento"],
-                stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Data do Ã³bito", "Data do obito", "Sexo", "RaÃ§a", "Raca"],
-            )
-        )
-
-    if not structured["DATA_OBITO"]:
-        structured["DATA_OBITO"] = _normalize_date(
-            _find_block_value(raw_text,
-                ["Data do Ã³bito", "Data de Ã³bito", "Data do obito", "Data de obito"],
-                stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Hora", "Local do Ã³bito", "Local do obito", "MunicÃ­pio de ocorrÃªncia", "Municipio de ocorrencia"],
-            )
-        )
-    if not structured["DATA_OBITO"]:
-        for label in ["Data do Ã³bito", "Data de Ã³bito", "Data do obito", "Data de obito"]:
-            for line in raw_text.split("\n"):
-                if label.lower() in line.lower():
-                    resto = line[line.lower().index(label.lower()) + len(label):].strip()
-                    if resto:
-                        structured["DATA_OBITO"] = _normalize_date(_normalize_date_ocr(resto))
-                        break
-            if structured["DATA_OBITO"]:
-                break
-
-    structured["HORA_OBITO"] = _find_hora_obito(raw_text)
-
-    structured["DATA_ATESTADO"] = _normalize_date(
-        _find_block_value(raw_text, ["Data do atestado", "Data de emissÃ£o", "Data da emissÃ£o"])
-    )
-
-    structured["LOCAL_OBITO"] = _find_block_value(
-        raw_text, ["Local do Ã³bito", "Local de Ã³bito", "Local do obito", "Local de obito"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","MunicÃ­pio de ocorrÃªncia", "Municipio de ocorrencia", "UF"],
-    )
-
-    if not structured["CIDADE_OBITO"]:
-        structured["CIDADE_OBITO"] = _find_block_value(
-            raw_text,
-            ["MunicÃ­pio de ocorrÃªncia", "Municipio de ocorrÃªncia", "MunicÃ­pio de ocorrencia", "Municipio de ocorrencia"],
-            stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","UF", "Estado", "Data", "CEP", "Cep"],
-        )
-
-    structured["UF_OBITO"] = _find_uf_after(raw_text, ["MunicÃ­pio de ocorrÃªncia", "Municipio de ocorrencia"])
-    if not structured["UF_OBITO"]:
-        structured["UF_OBITO"] = _extract_uf_ocorrencia(raw_text)
-
-    structured["LOGRADOURO"] = _find_block_value(
-        raw_text, ["Logradouro", "EndereÃ§o", "Endereco"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","NÃºmero", "Numero", "Complemento", "Bairro"],
-    )
-    structured["NUMERO"] = _find_block_value(
-        raw_text, ["NÃºmero", "Numero"], stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Complemento", "Bairro"],
-    )
-    structured["COMPLEMENTO"] = _find_block_value(
-        raw_text, ["Complemento"], stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Bairro", "MunicÃ­pio", "Municipio"],
-    )
-    structured["BAIRRO"] = _find_block_value(
-        raw_text, ["Bairro"], stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","MunicÃ­pio", "Municipio", "Cidade", "UF"],
-    )
-    structured["CIDADE"] = _find_block_value(
-        raw_text, ["MunicÃ­pio", "Municipio", "Cidade"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","UF", "CEP", "Cep"],
-    )
-    structured["UF"] = _find_uf_after(
-        raw_text, ["EndereÃ§o", "Endereco", "Logradouro", "Bairro", "MunicÃ­pio", "Municipio", "Cidade"],
-    )
-    structured["CEP"] = _normalize_cep(_find_block_value(raw_text, ["CEP", "Cep"]))
-
-    structured["CIDADE_NASCIMENTO"] = _find_block_value(
-        raw_text, ["Naturalidade", "MunicÃ­pio de nascimento", "Municipio de nascimento", "Cidade de nascimento"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","UF de nascimento", "Nacionalidade"],
-    )
-    structured["UF_NASCIMENTO"] = _find_uf_after(
-        raw_text, ["Naturalidade", "MunicÃ­pio de nascimento", "Municipio de nascimento"],
-    )
-
-    structured["CPF"] = _find_block_value(raw_text, ["CPF"])
-    structured["RG"] = _find_block_value(raw_text, ["RG", "Registro Geral"])
-    structured["ORGAO_EMISSOR_RG"] = _find_block_value(
-        raw_text, ["Ã“rgÃ£o emissor", "Orgao emissor", "Ã“rgÃ£o expedidor", "Orgao expedidor"],
-    )
-
-    structured["SEXO"] = _find_block_value(raw_text, ["Sexo"], stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","RaÃ§a", "Raca", "Cor"])
-    structured["RACA_COR"] = _find_block_value(
-        raw_text, ["RaÃ§a/Cor", "RaÃ§a", "Raca/Cor", "Raca", "Cor"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","SituaÃ§Ã£o", "Situacao", "Escolaridade", "OcupaÃ§Ã£o", "Ocupacao"],
-    )
-    structured["ESTADO_CIVIL"] = _find_block_value(
-    raw_text, ["Estado civil", "SituaÃ§Ã£o conjugal", "Situacao conjugal"],
-    stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Escolaridade", "OcupaÃ§Ã£o", "Ocupacao", "RaÃ§a", "Raca"],
-    )
-    structured["NACIONALIDADE"] = _find_block_value(raw_text, ["Nacionalidade"])
-    structured["PROFISSAO"] = _find_block_value(raw_text, ["ProfissÃ£o", "Profissao", "OcupaÃ§Ã£o", "Ocupacao"])
-
-    structured["TIPO_OBITO"] = _detect_obito_type(raw_text)
-
-    causas = _extract_causes(raw_text)
-    structured["CAUSA_MORTE"] = causas.get("CAUSA_MORTE", "")
-    structured["CAUSA_MORTE_2"] = causas.get("CAUSA_MORTE_2", "")
-    structured["CAUSA_MORTE_3"] = causas.get("CAUSA_MORTE_3", "")
-    structured["CAUSA_MORTE_4"] = causas.get("CAUSA_MORTE_4", "")
-    structured["CAUSA_MORTE_5"] = causas.get("CAUSA_MORTE_5", "")
-    structured["CAUSA_BASICA"] = causas.get("CAUSA_BASICA", "")
-
-    cid_basica = ""
-    if structured.get("CAUSA_BASICA"):
-        cids = _CID_RE.findall(structured["CAUSA_BASICA"])
-        if cids:
-            cid_basica = cids[-1].upper()
-    if not cid_basica:
-        cids = _CID_RE.findall(raw_text)
-        if cids:
-            cid_basica = cids[-1].upper()
-    structured["CID_BASICA"] = cid_basica
-
-    structured["DO_NUMERO"] = _find_block_value(
-    raw_text,
-     [r"D\.O\.", "DO nÂº", "DO NÂº", "NÂº DO", "Numero DO", "NÃºmero DO"],
-    stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Nome", "Data", "Tipo", "Logradouro", "EndereÃ§o", "Endereco",
-                 "Outras", "condiÃ§Ãµes", "CondiÃ§Ãµes", "CAUSAS", "Causa", "Parte",
-                 "OcupaÃ§Ã£o", "Ocup", "ProfissÃ£o", "Profissao",
-                 "Escolaridade", "Naturalidade", "CartÃ£o", "RG", "CPF","Dr[a.]", "MÃ©dico", "CRM", "Telefone", "Data do atestado"],
-    )
-    if not structured["DO_NUMERO"]:
-        do_match = re.search(
-            r"DeclaraÃ§Ã£o\s+de\s+Ã“bito\s+(\d+(?:-\d+)?)", raw_text, re.IGNORECASE
-        )
-        if do_match:
-            structured["DO_NUMERO"] = do_match.group(1)
-
-    structured["MEDICO_ATESTANTE"] = _find_block_value(
-        raw_text,
-        ["MÃ©dico atestante", "Medico atestante", "Nome do mÃ©dico", "Nome do medico"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","CRM", "Registro", "Assinatura"],
-    )
-    structured["CRM_MEDICO"] = _find_block_value(
-        raw_text, ["CRM", "C.R.M.", "C.R.M"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Assinatura", "Carimbo", "UF"],
-    )
-
-    structured["PARTE_II"] = _find_block_value(
-        raw_text,
-        ["Parte II", "Parte 2", "Outras condiÃ§Ãµes significativas", "Outras condicoes significativas"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Oportunidade", "Notificado", "ProvidÃªncias", "Nome do auditor", "Nome do medico"],
-        max_distance=20,
-    )
-    if not structured["PARTE_II"]:
-        parte_ii_match = re.search(
-            r"PARTE\s+II[:\s]*\\n?(.*?)(?:Outros episÃ³dios|Nome do mÃ©dico|CRM|$)",
-            raw_text, re.DOTALL | re.IGNORECASE
-        )
-        if parte_ii_match:
-            structured["PARTE_II"] = _clean_field(parte_ii_match.group(1).strip()[:200])
-
-    structured["INTERVALO_DOENCA_MORTE"] = _find_block_value(
-        raw_text,
-        ["Tempo aproximado", "Intervalo entre o inÃ­cio", "Intervalo entre o inicio"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Causas", "Parte", "Nome"],
-        max_distance=8,
-    )
-    # â”€â”€ Deduplicar mÃ©dico atestante â”€â”€
-    medico = structured.get("MEDICO_ATESTANTE", "")
-    if medico:
-        linhas = [l.strip() for l in medico.split("\n") if l.strip()]
-        linhas_unicas = []
-        for l in linhas:
-            if l not in linhas_unicas:
-                linhas_unicas.append(l)
-        structured["MEDICO_ATESTANTE"] = " ".join(linhas_unicas)
-    
-    # â”€â”€ Remover cabeÃ§alhos de formulÃ¡rio do NOME â”€â”€
-    nome = structured.get("NOME", "")
-    if nome:
-        nome_original = nome
-        nome = re.sub(
-            r'^(RepÃºblica Federativa do Brasil|CAPÃTULO IX|ENDEREÃ‡O DO LOCAL|'
-            r'Estabelecimento\s+|PROVÃVEIS CIRCUNSTÃ‚NCIAS|Nome do (Pai|MÃ©dico)|'
-            r'Data de nascimento|CÃ³digo CNES|NÃºmero da DeclaraÃ§Ã£o|'
-            r'Cidade e procedÃªncia|Nome da MÃ£e|'
-            r'Ã“BITO DE MULHER|ASSISTÃŠNCIA MÃ‰DICA|'
-            r'II\s+IdentificaÃ§Ã£o|III\s+OcorrÃªncia).*',
-            '', nome, flags=re.IGNORECASE | re.DOTALL
-        ).strip()
-        if nome != nome_original:
-            logger.info(f"NOME limpo: '{nome_original[:50]}...' â†’ '{nome[:50]}...'")
-        structured["NOME"] = nome
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    # 2. FALLBACK: MAPEAMENTO POR LABEL EM PORTUGUÃŠS
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-
-    label_map = {
-        "nome do falecido": "NOME",
-        "nome do falecida": "NOME",
-        "nome do paciente": "NOME",
-        "nome da mÃ£e": "NOME_MAE",
-        "nome da mae": "NOME_MAE",
-        "nome do pai": "NOME_PAI",
-        "data de nascimento": "NASCIMENTO",
-        "data de nasc": "NASCIMENTO",
-        "data nascimento": "NASCIMENTO",
-        "data do Ã³bito": "DATA_OBITO",
-        "data do obito": "DATA_OBITO",
-        "data do falecimento": "DATA_OBITO",
-        "hora do Ã³bito": "HORA_OBITO",
-        "hora do obito": "HORA_OBITO",
-        "hora:": "HORA_OBITO",
-        "sexo:": "SEXO",
-        "naturalidade": "CIDADE_NASCIMENTO",
-        "raÃ§a/cor": "RACA_COR",
-        "raca/cor": "RACA_COR",
-        "estado civil": "ESTADO_CIVIL",
-        "escolaridade": "ESCOLARIDADE",
-        "ocupaÃ§Ã£o habitual": "PROFISSAO",
-        "ocupacao habitual": "PROFISSAO",
-        "profissÃ£o": "PROFISSAO",
-        "profissao": "PROFISSAO",
-        "endereÃ§o": "LOGRADOURO",
-        "endereco": "LOGRADOURO",
-        "logradouro": "LOGRADOURO",
-        "nÃºmero": "NUMERO",
-        "numero": "NUMERO",
-        "nÂº": "NUMERO",
-        "complemento": "COMPLEMENTO",
-        "bairro": "BAIRRO",
-        "bairro/distrito": "BAIRRO",
-        "municÃ­pio de residÃªncia": "CIDADE",
-        "municipio de residencia": "CIDADE",
-        "municÃ­pio de ocorrÃªncia": "CIDADE_OBITO",
-        "municipio de ocorrencia": "CIDADE_OBITO",
-        "cidade": "CIDADE_OBITO",
-        "uf residÃªncia": "UF",
-        "uf ocorrÃªncia": "UF_OBITO",
-        "uf ocorrencia": "UF_OBITO",
-        "uf:": "UF_OBITO",
-        "cep:": "CEP",
-        "causa bÃ¡sica": "CAUSA_BASICA",
-        "causa basica": "CAUSA_BASICA",
-        "causa da morte": "CAUSA_MORTE",
-        "nome do mÃ©dico": "MEDICO_ATESTANTE",
-        "nome do medico": "MEDICO_ATESTANTE",
-        "crm:": "CRM_MEDICO",
-        "crm": "CRM_MEDICO",
-        "data do atestado": "DATA_ATESTADO",
-        "tipo de Ã³bito": "TIPO_OBITO",
-        "tipo de obito": "TIPO_OBITO",
-    }
-
-    lines = raw_text.split('\n')
-    current_field = None
-    continuation_count = {}
-
-    for line in lines:
-        line_stripped = line.strip()
-        if not line_stripped:
-            continue
-
-        line_lower = line_stripped.lower()
-
-        matched = False
-        for label, field in label_map.items():
-            if line_lower.startswith(label):
-                value = line_stripped[len(label):].strip()
-                if value.startswith(':'):
-                    value = value[1:].strip()
-                if value and not structured.get(field):
-                    structured[field] = value
-                current_field = field
-                continuation_count[current_field] = 0
-                matched = True
-                break
-
-        # NÃƒO continua se a linha tiver ":" (provavelmente Ã© outro campo)
-        if not matched and current_field and structured.get(current_field):
-            if ":" in line_stripped:
-                current_field = None
-            else:
-                cont_key = f"cont_{current_field}"
-                continuation_count[cont_key] = continuation_count.get(cont_key, 0) + 1
-                if continuation_count[cont_key] <= 2:
-                    structured[current_field] += " " + line_stripped
-                else:
-                    current_field = None
-    # Limpar prefixos "A - ", "B - ", "C - " das causas
-    for campo in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_BASICA"]:
-        val = structured.get(campo, "")
-        if val:
-            val = re.sub(r'^[A-E]\s*[-â€“â€”:]\s*', '', val).strip()
-            structured[campo] = val
-    # Normalizar datas "30 05 2020" â†’ "30/05/2020"
-    for campo_data in ["NASCIMENTO", "DATA_OBITO", "DATA_ATESTADO"]:
-        val = structured.get(campo_data, "")
-        if val and re.match(r'^\d{2}\s+\d{2}\s+\d{4}$', val):
-            partes = val.split()
-            structured[campo_data] = f"{partes[0]}/{partes[1]}/{partes[2]}"
-
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    # 3. LIMPEZA DE PREFIXOS NOS CAMPOS
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-
-    prefixos_para_remover = [
-    (r"^Descrição sumária do evento[:\s]*", ""),
-    (r"^DIAGNÓSTICO CONFIRMADO POR[:\s]*", ""),
-    (r"^Descricao sumaria do evento[:\s]*", ""),
-    (r"^DescriÃ§Ã£o sumÃ¡ria do evento[:\s]*", ""),
-    (r"^Nome do Falecido[:\s]*", ""),
-    (r"^DiagnÃ³stico confirmado por[:\s]*", ""),
-    (r"^DIAGNÃ“STICO CONFIRMADO POR[:\s]*", ""),
-    (r"^Devido ou como de[:\s]*", ""),
-    (r"^b\s*", ""),
-        (r"^\(rua,\s*praÃ§a,\s*avenida,\s*etc\):\s*", ""),
-        (r"^\(rua,\s*praca,\s*avenida,\s*etc\):\s*", ""),
-        (r"^de residÃªncia:\s*", ""),
-        (r"^de residencia:\s*", ""),
-        (r"^de ocorrÃªncia:\s*", ""),
-        (r"^de ocorrencia:\s*", ""),
-        (r"^/Distrito:\s*", ""),
-        (r"^/distrito:\s*", ""),
-        (r"^habitual:\s*", ""),
-        (r"^\(Ãºltima sÃ©rie concluÃ­da\):\s*", ""),
-        (r"^\(ultima serie concluida\):\s*", ""),
-        (r"\s+Idade:\s*\d+$", ""),
-        (r"\s+Idade\s*\d+$", ""),
-        (r"\s+CartÃ£o\s+SUS:?.*$", ""),
-        (r"\s+Cartao\s+SUS:?.*$", ""),
-        (r"^e a morte:\s*", ""),
-        (r"^UF do CRM:\s*", ""),
-        (r"^Devido ou como consequÃªncia de:\s*", ""),
-        (r"^Intervalo entre o inÃ­cio e o Ã³bito:\s*", ""),
-        (r"^Intervalo entre o inÃ­cio e a morte:\s*", ""),
-        (r"^e o Ã³bito:\s*", ""),
-        (r"^\(que contribuÃ­ram para a morte, mas nÃ£o relacionadas Ã  doenÃ§a ou condiÃ§Ã£o que a causou\):\s*", ""),
-        (r"^\(que contribuiram para a morte, mas nao relacionadas a doenca ou condicao que a causou\):\s*", ""),
-        (r"^habitual \(Informar anterior, se aposentado / desempregado\):\s*", ""),
-        (r"^habitual \(Informar anterior, se aposentada / desempregada\):\s*", ""),
-        (r"^que contribuÃ­ram para a morte, mas (?:que )?nÃ£o (?:entram (?:diretamente na seqÃ¼Ãªncia acima|relacionadas Ã  doenÃ§a ou condiÃ§Ã£o que a causou)|relacionadas Ã  doenÃ§a ou condiÃ§Ã£o que a causou)[^:]*:?\s*", ""),
-        (r"^imediatA[:\s]*", ""),
-        (r"^causa imediata[:\s]*", ""),
-        (r"^DoenÃ§a ou estado mÃ³rbido que causou diretamente a morte[:\s]*", ""),
-        (r"^CondiÃ§Ãµes ou causas mÃ³rbidas que ocasionaram diretamente[:\s]*", ""),
-        (r"^Afeccoes mÃ³rbidas, se houver, que produziram a causa acima[:\s]*", ""),
-        (r"^AfecÃ§Ãµes mÃ³rbidas, se houver, que produziram a causa acima[:\s]*", ""),
-        (r"^Parte\s+I[:\s]*", ""),
-        (r"^Imediata[:\s]*", ""),
-        (r"^Causa imediata[:\s]*", ""),
-        (r"^ANOTE SOMENTE UM DIAGNÃ“STICO POR LINHA\s*", ""),
-        (r"^Anote somente um diagnÃ³stico por linha\s*", ""),
-        (r"^NÃ£o preencher este espaÃ§o\s*", ""),
-        (r"^PREENCHEMENTO EXCLUSIVO[:\s]*", ""),
-        (r"^Nome:\s*", ""),
-        (r"^CondiÃ§Ãµes ou causas mÃ³rbidas que deram origem Ã  sequÃªncia de eventos que produziram a morte[:\s]*", ""),
-        (r"^DoenÃ§a ou condiÃ§Ãµes significativas[:\s]*", ""),
-        (r"^CondiÃ§Ãµes ou causas mÃ³rbidas que ocasionaram diretamente[:\s]*", ""),
-        (r":\s*\d+\s*$", ""),
-        (r"\s+\d{2,3}\s*$", ""),
-        (r"^:\s*", ""),
-        (r"^CÃ³digo:\s*", ""),
-        (r"^CÃ³digo\s+CID[:\s]*", ""),
-        (r"^Tempo aproximado entre o inÃ­cio e a morte[:\s]*", ""),
-        (r"^entre o inÃ­cio e[:\s]*", ""),
-        (r"^como consequÃªncia de:\s*", ""),
-        (r"^ou como consequÃªncia de:\s*", ""),
-        (r"^Devido ou como consequÃªncia de:\s*", ""),
-        (r"^,\s*mas\s+nÃ£o\s+", ""),
-        (r"^\d+:\s*", ""),         
-        (r"^Aponte\s+(a\s+)?(cadeia|doenÃ§a|eventos|condiÃ§Ã£o).*", ""),
-        (r"^Preencha\s+(o\s+)?(atestado|cada|a\s+cadeia).*", ""),
-        (r"^Coloque,\s*em\s+cada\s+linha.*", ""),
-        (r"^Denote\s+o\s+evento.*", ""),
-        (r"^SeÃ§Ã£o\s+mÃ©dica.*", ""),
-        (r"^Estado\s+mÃ³rbido\s+que\s+causou.*", ""),
-        (r"^DoenÃ§a,\s+lesÃ£o\s+ou\s+estado.*", ""),
-        (r"^CondiÃ§Ãµes\s+morbosas.*", ""),
-        (r"^Causas\s+mÃ³rbidas.*", ""),
-        (r"^ANOTE\s+SOMENTE\s+UM\s+DIAGNÃ“STICO.*", ""),
-        (r"^Deve\s+ser\s+usada\s+esta\s+parte.*", ""),
-        (r"^:\s*", ""),
-        (r"^NÃºmero[:\s]*", ""),
-        (r"^CÃ³digo[:\s]*", ""),
-        (r"^CÃ³digo\s+CID[:\s]*", ""),
-        (r"^\(a doenÃ§a ou estado mÃ³rbido que causou diretamente a morte\)[:\s]*", ""),
-        (r"^\(Ãºltima doenÃ§a ou condiÃ§Ã£o que causou diretamente a morte\)[:\s]*", ""),
-        (r"^Tempo aproximado entre o inÃ­cio e a morte[:\s]*", ""),
-        (r"^entre o inÃ­cio[:\s]*", ""),
-        (r"^:\s*", ""),
-        (r"^NÃºmero[:\s]*", ""),
-        (r"^CÃ³digo[:\s]*", ""),
-        (r"^CÃ³digo\s+CID[:\s]*", ""),
-        (r"^\(a doenÃ§a ou estado mÃ³rbido que causou diretamente a morte\)[:\s]*", ""),
-        (r"^\(Ãºltima doenÃ§a ou condiÃ§Ã£o que causou diretamente a morte\)[:\s]*", ""),
-        (r"^Tempo aproximado entre o inÃ­cio e a morte[:\s]*", ""),
-        (r"^entre o inÃ­cio[:\s]*", ""),
-           
-    ]
-
-    campos_para_limpar = [
-        "NOME", "NOME_MAE", "NOME_PAI", "PROFISSAO",
-        "LOGRADOURO", "NUMERO", "COMPLEMENTO", "BAIRRO",
-        "CIDADE", "CIDADE_OBITO", "CIDADE_NASCIMENTO",
-        "NASCIMENTO", "DATA_OBITO", "HORA_OBITO",
-        "CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3",
-        "CAUSA_MORTE_4", "CAUSA_MORTE_5", "CAUSA_BASICA",
-        "LOCAL_OBITO", "MEDICO_ATESTANTE", "PARTE_II",
-        "INTERVALO_DOENCA_MORTE", "DATA_ATESTADO",
-        "CRM_MEDICO", "RACA_COR",
-    ]
-
-    for campo in campos_para_limpar:
-        val = structured.get(campo, "")
-        if val:
-            for padrao, substituto in prefixos_para_remover:
-                val = re.sub(padrao, substituto, val, flags=re.IGNORECASE)
-            structured[campo] = val.strip()
-
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    # 4. PÃ“S-PROCESSAMENTO ADICIONAL
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-
-    # Se CAUSA_MORTE ou CAUSA_BASICA estÃ£o com nome de mÃ©dico, limpar
-    nomes_medicos_conhecidos = ["julia lins fabbri", "julia lins fabbi", "julia"]
-    for campo_causa in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_BASICA"]:
-        val = structured.get(campo_causa, "")
-        if val:
-            val = re.sub(r'\s+PARTE\s+(I|II)\s+.*$', '', val, flags=re.IGNORECASE).strip()
-            structured[campo_causa] = val
-
-    # â”€â”€ Validar HORA_OBITO â”€â”€
-    hora = structured.get("HORA_OBITO", "")
-    if hora and (len(hora) > 5 or re.search(r'\s{2,}', hora.strip()) or ':' not in hora):
-        structured["HORA_OBITO"] = ""
-       
-    # Se DATA_ATESTADO tem texto extra depois da data, limpar
-    data_atestado = structured.get("DATA_ATESTADO", "")
-    if data_atestado:
-        match_data = re.match(r'^(\d{2}/\d{2}/\d{4})', data_atestado)
-        if match_data:
-            structured["DATA_ATESTADO"] = match_data.group(1)
-    # â”€â”€ Extrair primeira data vÃ¡lida em NASCIMENTO â”€â”€
-    nasc = structured.get("NASCIMENTO", "")
-    if nasc:
-        match_data = re.search(r'(\d{2}/\d{2}/\d{4})', nasc)
-        if match_data:
-            structured["NASCIMENTO"] = match_data.group(1)
-        else:
-            # Tentar extrair data no formato YYYY MM DD
-            match_ymd = re.search(r'(\d{4})\s+(\d{1,2})\s+(\d{1,2})', nasc)
-            if match_ymd:
-                ano, mes, dia = match_ymd.group(1), match_ymd.group(2), match_ymd.group(3)
-                if int(mes) > 12:
-                    mes, dia = dia, mes
-                if 1 <= int(mes) <= 12 and 1 <= int(dia) <= 31:
-                    structured["NASCIMENTO"] = f"{dia.zfill(2)}/{mes.zfill(2)}/{ano}"
-
-    # â”€â”€ Extrair primeira data vÃ¡lida em DATA_OBITO â”€â”€
-    data_obito = structured.get("DATA_OBITO", "")
-    if data_obito:
-        match_data = re.search(r'(\d{2}/\d{2}/\d{4})', data_obito)
-        if match_data:
-            structured["DATA_OBITO"] = match_data.group(1)
-        else:
-            match_ymd = re.search(r'(\d{4})\s+(\d{1,2})\s+(\d{1,2})', data_obito)
-            if match_ymd:
-                ano, mes, dia = match_ymd.group(1), match_ymd.group(2), match_ymd.group(3)
-                if int(mes) > 12:
-                    mes, dia = dia, mes
-                if 1 <= int(mes) <= 12 and 1 <= int(dia) <= 31:
-                    structured["DATA_OBITO"] = f"{dia.zfill(2)}/{mes.zfill(2)}/{ano}"
-
-    # Limpar RACA_COR se tiver ":" ou for muito longo
-    raca = structured.get("RACA_COR", "")
-    if raca and (":" in raca or len(raca) > 20):
-        structured["RACA_COR"] = ""
-
-    # â”€â”€ Limpeza de UF_OBITO â”€â”€
-    uf_obito = structured.get("UF_OBITO", "")
-    if uf_obito:
-        uf_obito = re.sub(r'[`\s]', '', uf_obito)
-        match_uf = re.search(r'([A-Za-z]{2})', uf_obito)
-        if match_uf:
-            structured["UF_OBITO"] = match_uf.group(1).upper()
-
-    # Se COMPLEMENTO contiver "CEP:", limpar
-    compl = structured.get("COMPLEMENTO", "")
-    if compl and re.search(r'CEP:\s', compl, re.IGNORECASE):
-        structured["COMPLEMENTO"] = ""
-
-    # â”€â”€ Limpeza de cidade duplicada â”€â”€
-    for campo_cidade in ["CIDADE_OBITO"]:
-        val = structured.get(campo_cidade, "")
-        if val:
-            partes = val.split()
-            # Se a mesma palavra aparece repetida, manter sÃ³ uma
-            palavras_vistas = []
-            resultado = []
-            for p in partes:
-                if p not in palavras_vistas:
-                    palavras_vistas.append(p)
-                    resultado.append(p)
-            if len(resultado) < len(partes):
-                structured[campo_cidade] = " ".join(resultado)
-    # â”€â”€ Limpar CIDADE_OBITO com labels capturadas â”€â”€
-    cidade = structured.get("CIDADE_OBITO", "")
-    if cidade:
-        cidade = re.sub(
-            r'\s+(?:CAUSAS\s+DA\s+MORTE|CÃ³digo|UF|CEP).*$',
-            '', cidade, flags=re.IGNORECASE
-        ).strip()
-        structured["CIDADE_OBITO"] = cidade
-    # â”€â”€ Normalizar HORA_OBITO â”€â”€
-    hora = structured.get("HORA_OBITO", "")
-    if hora:
-        # Remover labels
-        hora = re.sub(r'(Hora|hora|HORA)\s*', '', hora).strip()
-        # "2 6" â†’ "02:06"
-        hora = re.sub(r'^(\d{1})\s+(\d{2})$', r'0\1:\2', hora)
-        # "06 19" â†’ "06:19"
-        hora = re.sub(r'^(\d{2})\s+(\d{2})$', r'\1:\2', hora)
-        # "02 06" â†’ "02:06"
-        hora = re.sub(r'^(\d{2})\s+(\d{2})$', r'\1:\2', hora)
-        # "20 12 03" â†’ "20:12:03"
-        hora = re.sub(r'^(\d{2}):(\d{2})\s+(\d{2})$', r'\1:\2:\3', hora)
-        # "2 6" com espaÃ§os variados
-        hora = re.sub(r'^(\d{1,2})\s+(\d{2})$', lambda m: f"{int(m.group(1)):02d}:{m.group(2)}", hora)
-        structured["HORA_OBITO"] = hora
-    # â”€â”€ Limpeza de CRM_MEDICO â”€â”€
-    crm = structured.get("CRM_MEDICO", "")
-    if crm:
-        crm = re.sub(r'[`\s]+', ' ', crm).strip()
-        crm = re.sub(
-            r'(?:Data do atestado|Ã“bito atestado por|MunicÃ­pio|Meio de contato|SP \d+|RQE).*',
-            '', crm, flags=re.IGNORECASE
-        ).strip()
-        structured["CRM_MEDICO"] = crm
-
-    # â”€â”€ Limpeza de INTERVALO_DOENCA_MORTE â”€â”€
-    intervalo = structured.get("INTERVALO_DOENCA_MORTE", "")
-    if intervalo:
-        intervalo = re.sub(
-            r'^(?:entre\s+)?o\s+in[iÃ­]cio\s+(?:da\s+doen[cÃ§]a\s+)?e\s+(?:a\s+)?morte[:\s]*',
-            '', intervalo, flags=re.IGNORECASE
-        ).strip()
-        structured["INTERVALO_DOENCA_MORTE"] = intervalo
-
-    # â”€â”€ IDADE (calcular) â”€â”€
-    idade_calc = ""
-    if structured.get("NASCIMENTO") and structured.get("DATA_OBITO"):
-        try:
-            dn = dt.datetime.strptime(structured["NASCIMENTO"], "%d/%m/%Y")
-            do = dt.datetime.strptime(structured["DATA_OBITO"], "%d/%m/%Y")
-            anos = do.year - dn.year - ((do.month, do.day) < (dn.month, dn.day))
-            if 0 <= anos <= 130:
-                idade_calc = str(anos)
-        except Exception:
-            pass
-    structured["IDADE_ANOS"] = idade_calc
-
-    # NOME_MES
-    if structured["DATA_OBITO"]:
-        partes = structured["DATA_OBITO"].split("/")
-        if len(partes) == 3:
-            mes = partes[1].zfill(2)
-            structured["NOME_MES"] = MESES_PT.get(mes, "")
-
-    # Hashes
-    structured["HASH_ARQUIVO"] = ""
-    structured["HASH_CONTEUDO"] = _sha256_text(raw_text)
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    # 5. VALIDAÃ‡ÃƒO
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    validate_obito(structured)
-
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    # 6. FALLBACK LLM (se QUALIDADE_SCORE < 50)
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    score = int(structured.get("QUALIDADE_SCORE", 0))
-    if score < 50 and raw_text and OPENAI_API_KEY:
-        try:
-            llm_data = _llm_parse_fallback(raw_text)
-            for k, v in llm_data.items():
-                if v and not structured.get(k):
-                    structured[k] = v
-        except Exception:
-            pass
-    # Limpar sufixo "PARTE I" / "PARTE II" das causas
-    for campo in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_BASICA"]:
-        val = structured.get(campo, "")
-        if val:
-            val = re.sub(r'\s+PARTE\s+(I|II)\s*$', '', val, flags=re.IGNORECASE).strip()
-            structured[campo] = val
-    # â”€â”€ PÃ³s-processamento: limpar labels dos campos â”€â”€
-    
-    # Limpar PARTE_II
-        parte_ii = structured.get("PARTE_II", "")
-    if parte_ii:
-        parte_ii = re.sub(
-            r'(?:Outras\s+)?condi[cÃ§][Ãµo]es?\s+significativas?\s+que\s+contribu[iÃ­]ram\s+para\s+a\s+morte.*?(?:acima:|acima\s)',
-            '', parte_ii, flags=re.IGNORECASE | re.DOTALL
-        ).strip()
-        parte_ii = re.sub(
-            r'que\s+contribu[iÃ­]ram\s+para\s+a\s+morte.*?(?:acima:|acima\s|eventos:)',
-            '', parte_ii, flags=re.IGNORECASE | re.DOTALL
-        ).strip()
-        structured["PARTE_II"] = parte_ii
-    
-    # Limpar CAUSA_MORTE de labels como "A - Imediata:", "A - DoenÃ§a ou estado mÃ³rbido..."
-    for campo in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_BASICA"]:
-        val = structured.get(campo, "")
-        if val:
-            # Remove prefixos como "A - Imediata:", "B - Devido ou como consequÃªncia de:", "C - Covid-19"
-            val = re.sub(r'^[A-Da-d][\s)*.:-]+\s*(?:Imediata|Devido|Devida|ConsequÃªncia|DoenÃ§a|Causa)[^:]*:\s*', '', val, flags=re.IGNORECASE).strip()
-            val = re.sub(r'^[A-Da-d][\s)*.:-]+\s*', '', val).strip()
-            structured[campo] = val
-    
-    # Limpar sufixo "PARTE I" / "PARTE II" das causas
-    for campo in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_BASICA"]:
-        val = structured.get(campo, "")
-        if val:
-            val = re.sub(r'\s+PARTE\s+(I|II)\s*$', '', val, flags=re.IGNORECASE).strip()
-            structured[campo] = val               
+    structured["DATA_PROCESSAMENTO"] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    structured["NOME_ARQUIVO"] = file_name
     return structured
-    # â”€â”€ Remover instruÃ§Ãµes do formulÃ¡rio dos campos de causa â”€â”€
-    instrucoes = [
-        "anote somente um diagnÃ³stico por linha",
-        "nÃ£o preencher este espaÃ§o",
-        "preenchimento exclusivo",
-    ]
-    for campo in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_BASICA"]:
-        val = structured.get(campo, "")
-        if val:
-            for inst in instrucoes:
-                if inst in val.lower():
-                    structured[campo] = ""
-                    break
-    # â”€â”€ Limpar PARTE_II â”€â”€
-    parte_ii = structured.get("PARTE_II", "")
-    if parte_ii:
-        # Remove labels do formulÃ¡rio no inÃ­cio
-        parte_ii = re.sub(
-            r'^\(?que\s+contribu[iÃ­]ram\s+para\s+a\s+morte.*?(?:acima:|acima\s|eventos:|seq[uÃ¼e]ncia\s+acima)\)?\s*',
-            '', parte_ii, flags=re.IGNORECASE | re.DOTALL
-        ).strip()
-        parte_ii = re.sub(
-            r'^\(?(?:Outras\s+)?condi[cÃ§][Ãµo]es?\s+significativas?\s+que\s+contribu[iÃ­]ram.*?(?:acima:|acima\s)\)?\s*',
-            '', parte_ii, flags=re.IGNORECASE | re.DOTALL
-        ).strip()
-        structured["PARTE_II"] = parte_ii
-           
-def _llm_parse_fallback(raw_text: str) -> Dict[str, str]:
-    """Usa GPT-4o-mini para extrair campos de DO quando o parser tradicional falha."""
-    prompt = f"""Extraia os campos abaixo deste texto de DeclaraÃ§Ã£o de Ã“bito.
-Retorne APENAS um JSON vÃ¡lido com os campos encontrados (string vazia se nÃ£o encontrar).
 
-Campos: NOME, NOME_MAE, NOME_PAI, NASCIMENTO (DD/MM/AAAA), DATA_OBITO (DD/MM/AAAA),
-HORA_OBITO, CIDADE_OBITO, UF_OBITO, CAUSA_MORTE, CAUSA_BASICA,
-DO_NUMERO, MEDICO_ATESTANTE, CRM_MEDICO, TIPO_OBITO, SEXO,
-LOGRADOURO, NUMERO, BAIRRO, CIDADE, CEP, PROFISSAO
+# ── Batch ────────────────────────────────────────────────────────
 
-Texto OCR:
-{raw_text}
-"""
+def _run_batch(limit: int, reprocess: bool = False) -> dict:
+    logger.info(f"Iniciando {'reprocessamento' if reprocess else 'batch'} com limit={limit}")
     try:
-        resp = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            json={
-                "model": "gpt-4o-mini",
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.0,
-                "response_format": {"type": "json_object"},
-            },
-            headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            timeout=120,
-        )
-        result = resp.json()
-        content = result["choices"][0]["message"]["content"]
-        return json.loads(content)
+        drive = _get_drive_service()
+        logger.info(f"Listando arquivos recursivamente de {DRIVE_FOLDER_ID}...")
+        all_files = _list_all_files_recursive(DRIVE_FOLDER_ID, drive)
+        total = len(all_files)
+        logger.info(f"Total de arquivos no Drive: {total}")
+        to_process = all_files[:limit]
+        existing = {"hashes": {}, "names": set()} if reprocess else _get_existing_data()
+        rows_to_insert = []
+        processed, duplicates, rejected, failed = 0, 0, 0, 0
+        _ensure_sheet_header()
+        for img in to_process:
+            time.sleep(1)
+            row = _process_single_image(img["id"], img.get("name", "unknown"), existing)
+            status = row.get("STATUS", "")
+            if status == "DUPLICADO":
+                duplicates += 1
+                continue
+            if status == "REJEITADO":
+                rejected += 1
+                continue
+            if status in ("ERRO_DRIVE", "ERRO_OCR"):
+                failed += 1
+                continue
+            processed += 1
+            if row.get("HASH_ARQUIVO"):
+                existing["hashes"][row["HASH_ARQUIVO"]] = True
+            if row.get("NOME_ARQUIVO"):
+                existing["names"].add(row["NOME_ARQUIVO"])
+            rows_to_insert.append([row.get(h, "") for h in HEADER])
+        if rows_to_insert:
+            result = _append_rows_to_sheet(rows_to_insert)
+            if result:
+                logger.info(f"Inseridas {len(rows_to_insert)} linhas na planilha.")
+            else:
+                logger.error("Falha ao inserir linhas na planilha.")
+        msg = (f"{processed} processadas, {duplicates} duplicadas puladas, "
+               f"{rejected} rejeitadas, {failed} falhas (total no Drive: {total})")
+        return {"success": True, "total": total, "new": len(to_process),
+                "processed": processed, "duplicates": duplicates,
+                "rejected": rejected, "failed": failed,
+                "sheet_id": SHEET_ID, "message": msg, "requestId": str(uuid.uuid4())}
     except Exception as e:
-        print(f"[LLM_FALLBACK] Erro: {e}")
-        return {}
-# â”€â”€ ValidaÃ§Ã£o â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        logger.error(f"Erro no batch: {e}", exc_info=True)
+        return {"success": False, "error": str(e), "message": "Erro interno"}
 
-def _valid_date(value: str) -> bool:
-    if not value:
-        return False
-    try:
-        d, m, y = value.split("/")
-        dt.date(int(y), int(m), int(d))
-        return True
-    except Exception:
-        return False
+# ── Dedupe da aba Auditoria ──────────────────────────────────────
 
-def _valid_uf(value: str) -> bool:
-    return bool(value) and value.upper() in UF_VALIDAS
-
-def _valid_cep(value: str) -> bool:
-    return bool(re.fullmatch(r"\d{5}-\d{3}", value or ""))
-
-def _age_coherence(nasc: str, obito: str) -> Tuple[Optional[str], Optional[int]]:
-    if not (_valid_date(nasc) and _valid_date(obito)):
-        return None, None
-    try:
-        dn = dt.datetime.strptime(nasc, "%d/%m/%Y")
-        do = dt.datetime.strptime(obito, "%d/%m/%Y")
-        if do < dn:
-            return "Data de Ã³bito anterior Ã  data de nascimento", None
-        idade = int((do - dn).days / 365.25)
-        if idade < 0 or idade > 130:
-            return f"Idade incoerente: {idade} anos", None
-        return None, idade
-    except Exception:
-        return None, None
-
-def validate_obito(structured: Dict[str, Any]) -> Dict[str, Any]:
-    """Gera validaÃ§Ã£o e preenche campos derivados."""
-    errors: List[str] = []
-    warnings: List[str] = []
-
-    campos_criticos = ["NOME", "NOME_MAE", "NASCIMENTO", "DATA_OBITO", "CIDADE_OBITO", "UF_OBITO"]
-    for campo in campos_criticos:
-        if not structured.get(campo):
-            errors.append(f"Campo crÃ­tico ausente: {campo}")
-
-    if structured.get("NASCIMENTO") and not _valid_date(structured["NASCIMENTO"]):
-        errors.append("NASCIMENTO com data invÃ¡lida")
-    if structured.get("DATA_OBITO") and not _valid_date(structured["DATA_OBITO"]):
-        errors.append("DATA_OBITO com data invÃ¡lida")
-    if structured.get("HORA_OBITO") and not _is_valid_hour(structured["HORA_OBITO"]):
-        warnings.append("HORA_OBITO com formato invÃ¡lido")
-    if structured.get("UF_OBITO") and not _valid_uf(structured["UF_OBITO"]):
-        warnings.append("UF_OBITO invÃ¡lida")
-    if structured.get("UF") and not _valid_uf(structured["UF"]):
-        warnings.append("UF do endereÃ§o invÃ¡lida")
-    if structured.get("CEP") and not _valid_cep(structured["CEP"]):
-        warnings.append("CEP com formato invÃ¡lido")
-
-    age_err, idade = _age_coherence(
-        structured.get("NASCIMENTO", ""), structured.get("DATA_OBITO", "")
-    )
-    if age_err:
-        errors.append(age_err)
-
-    structured["NOME_OK"] = "SIM" if structured.get("NOME") else "NAO"
-    structured["NOMES_OK"] = "SIM" if (structured.get("NOME") and structured.get("NOME_MAE")) else "NAO"
-
-    total_campos = len(HEADER)
-    preenchidos = sum(1 for k in HEADER if structured.get(k))
-    score = int((preenchidos / total_campos) * 100)
-    score = max(0, score - len(errors) * 10)
-    structured["QUALIDADE_SCORE"] = score
-
-    if errors:
-        status = "REVISAR"
-    elif not structured.get("CAUSA_BASICA"):
-        status = "REVISAR"
-    else:
-        status = "OK"
-    structured["STATUS"] = status
-    structured["ERROS"] = " | ".join(errors)
-
-    return {
-        "ok": len(errors) == 0,
-        "errors": errors,
-        "warnings": warnings,
-    }
-
-# â”€â”€ Google Drive / Sheets â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-def _get_credentials(scopes: List[str]):
-    if not DRIVE_SERVICE_ACCOUNT_JSON:
-        raise RuntimeError("DRIVE_SERVICE_ACCOUNT_JSON nÃ£o configurado.")
-    return service_account.Credentials.from_service_account_info(
-        json.loads(DRIVE_SERVICE_ACCOUNT_JSON), scopes=scopes,
-    )
-
-def _get_drive_service():
-    return build(
-        "drive", "v3",
-        credentials=_get_credentials(["https://www.googleapis.com/auth/drive.readonly"]),
-    )
-
-def _get_sheets_service():
-    return build(
-        "sheets", "v4",
-        credentials=_get_credentials(["https://www.googleapis.com/auth/spreadsheets"]),
-    )
-
-def _get_sheet_name() -> str:
-    return "Auditoria"
-
-def _list_images_in_folder(
-    folder_id: str, since: Optional[datetime] = None, _depth: int = 0
-) -> List[dict]:
-    """Lista imagens recursivamente com limite de profundidade."""
-    MAX_DEPTH = 5
-    if _depth > MAX_DEPTH:
-        logger.warning(f"Profundidade mÃ¡xima ({MAX_DEPTH}) atingida na pasta {folder_id}")
-        return []
-
-    drive = _get_drive_service()
-    query = (
-        f"'{folder_id}' in parents and "
-        f"(mimeType='image/jpeg' or mimeType='image/png' or "
-        f"mimeType='image/gif' or mimeType='image/bmp' or "
-        f"mimeType='image/tiff') and trashed=false"
-    )
-    files = []
-    page_token = None
-    while True:
-        resp = drive.files().list(
-            q=query,
-            fields="files(id, name, mimeType, modifiedTime, parents)",
-            pageToken=page_token,
-            pageSize=200,
-        ).execute()
-        batch = resp.get("files", [])
-        if since:
-            batch = [
-                f for f in batch
-                if _parse_rfc3339(f.get("modifiedTime", "")) > since
-            ]
-        files.extend(batch)
-        page_token = resp.get("nextPageToken")
-        if not page_token:
-            break
-
-    # Subpastas (recursÃ£o controlada)
-    folder_query = (
-        f"'{folder_id}' in parents and "
-        f"mimeType='application/vnd.google-apps.folder' and trashed=false"
-    )
-    page_token = None
-    while True:
-        folders_resp = drive.files().list(
-            q=folder_query,
-            fields="files(id, name)",
-            pageToken=page_token,
-            pageSize=100,
-        ).execute()
-        for subfolder in folders_resp.get("files", []):
-            logger.info(f"Explorando subpasta (depth {_depth+1}): {subfolder['name']}")
-            sub_files = _list_images_in_folder(
-                subfolder["id"], since=since, _depth=_depth + 1
-            )
-            files.extend(sub_files)
-        page_token = folders_resp.get("nextPageToken")
-        if not page_token:
-            break
-    return files
-
-def _parse_rfc3339(ts: str) -> Optional[datetime]:
-    try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    except Exception:
-        return None
-
-def _download_image_bytes(file_id: str) -> Tuple[bytes, str]:
-    drive = _get_drive_service()
-    meta = drive.files().get(fileId=file_id, fields="name, mimeType").execute()
-    request = drive.files().get_media(fileId=file_id)
-    fh = io.BytesIO()
-    downloader = MediaIoBaseDownload(fh, request)
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
-    return fh.getvalue(), meta.get("mimeType", "image/jpeg")
-
-def _ensure_sheet_exists() -> str:
-    """Cria/verifica planilha e aba 'Auditoria' com cabeÃ§alhos."""
+def _dedupe_auditoria(sheet_id: str = SHEET_ID) -> dict:
+    """Remove duplicatas mantendo o melhor registro por HASH_ARQUIVO.
+    Grava em aba nova 'Auditoria_LIMPA' (nao altera a original)."""
     sheets = _get_sheets_service()
-    if SHEET_ID:
-        try:
-            metadata = sheets.spreadsheets().get(
-                spreadsheetId=SHEET_ID,
-                fields="sheets.properties.title",
-            ).execute()
-        except Exception as e:
-            raise RuntimeError(
-                f"Planilha {SHEET_ID} nÃ£o acessÃ­vel. Verifique SHEET_ID e permissÃµes da service account. Erro: {e}"
-            )
-        tab_names = [s["properties"]["title"] for s in metadata.get("sheets", [])]
-        if "Auditoria" not in tab_names:
-            sheets.spreadsheets().batchUpdate(
-                spreadsheetId=SHEET_ID,
-                body={"requests": [{"addSheet": {"properties": {"title": "Auditoria"}}}]},
-            ).execute()
-            sheets.spreadsheets().values().update(
-                spreadsheetId=SHEET_ID,
-                range="Auditoria!A1",
-                valueInputOption="RAW",
-                body={"values": [AUDIT_COLUMNS]},
-            ).execute()
-            logger.info(f"Aba 'Auditoria' criada na planilha {SHEET_ID}")
-        else:
-            # Verifica se cabeÃ§alho existe
-            existing = sheets.spreadsheets().values().get(
-                spreadsheetId=SHEET_ID,
-                range="Auditoria!A1:Z1",
-            ).execute()
-            values = existing.get("values", [])
-            if not values or not values[0] or not values[0][0]:
-                sheets.spreadsheets().values().update(
-                    spreadsheetId=SHEET_ID,
-                    range="Auditoria!A1",
-                    valueInputOption="RAW",
-                    body={"values": [AUDIT_COLUMNS]},
-                ).execute()
-                logger.info(f"CabeÃ§alhos escritos na aba 'Auditoria' da planilha {SHEET_ID}")
-        return SHEET_ID
-
-    # Cria nova planilha
-    spreadsheet = {
-        "properties": {"title": AUDIT_SHEET_TITLE},
-        "sheets": [{"properties": {"title": "Auditoria"}}],
-    }
-    sheet = sheets.spreadsheets().create(body=spreadsheet, fields="spreadsheetId").execute()
-    sid = sheet.get("spreadsheetId")
-    sheets.spreadsheets().values().update(
-        spreadsheetId=sid,
-        range="Auditoria!A1",
-        valueInputOption="RAW",
-        body={"values": [AUDIT_COLUMNS]},
+    result = sheets.spreadsheets().values().get(
+        spreadsheetId=sheet_id, range="Auditoria!A1:W1579"
     ).execute()
-    logger.info(f"Nova planilha criada: {sid}")
-    return sid
-
-def _get_existing_data(sheet_id: str) -> Tuple[dict, set]:
-    """LÃª TODAS as colunas da planilha e retorna (dict_nome_para_linha, hashes)."""
-    try:
-        sheets = _get_sheets_service()
-        sheet_name = _get_sheet_name()
-        result = sheets.spreadsheets().values().get(
-            spreadsheetId=sheet_id,
-            range=f"{sheet_name}!A:Z",
-        ).execute()
-        values = result.get("values", [])
-        nomes = {}  # nome_arquivo â†’ nÃºmero da linha (1-based)
-        hashes = set()
-        try:
-            idx_nome = AUDIT_COLUMNS.index("NOME_ARQUIVO")
-            idx_hash = AUDIT_COLUMNS.index("HASH_ARQUIVO")
-        except ValueError:
-            return {}, set()
-        for i, row in enumerate(values):
-            if not row:
-                continue
-            if row and row[0] == "DATA_PROCESSAMENTO":
-                continue
-            if len(row) > idx_nome and row[idx_nome].strip():
-                nomes[row[idx_nome].strip()] = i + 1  # +1 porque planilha Ã© 1-based
-            if len(row) > idx_hash and row[idx_hash].strip():
-                hashes.add(row[idx_hash].strip())
-        return nomes, hashes
-    except Exception as e:
-        logger.warning(f"NÃ£o foi possÃ­vel ler dados existentes: {e}")
-        return {}, set()
-
-def _col_to_letter(col: int) -> str:
-    letters = ""
-    while col > 0:
-        col -= 1
-        letters = chr(ord("A") + col % 26) + letters
-        col //= 26
-    return letters
-
-def _append_rows_to_sheet(sheet_id: str, rows: List[dict]):
+    rows = result.get("values", [])
     if not rows:
-        return
-    sheets = _get_sheets_service()
-    sheet_name = _get_sheet_name()
-    values = []
-    for row in rows:
-        values.append([row.get(col, "") for col in AUDIT_COLUMNS])
-    sheets.spreadsheets().values().append(
-        spreadsheetId=sheet_id,
-        range=f"{sheet_name}!A1",
-        valueInputOption="RAW",
-        insertDataOption="INSERT_ROWS",
-        body={"values": values},
-    ).execute()
-def _update_row_in_sheet(sheet_id: str, row_number: int, row: dict):
-    """Atualiza uma linha existente (upsert) com os valores do registro."""
-    sheets = _get_sheets_service()
-    sheet_name = _get_sheet_name()
-    values = [[row.get(col, "") for col in AUDIT_COLUMNS]]
+        return {"success": False, "message": "Aba Auditoria vazia"}
+    header = rows[0]
+    data = rows[1:]
+
+    def _num(v):
+        try:
+            return float(v)
+        except Exception:
+            return -1.0
+
+    def _key(r):
+        return (_num(r[3]), 1 if (r[2] or "").strip() == "OK" else 0, r[0] or "")
+
+    best = {}
+    rejected = {}
+    for r in data:
+        r = r + [""] * (len(header) - len(r))
+        h = (r[22] or "").strip()
+        fname = (r[1] or "").strip()
+        if not h:
+            if fname:
+                rejected[fname] = r
+            continue
+        if h not in best or _key(r) > _key(best[h]):
+            best[h] = r
+
+    final = list(best.values()) + list(rejected.values())
+
+    info = sheets.spreadsheets().get(spreadsheetId=sheet_id, fields="sheets.properties.title").execute()
+    titles = [s["properties"]["title"] for s in info.get("sheets", [])]
+    if "Auditoria_LIMPA" not in titles:
+        sheets.spreadsheets().batchUpdate(
+            spreadsheetId=sheet_id,
+            body={"requests": [{"addSheet": {"properties": {"title": "Auditoria_LIMPA"}}}]}
+        ).execute()
+
     sheets.spreadsheets().values().update(
-        spreadsheetId=sheet_id,
-        range=f"{sheet_name}!A{row_number}",
-        valueInputOption="RAW",
-        body={"values": values},
+        spreadsheetId=sheet_id, range="Auditoria_LIMPA!A1",
+        valueInputOption="USER_ENTERED",
+        body={"values": [header] + final}
     ).execute()
-       
-# â”€â”€ Processamento individual â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-def _process_single_image(file_id: str, file_name: str) -> dict:
-    """Pipeline completo: baixar â†’ OCR â†’ parse â†’ validar."""
-    logger.info(f"Processando: {file_name} ({file_id})")
-    forcar_revisar = False
-    try:
-        image_bytes, mime_type = _download_image_bytes(file_id)
-    except Exception as e:
-        return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_DRIVE", "ERROS": str(e)}
-    # â”€â”€ 1Âª tentativa: Gemini multimodal (campos estruturados) â”€â”€
-    structured = None
-    raw_text = ""
-    if GEMINI_API_KEY:
-        try:
-            gemini_data, gemini_conf = _ocr_gemini(image_bytes)
-            if gemini_data:
-                _MAP = {
-                    "NOME": ("NOME", "nome"),
-                    "NOME_MAE": ("NOME_MAE", "nome_mae"),
-                    "NASCIMENTO": ("NASCIMENTO", "nascimento"),
-                    "IDADE_ANOS": ("IDADE_ANOS", "idade_anos"),
-                    "DATA_OBITO": ("DATA_OBITO", "data_obito"),
-                    "HORA_OBITO": ("HORA_OBITO", "hora_obito"),
-                    "CIDADE_OBITO": ("CIDADE_OBITO", "cidade_obito"),
-                    "UF_OBITO": ("UF_OBITO", "uf_obito"),
-                    "CAUSA_MORTE": ("CAUSA_MORTE", "causa_morte"),
-                    "CAUSA_BASICA": ("CAUSA_BASICA", "causa_basica"),
-                    "CID_BASICA": ("CID_BASICA", "cid_basica"),
-                    "TIPO_OBITO": ("TIPO_OBITO", "tipo_obito"),
-                    "DO_NUMERO": ("DO_NUMERO", "do_numero"),
-                    "MEDICO_ATESTANTE": ("MEDICO_ATESTANTE", "medico_atestante"),
-                    "CRM_MEDICO": ("CRM_MEDICO", "crm_medico"),
-                    "PARTE_II": ("PARTE_II", "parte_ii"),
-                    "INTERVALO_DOENCA_MORTE": ("INTERVALO_DOENCA_MORTE", "intervalo_doenca_morte"),
-                }
-                structured = {}
-                for _out, _keys in _MAP.items():
-                    _val = ""
-                    for _k in _keys:
-                        if gemini_data.get(_k):
-                            _val = gemini_data.get(_k)
-                            break
-                    structured[_out] = _val
-                if not any(structured.values()):
-                    structured = None
-                else:
-                    logger.info(f"{file_name}: Gemini extraiu {sum(1 for v in structured.values() if v)} campos.")
-        except OCRProviderError as e:
-            logger.warning(f"Gemini falhou ({e}), usando fluxo Vision/parser.")
-
-    # â”€â”€ Se Gemini nÃ£o funcionou, fluxo atual (Vision + parser) â”€â”€
-    if structured is None:
-        try:
-            raw_text, confidence = ocr_image(image_bytes, mime_type)
-        except Exception as e:
-            return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_OCR", "ERROS": str(e)}
-        if not _is_valid_obito(raw_text):
-            # Alteracao 2: detecta verso da DO
-            if detectar_verso(raw_text):
-                logger.info(f"{file_name}: verso de DO detectado")
-                ressalvas = extrair_ressalvas(raw_text)
-                if ressalvas:
-                    msg = "VERSO - Ressalvas: " + "; ".join(
-                        f"{r['campo']}: {r['valor']}" for r in ressalvas)
-                else:
-                    msg = "VERSO (sem ressalvas identificadas)"
-                return {
-                    "NOME_ARQUIVO": file_name,
-                    "STATUS": "VERSO",
-                    "ERROS": msg,
-                }
-            # Alteracao 3: validacao tolerante
-            if parece_do(raw_text):
-                logger.info(f"{file_name}: parece DO, marcada para revisao")
-                forcar_revisar = True
-            else:
-                logger.warning(f"{file_name}: texto nÃ£o reconhecido como DO, pulando")
-                return {
-                    "NOME_ARQUIVO": file_name, "STATUS": "REJEITADO",
-                    "ERROS": "Imagem nÃ£o contÃ©m uma DeclaraÃ§Ã£o de Ã“bito vÃ¡lida",
-                }
-        try:
-            structured = parse_obito(raw_text)
-        except Exception as e:
-            structured = {k: "" for k in HEADER}
-            structured["ERROS"] = f"Erro no parser: {e}"
-
-    structured = limpar_campos_extraidos(_limpeza_avancada(structured))
-    structured["HASH_ARQUIVO"] = _sha256_bytes(image_bytes)
-    structured["HASH_CONTEUDO"] = _sha256_text(raw_text)
-    validate_obito(structured)
-    if forcar_revisar:
-        structured["STATUS"] = "REVISAR"
-        structured["ERROS"] = "Possivel DO, porem validacao rigida falhou - revisar manualmente"
-
-    return {
-        "DATA_PROCESSAMENTO": datetime.utcnow().strftime("%d/%m/%Y %H:%M:%S"),
-        "NOME_ARQUIVO": file_name,
-        "STATUS": structured.get("STATUS", ""),
-        "QUALIDADE_SCORE": str(structured.get("QUALIDADE_SCORE", "")),
-        "NOME": structured.get("NOME", ""),
-        "NOME_MAE": structured.get("NOME_MAE", ""),
-        "NASCIMENTO": structured.get("NASCIMENTO", ""),
-        "IDADE_ANOS": structured.get("IDADE_ANOS", ""),
-        "DATA_OBITO": structured.get("DATA_OBITO", ""),
-        "HORA_OBITO": structured.get("HORA_OBITO", ""),
-        "CIDADE_OBITO": structured.get("CIDADE_OBITO", ""),
-        "UF_OBITO": structured.get("UF_OBITO", ""),
-        "CAUSA_MORTE": structured.get("CAUSA_MORTE", ""),
-        "CAUSA_BASICA": structured.get("CAUSA_BASICA", ""),
-        "CID_BASICA": structured.get("CID_BASICA", ""),
-        "TIPO_OBITO": structured.get("TIPO_OBITO", ""),
-        "DO_NUMERO": structured.get("DO_NUMERO", ""),
-        "MEDICO_ATESTANTE": structured.get("MEDICO_ATESTANTE", ""),
-        "CRM_MEDICO": structured.get("CRM_MEDICO", ""),
-        "PARTE_II": structured.get("PARTE_II", ""),
-        "INTERVALO_DOENCA_MORTE": structured.get("INTERVALO_DOENCA_MORTE", ""),
-        "ERROS": structured.get("ERROS", ""),
-        "HASH_ARQUIVO": structured.get("HASH_ARQUIVO", ""),
-    }
-
-# â”€â”€ Batch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-def run_batch(
-    folder_id: str = None, force_reprocess: bool = False, limit: int = 0
-) -> dict:
-    """Pipeline completo do lote: lista â†’ OCR â†’ planilha."""
-    fid = folder_id or DRIVE_FOLDER_ID
-    if not fid:
-        return {"success": False, "error": "Nenhum DRIVE_FOLDER_ID configurado."}
-    if not SHEET_ID:
-        return {
-            "success": False,
-            "error": "SHEET_ID nÃ£o configurado. Configure a variÃ¡vel de ambiente SHEET_ID.",
-        }
-
-    images = _list_images_in_folder(fid)
-    sheet_id = _ensure_sheet_exists()
-
-    # Planilha como Ãºnica fonte da verdade para deduplicaÃ§Ã£o
-    existing_names, existing_hashes = _get_existing_data(sheet_id)
-
-    new_images = []
-    for img in images:
-        if not force_reprocess:
-            if img["name"] in existing_names:
-                logger.info(f"{img['name']} jÃ¡ estÃ¡ na planilha, pulando...")
-                continue
-        new_images.append(img)
-
-    if not new_images:
-        return {
-            "success": True,
-            "total": len(images),
-            "processed": 0,
-            "new": 0,
-            "message": "Nenhuma imagem nova encontrada.",
-        }
-
-    if limit > 0:
-        new_images = new_images[:limit]
-
-    success_count = 0
-    fail_count = 0
-    last_error = None
-
-    for img in new_images:
-        if limit > 0 and len(new_images) > limit:
-            break
-        try:
-            row = _process_single_image(img["id"], img["name"])
-            nome = img["name"].strip()
-            # UPSERT: se o arquivo jÃ¡ existe na planilha, atualiza a linha; senÃ£o, adiciona
-            if nome in existing_names:
-                linha = existing_names[nome]   # nÃºmero da linha (1-based)
-                _update_row_in_sheet(sheet_id, linha, row)
-                logger.info(f"{nome} atualizado (upsert) na linha {linha}.")
-            else:
-                _append_rows_to_sheet(sheet_id, [row])
-            success_count += 1
-            gc.collect()
-        except Exception as e:
-            fail_count += 1
-            last_error = str(e)
-            logger.error(f"Falha ao processar {img['name']}: {e}")
     return {
         "success": True,
-        "total": len(images),
-        "new": len(new_images),
-        "processed": success_count,
-        "failed": fail_count,
-        "sheet_id": sheet_id,
-        "message": f"{success_count} imagens processadas, {fail_count} falhas.",
+        "linhas_originais": len(data),
+        "linhas_unicas": len(final),
+        "removidas": len(data) - len(final),
+        "aba": "Auditoria_LIMPA",
+        "observacao": "Revise a aba Auditoria_LIMPA. Se estiver ok, posso substituir a Auditoria pela versao limpa.",
     }
 
-# â”€â”€ Monitor (thread de polling) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── FastAPI App ──────────────────────────────────────────────────
 
-_monitor_thread: Optional[Thread] = None
-_monitor_stop = Event()
-_monitor_lock = Lock()
-_monitor_force = False
+app = FastAPI(title="Obito OCR Service", version="3.1")
 
-def _monitor_worker():
-    global _monitor_force
-    logger.info(f"Monitor iniciado: a cada {POLL_INTERVAL_MINUTES} minuto(s).")
-    while not _monitor_stop.is_set():
-        if not _monitor_lock.acquire(blocking=False):
-            logger.warning("Batch anterior ainda estÃ¡ executando, pulando ciclo...")
-            _monitor_stop.wait(POLL_INTERVAL_MINUTES * 60)
-            continue
-        try:
-            result = run_batch(limit=3, force_reprocess=_monitor_force)
-            import gc
-            gc.collect()
-            if result.get("new", 0) > 0:
-                logger.info(f"Monitor: {result['message']}")
-        except Exception as e:
-            logger.error(f"Erro no monitor: {e}")
-        finally:
-            _monitor_lock.release()
-        _monitor_stop.wait(POLL_INTERVAL_MINUTES * 60)
+class BatchRequest(BaseModel):
+    limit: int = 10
 
-
-
-def stop_monitor():
-    _monitor_stop.set()
-    if _monitor_thread:
-        _monitor_thread.join(timeout=10)
-    logger.info("Monitor parado.")
-
-# â”€â”€ FastAPI App â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-app = FastAPI(title="obito-ocr-service", version="2.0.0")
-
-@app.get("/health")
-def health():
-    return {"status": "ok", "service": "obito-ocr-service", "version": "2.0.0"}
-
-# â”€â”€ AutenticaÃ§Ã£o â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-def _check_auth(authorization: Optional[str]) -> None:
-    if not ENDPOINT_AUTH_TOKEN:
-        return
-    if not authorization:
-        raise HTTPException(status_code=401, detail={
-            "code": "UNAUTHORIZED",
-            "message": "CabeÃ§alho Authorization ausente.",
-            "requestId": None,
-        })
-    parts = authorization.split(" ", 1)
-    if len(parts) != 2 or parts[0].lower() != "bearer" or parts[1] != ENDPOINT_AUTH_TOKEN:
-        raise HTTPException(status_code=401, detail={
-            "code": "UNAUTHORIZED",
-            "message": "Token Bearer invÃ¡lido.",
-            "requestId": None,
-        })
-
-# â”€â”€ Endpoint /ocr â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-@app.post("/ocr")
-async def ocr_endpoint(request: Request, authorization: Optional[str] = Header(None)):
-    _check_auth(authorization)
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse(status_code=400, content={
-            "code": "INVALID_JSON",
-            "message": "Corpo da requisiÃ§Ã£o nÃ£o Ã© JSON vÃ¡lido.",
-            "requestId": None,
-        })
-
-    request_id = body.get("requestId") or body.get("request_id") or None
-    file_b64 = body.get("file")
-    mime_type = body.get("mimeType") or body.get("mime_type")
-    file_name = body.get("fileName") or body.get("file_name") or ""
-
-    if not file_b64:
-        return JSONResponse(status_code=400, content={
-            "code": "MISSING_FILE",
-            "message": "Campo 'file' (base64) Ã© obrigatÃ³rio.",
-            "requestId": request_id,
-        })
-    if not mime_type:
-        return JSONResponse(status_code=400, content={
-            "code": "MISSING_MIME_TYPE",
-            "message": "Campo 'mimeType' Ã© obrigatÃ³rio.",
-            "requestId": request_id,
-        })
-    if "pdf" in mime_type.lower() or file_name.lower().endswith(".pdf"):
-        return JSONResponse(status_code=422, content={
-            "code": "PDF_NOT_SUPPORTED",
-            "message": "PDF nÃ£o Ã© suportado. Envie imagem (PNG/JPG).",
-            "requestId": request_id,
-        })
-
-    try:
-        file_bytes = base64.b64decode(file_b64, validate=False)
-    except Exception:
-        return JSONResponse(status_code=400, content={
-            "code": "INVALID_BASE64",
-            "message": "NÃ£o foi possÃ­vel decodificar o base64 de 'file'.",
-            "requestId": request_id,
-        })
-    if len(file_bytes) > MAX_FILE_SIZE_BYTES:
-        return JSONResponse(status_code=413, content={
-            "code": "FILE_TOO_LARGE",
-            "message": f"Arquivo excede o limite de {MAX_FILE_SIZE_MB} MB.",
-            "requestId": request_id,
-        })
-
-    hash_arquivo = _sha256_bytes(file_bytes)
-    try:
-        raw_text, confidence = ocr_image(file_bytes, mime_type)
-    except OCRProviderError as e:
-        return JSONResponse(status_code=e.status_code, content={
-            "code": e.code, "message": str(e), "requestId": request_id,
-        })
-    except Exception as e:
-        return JSONResponse(status_code=502, content={
-            "code": "OCR_PROVIDER_ERROR",
-            "message": f"Erro inesperado no OCR: {e}",
-            "requestId": request_id,
-        })
-
-    try:
-        structured = parse_obito(raw_text)
-    except Exception as e:
-        structured = {k: "" for k in HEADER}
-        structured["ERROS"] = f"Erro no parser: {e}"
-
-    structured["HASH_ARQUIVO"] = hash_arquivo
-    structured["HASH_CONTEUDO"] = _sha256_text(raw_text)
-    validation = validate_obito(structured)
-
-    warnings = list(validation.get("warnings", []))
-    if validation.get("errors"):
-        warnings.extend([f"ERRO: {e}" for e in validation["errors"]])
-
-    return JSONResponse(status_code=200, content={
-        "text": raw_text,
-        "confidence": confidence,
-        "provider": OCR_PROVIDER,
-        "requestId": request_id,
-        "warnings": warnings,
-        "rawText": raw_text,
-        "structured": structured,
-        "validation": validation,
-        "headerOrder": HEADER,
-    })
-# â”€â”€ DiagnÃ³stico (OCR bruto para debug) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-# â”€â”€ DiagnÃ³stico por file_id do Drive â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-@app.post("/diagnose/{file_id}")
-async def diagnose_file(file_id: str, authorization: Optional[str] = Header(None)):
-    _check_auth(authorization)
-    try:
-        image_bytes, mime_type = _download_image_bytes(file_id)
-    except Exception as e:
-        return JSONResponse(status_code=502, content={
-            "code": "DRIVE_ERROR",
-            "message": f"Erro ao baixar imagem do Drive: {e}",
-        })
-
-    try:
-        raw_text, confidence = ocr_image(image_bytes, mime_type)
-    except Exception as e:
-        return {"file_id": file_id, "error": str(e), "raw_text": "", "confidence": 0}
-
-    structured = parse_obito(raw_text)
-    validate_obito(structured)
-
-    return {
-        "file_id": file_id,
-        "confidence": confidence,
-        "provider": OCR_LAST_PROVIDER,
-        "raw_text": raw_text,
-        "structured": structured,
-        "is_valid_obito": _is_valid_obito(raw_text),
-    }
-       
-# â”€â”€ Endpoints Batch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+@app.get("/")
+def root():
+    return {"status": "running", "service": "Obito OCR Service", "version": "3.1"}
 
 @app.post("/batch/process")
-async def batch_process(request: Request, authorization: Optional[str] = Header(None)):
-    _check_auth(authorization)
+def batch_process(request: BatchRequest):
+    return _run_batch(limit=request.limit, reprocess=False)
+
+@app.post("/batch/reprocess")
+def batch_reprocess(limit: int = 10):
+    return _run_batch(limit=limit, reprocess=True)
+
+@app.post("/admin/dedupe")
+def admin_dedupe():
+    """Remove duplicatas da aba Auditoria e grava em Auditoria_LIMPA."""
     try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    folder_id = body.get("folderId") or body.get("folder_id") or None
-    force = body.get("force_reprocess", body.get("force", False))
-    request_id = body.get("requestId") or body.get("request_id") or None
-    limit = int(request.query_params.get("limit", 5))
-    result = run_batch(folder_id=folder_id, force_reprocess=force, limit=limit)
-    result["requestId"] = request_id
-    status_code = 200 if result.get("success") else 500
-    return JSONResponse(status_code=status_code, content=result)
-
-@app.get("/batch/status")
-async def batch_status(authorization: Optional[str] = Header(None)):
-    _check_auth(authorization)
-    return {
-        "monitor_running": _monitor_thread is not None and _monitor_thread.is_alive(),
-        "drive_folder_id": DRIVE_FOLDER_ID,
-        "sheet_id": SHEET_ID,
-        "auto_process_enabled": AUTO_PROCESS_ENABLED,
-        "poll_interval_minutes": POLL_INTERVAL_MINUTES,
-        "ocr_provider": OCR_PROVIDER,
-    }
-
-@app.post("/batch/monitor/start")
-def start_monitor(force_reprocess=False):
-    global _monitor_thread, _monitor_force
-    # Se existe uma thread, garante que ela estÃ¡ realmente parada
-    if _monitor_thread and _monitor_thread.is_alive():
-        _monitor_stop.set()          # sinaliza parada
-        _monitor_thread.join(timeout=5)  # aguarda encerrar (mÃ¡x 5s)
-    _monitor_force = force_reprocess
-    _monitor_stop.clear()
-    _monitor_thread = Thread(target=_monitor_worker, daemon=True)
-    _monitor_thread.start()
-@app.post("/batch/monitor/stop")
-async def monitor_stop(authorization: Optional[str] = Header(None)):
-    _check_auth(authorization)
-    stop_monitor()
-    return {"success": True, "message": "Monitor parado."}
-
-@app.post("/batch/config/sheet")
-async def config_sheet(request: Request, authorization: Optional[str] = Header(None)):
-    _check_auth(authorization)
-    try:
-        sheet_id = _ensure_sheet_exists()
-        return {"success": True, "sheet_id": sheet_id}
+        return _dedupe_auditoria()
     except Exception as e:
-        return JSONResponse(status_code=500, content={
-            "success": False, "error": str(e),
-        })
-
-# â”€â”€ Tratamento de erros global â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
-    detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
-    if "code" not in detail:
-        detail["code"] = "HTTP_ERROR"
-    if "requestId" not in detail:
-        detail["requestId"] = None
-    return JSONResponse(status_code=exc.status_code, content=detail)
-
-# â”€â”€ Entry point â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-if AUTO_PROCESS_ENABLED and DRIVE_FOLDER_ID and DRIVE_SERVICE_ACCOUNT_JSON and SHEET_ID:
-    start_monitor()
-
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=False)
-
-# â”€â”€ Listar imagens da pasta (para diagnÃ³stico) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-@app.get("/diagnose/files")
-async def diagnose_list_files(authorization: Optional[str] = Header(None)):
-    _check_auth(authorization)
-    folder_id = os.getenv("DRIVE_FOLDER_ID")
-    if not folder_id:
-        return JSONResponse(status_code=400, content={"error": "DRIVE_FOLDER_ID nÃ£o configurado"})
-    
-    images = _list_images_in_folder(folder_id)
-    return {
-        "total": len(images),
-        "files": [
-            {
-                "id": img["id"],
-                "name": img["name"],
-                "mimeType": img.get("mimeType", "unknown"),
-            }
-            for img in images[:20]  # primeiras 20
-        ]
-    }
-# â”€â”€ Salvar/Atualizar resultado na planilha â”€â”€
-def _save_or_update_result(sheet, result: dict, existing_data: dict):
-    """Salva ou atualiza uma linha na planilha. Se jÃ¡ existe para o mesmo arquivo, atualiza."""
-    nome_arquivo = result.get("NOME_ARQUIVO", "")
-    linha_existente = existing_data.get("nomes", {}).get(nome_arquivo)
-
-    novaLinha = [[result.get(col, "") for col in AUDIT_COLUMNS]]
-
-    if linha_existente:
-        # Atualizar linha existente
-        sheet.update(f'A{linha_existente}:W{linha_existente}', novaLinha)
-        logger.info(f"Atualizada linha {linha_existente} para {nome_arquivo}")
-    else:
-        # Inserir nova linha
-        sheet.append_rows(novaLinha)
-        logger.info(f"Inserida nova linha para {nome_arquivo}"), v):
-        return False
-    # Rejeita data/hora no inicio (ex: 29042026 14:22, 2605 2026 2:17)
-    if re.match(r'^\d{6,8}\s*\d{0,2}[:h]\d{2}', v) or re.match(r'^\d{6,8}\s+\d{1,2}\s+', v):
-        return False
-    # Nome real deve ter letras
-    if not re.search(r'[A-Za-zÃ€-Ã¿]{3,}', v):
-        return False
-    return True
-
-# Aplica validacao ao NOME apos a extracao
-def _aplicar_validacao_nome(structured):
-    nome = structured.get("NOME", "")
-    if nome and not _validar_nome(nome):
-        structured["NOME"] = ""
-        structured["ERROS"] = (structured.get("ERROS", "") + " | NOME invalido descartado").strip()
-    return structured
-
-
-
-# â”€â”€ Validacao de CRM (descarta datas/lixo) â”€â”€
-def _validar_crm(valor):
-    if not valor:
-        return ""
-    v = valor.strip()
-    # CRM deve conter numeros (6+ digitos) e opcionalmente UF
-    if re.search(r'\d{6,}', v.replace(" ", "")):
-        return v
-    return ""
-
-def parse_obito(raw_text: str) -> Dict[str, Any]:
-    """Parser principal: parser original + fallback por label PT + fallback LLM."""
-    structured: Dict[str, Any] = {k: "" for k in HEADER}
-
-    if not raw_text:
-        return structured
-    # â”€â”€ DicionÃ¡rio de correÃ§Ã£o de OCR â”€â”€
-    correcoes_ocr = {
-        "cheguei ": "choque ",
-        "cheguei ": "choque ",
-        "cheque ": "choque ",
-        "chequei ": "choque ",
-        "chocume ": "choque ",
-        "sepses ": "sepse ",
-        "septicemia": "sepse",
-        "pu ": "de foco ",
-        "pu foco": "de foco",
-        "isoscomica": "nosocomial",
-        "isquÃªmica": "isquÃªmica",  # manter se jÃ¡ estÃ¡ correto
-    }
-
-    for campo_texto in ["CAUSA_MORTE", "CAUSA_BASICA", "PARTE_II"]:
-        valor = structured.get(campo_texto, "")
-        if valor:
-            valor_lower = valor.lower()
-            for errado, correto in correcoes_ocr.items():
-                valor_lower = valor_lower.replace(errado.lower(), correto)
-            # Preservar capitalizaÃ§Ã£o original aproximada
-            if valor_lower != valor.lower():
-                # Reconstruir mantendo a primeira letra maiÃºscula se original era
-                palavras = valor_lower.split()
-                if palavras and valor[0].isupper():
-                    palavras[0] = palavras[0].capitalize()
-                structured[campo_texto] = " ".join(palavras)
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    # 1. PARSER ORIGINAL
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-
-    numbered = _parsed_do_form(raw_text.split("\n"))
-    if numbered.get("NOME"):
-        for k, v in numbered.items():
-            if k in structured and v:
-                structured[k] = v
-
-    if not structured["NOME"]:
-        structured["NOME"] = _find_block_value(raw_text,
-           ["Nome do Falecido", "Nome do falecido", "Nome do(a) Falecido(a)", "Nome do(a) falecido(a)", "Nome da falecida"],
-            stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Nome da mÃ£e", "Nome da mae", "Nome do pai", "Nome social", "Data"],
-        )
-    if not structured["NOME"]:
-        for label in ["Nome do Falecido", "Nome do falecido"]:
-            for line in raw_text.split("\n"):
-                if label.lower() in line.lower():
-                    resto = line[line.lower().index(label.lower()) + len(label):].strip()
-                    if resto and not any(kw in resto.lower() for kw in ["nome", "data", "hora"]):
-                        structured["NOME"] = resto
-                        break
-            if structured["NOME"]:
-                break
-    if not structured["NOME"]:
-        fb = _find_name_fallback(raw_text)
-        if fb:
-            structured["NOME"] = fb
-
-    structured["NOME_SOCIAL"] = _find_block_value(
-        raw_text, ["Nome social", "Nome Social"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Nome do falecido", "Nome da mÃ£e", "Nome da mae", "Nome do pai"],
-    )
-
-    if not structured["NOME_MAE"]:
-        structured["NOME_MAE"] = _find_block_value(
-            raw_text,
-            ["Nome da MÃ£e", "Nome da mÃ£e", "Nome da mae", "Nome da Mae"],
-            stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Nome do pai", "ProfissÃ£o", "Profissao", "EndereÃ§o", "Endereco", "Nacionalidade"],
-        )
-
-    if not structured["NOME_PAI"]:
-        structured["NOME_PAI"] = _find_block_value(
-            raw_text,
-            ["Nome do Pai", "Nome do pai"],
-            stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","ProfissÃ£o", "Profissao", "EndereÃ§o", "Endereco", "Nacionalidade", "Nome da mÃ£e", "Nome da mae"],
-        )
-
-    if not structured["NASCIMENTO"]:
-        structured["NASCIMENTO"] = _normalize_date(
-            _find_block_value(raw_text,
-                ["Data de nascimento", "Data de Nascimento", "Nascimento"],
-                stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Data do Ã³bito", "Data do obito", "Sexo", "RaÃ§a", "Raca"],
-            )
-        )
-
-    if not structured["DATA_OBITO"]:
-        structured["DATA_OBITO"] = _normalize_date(
-            _find_block_value(raw_text,
-                ["Data do Ã³bito", "Data de Ã³bito", "Data do obito", "Data de obito"],
-                stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Hora", "Local do Ã³bito", "Local do obito", "MunicÃ­pio de ocorrÃªncia", "Municipio de ocorrencia"],
-            )
-        )
-    if not structured["DATA_OBITO"]:
-        for label in ["Data do Ã³bito", "Data de Ã³bito", "Data do obito", "Data de obito"]:
-            for line in raw_text.split("\n"):
-                if label.lower() in line.lower():
-                    resto = line[line.lower().index(label.lower()) + len(label):].strip()
-                    if resto:
-                        structured["DATA_OBITO"] = _normalize_date(_normalize_date_ocr(resto))
-                        break
-            if structured["DATA_OBITO"]:
-                break
-
-    structured["HORA_OBITO"] = _find_hora_obito(raw_text)
-
-    structured["DATA_ATESTADO"] = _normalize_date(
-        _find_block_value(raw_text, ["Data do atestado", "Data de emissÃ£o", "Data da emissÃ£o"])
-    )
-
-    structured["LOCAL_OBITO"] = _find_block_value(
-        raw_text, ["Local do Ã³bito", "Local de Ã³bito", "Local do obito", "Local de obito"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","MunicÃ­pio de ocorrÃªncia", "Municipio de ocorrencia", "UF"],
-    )
-
-    if not structured["CIDADE_OBITO"]:
-        structured["CIDADE_OBITO"] = _find_block_value(
-            raw_text,
-            ["MunicÃ­pio de ocorrÃªncia", "Municipio de ocorrÃªncia", "MunicÃ­pio de ocorrencia", "Municipio de ocorrencia"],
-            stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","UF", "Estado", "Data", "CEP", "Cep"],
-        )
-
-    structured["UF_OBITO"] = _find_uf_after(raw_text, ["MunicÃ­pio de ocorrÃªncia", "Municipio de ocorrencia"])
-    if not structured["UF_OBITO"]:
-        structured["UF_OBITO"] = _extract_uf_ocorrencia(raw_text)
-
-    structured["LOGRADOURO"] = _find_block_value(
-        raw_text, ["Logradouro", "EndereÃ§o", "Endereco"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","NÃºmero", "Numero", "Complemento", "Bairro"],
-    )
-    structured["NUMERO"] = _find_block_value(
-        raw_text, ["NÃºmero", "Numero"], stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Complemento", "Bairro"],
-    )
-    structured["COMPLEMENTO"] = _find_block_value(
-        raw_text, ["Complemento"], stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Bairro", "MunicÃ­pio", "Municipio"],
-    )
-    structured["BAIRRO"] = _find_block_value(
-        raw_text, ["Bairro"], stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","MunicÃ­pio", "Municipio", "Cidade", "UF"],
-    )
-    structured["CIDADE"] = _find_block_value(
-        raw_text, ["MunicÃ­pio", "Municipio", "Cidade"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","UF", "CEP", "Cep"],
-    )
-    structured["UF"] = _find_uf_after(
-        raw_text, ["EndereÃ§o", "Endereco", "Logradouro", "Bairro", "MunicÃ­pio", "Municipio", "Cidade"],
-    )
-    structured["CEP"] = _normalize_cep(_find_block_value(raw_text, ["CEP", "Cep"]))
-
-    structured["CIDADE_NASCIMENTO"] = _find_block_value(
-        raw_text, ["Naturalidade", "MunicÃ­pio de nascimento", "Municipio de nascimento", "Cidade de nascimento"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","UF de nascimento", "Nacionalidade"],
-    )
-    structured["UF_NASCIMENTO"] = _find_uf_after(
-        raw_text, ["Naturalidade", "MunicÃ­pio de nascimento", "Municipio de nascimento"],
-    )
-
-    structured["CPF"] = _find_block_value(raw_text, ["CPF"])
-    structured["RG"] = _find_block_value(raw_text, ["RG", "Registro Geral"])
-    structured["ORGAO_EMISSOR_RG"] = _find_block_value(
-        raw_text, ["Ã“rgÃ£o emissor", "Orgao emissor", "Ã“rgÃ£o expedidor", "Orgao expedidor"],
-    )
-
-    structured["SEXO"] = _find_block_value(raw_text, ["Sexo"], stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","RaÃ§a", "Raca", "Cor"])
-    structured["RACA_COR"] = _find_block_value(
-        raw_text, ["RaÃ§a/Cor", "RaÃ§a", "Raca/Cor", "Raca", "Cor"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","SituaÃ§Ã£o", "Situacao", "Escolaridade", "OcupaÃ§Ã£o", "Ocupacao"],
-    )
-    structured["ESTADO_CIVIL"] = _find_block_value(
-    raw_text, ["Estado civil", "SituaÃ§Ã£o conjugal", "Situacao conjugal"],
-    stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Escolaridade", "OcupaÃ§Ã£o", "Ocupacao", "RaÃ§a", "Raca"],
-    )
-    structured["NACIONALIDADE"] = _find_block_value(raw_text, ["Nacionalidade"])
-    structured["PROFISSAO"] = _find_block_value(raw_text, ["ProfissÃ£o", "Profissao", "OcupaÃ§Ã£o", "Ocupacao"])
-
-    structured["TIPO_OBITO"] = _detect_obito_type(raw_text)
-
-    causas = _extract_causes(raw_text)
-    structured["CAUSA_MORTE"] = causas.get("CAUSA_MORTE", "")
-    structured["CAUSA_MORTE_2"] = causas.get("CAUSA_MORTE_2", "")
-    structured["CAUSA_MORTE_3"] = causas.get("CAUSA_MORTE_3", "")
-    structured["CAUSA_MORTE_4"] = causas.get("CAUSA_MORTE_4", "")
-    structured["CAUSA_MORTE_5"] = causas.get("CAUSA_MORTE_5", "")
-    structured["CAUSA_BASICA"] = causas.get("CAUSA_BASICA", "")
-
-    cid_basica = ""
-    if structured.get("CAUSA_BASICA"):
-        cids = _CID_RE.findall(structured["CAUSA_BASICA"])
-        if cids:
-            cid_basica = cids[-1].upper()
-    if not cid_basica:
-        cids = _CID_RE.findall(raw_text)
-        if cids:
-            cid_basica = cids[-1].upper()
-    structured["CID_BASICA"] = cid_basica
-
-    structured["DO_NUMERO"] = _find_block_value(
-    raw_text,
-     [r"D\.O\.", "DO nÂº", "DO NÂº", "NÂº DO", "Numero DO", "NÃºmero DO"],
-    stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Nome", "Data", "Tipo", "Logradouro", "EndereÃ§o", "Endereco",
-                 "Outras", "condiÃ§Ãµes", "CondiÃ§Ãµes", "CAUSAS", "Causa", "Parte",
-                 "OcupaÃ§Ã£o", "Ocup", "ProfissÃ£o", "Profissao",
-                 "Escolaridade", "Naturalidade", "CartÃ£o", "RG", "CPF","Dr[a.]", "MÃ©dico", "CRM", "Telefone", "Data do atestado"],
-    )
-    if not structured["DO_NUMERO"]:
-        do_match = re.search(
-            r"DeclaraÃ§Ã£o\s+de\s+Ã“bito\s+(\d+(?:-\d+)?)", raw_text, re.IGNORECASE
-        )
-        if do_match:
-            structured["DO_NUMERO"] = do_match.group(1)
-
-    structured["MEDICO_ATESTANTE"] = _find_block_value(
-        raw_text,
-        ["MÃ©dico atestante", "Medico atestante", "Nome do mÃ©dico", "Nome do medico"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","CRM", "Registro", "Assinatura"],
-    )
-    structured["CRM_MEDICO"] = _find_block_value(
-        raw_text, ["CRM", "C.R.M.", "C.R.M"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Assinatura", "Carimbo", "UF"],
-    )
-
-    structured["PARTE_II"] = _find_block_value(
-        raw_text,
-        ["Parte II", "Parte 2", "Outras condiÃ§Ãµes significativas", "Outras condicoes significativas"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Oportunidade", "Notificado", "ProvidÃªncias", "Nome do auditor", "Nome do medico"],
-        max_distance=20,
-    )
-    if not structured["PARTE_II"]:
-        parte_ii_match = re.search(
-            r"PARTE\s+II[:\s]*\\n?(.*?)(?:Outros episÃ³dios|Nome do mÃ©dico|CRM|$)",
-            raw_text, re.DOTALL | re.IGNORECASE
-        )
-        if parte_ii_match:
-            structured["PARTE_II"] = _clean_field(parte_ii_match.group(1).strip()[:200])
-
-    structured["INTERVALO_DOENCA_MORTE"] = _find_block_value(
-        raw_text,
-        ["Tempo aproximado", "Intervalo entre o inÃ­cio", "Intervalo entre o inicio"],
-        stop_labels=[
-        "DIAGNÓSTICO CONFIRMADO POR",
-        "Prováveis circunstâncias",
-        "Ocorrência Policial",
-        "Descrição sumária",
-        "Diagnóstico confirmado",
-        "Necrópsia",
-        "Ocorrencia Policial",
-        "OcorrÃªncia Policial",
-        "Descricao sumaria",
-        "DescriÃ§Ã£o sumÃ¡ria",
-        "Diagnostico confirmado",
-        "DiagnÃ³stico confirmado",
-        "NecrÃ³psia","Causas", "Parte", "Nome"],
-        max_distance=8,
-    )
-    # â”€â”€ Deduplicar mÃ©dico atestante â”€â”€
-    medico = structured.get("MEDICO_ATESTANTE", "")
-    if medico:
-        linhas = [l.strip() for l in medico.split("\n") if l.strip()]
-        linhas_unicas = []
-        for l in linhas:
-            if l not in linhas_unicas:
-                linhas_unicas.append(l)
-        structured["MEDICO_ATESTANTE"] = " ".join(linhas_unicas)
-    
-    # â”€â”€ Remover cabeÃ§alhos de formulÃ¡rio do NOME â”€â”€
-    nome = structured.get("NOME", "")
-    if nome:
-        nome_original = nome
-        nome = re.sub(
-            r'^(RepÃºblica Federativa do Brasil|CAPÃTULO IX|ENDEREÃ‡O DO LOCAL|'
-            r'Estabelecimento\s+|PROVÃVEIS CIRCUNSTÃ‚NCIAS|Nome do (Pai|MÃ©dico)|'
-            r'Data de nascimento|CÃ³digo CNES|NÃºmero da DeclaraÃ§Ã£o|'
-            r'Cidade e procedÃªncia|Nome da MÃ£e|'
-            r'Ã“BITO DE MULHER|ASSISTÃŠNCIA MÃ‰DICA|'
-            r'II\s+IdentificaÃ§Ã£o|III\s+OcorrÃªncia).*',
-            '', nome, flags=re.IGNORECASE | re.DOTALL
-        ).strip()
-        if nome != nome_original:
-            logger.info(f"NOME limpo: '{nome_original[:50]}...' â†’ '{nome[:50]}...'")
-        structured["NOME"] = nome
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    # 2. FALLBACK: MAPEAMENTO POR LABEL EM PORTUGUÃŠS
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-
-    label_map = {
-        "nome do falecido": "NOME",
-        "nome do falecida": "NOME",
-        "nome do paciente": "NOME",
-        "nome da mÃ£e": "NOME_MAE",
-        "nome da mae": "NOME_MAE",
-        "nome do pai": "NOME_PAI",
-        "data de nascimento": "NASCIMENTO",
-        "data de nasc": "NASCIMENTO",
-        "data nascimento": "NASCIMENTO",
-        "data do Ã³bito": "DATA_OBITO",
-        "data do obito": "DATA_OBITO",
-        "data do falecimento": "DATA_OBITO",
-        "hora do Ã³bito": "HORA_OBITO",
-        "hora do obito": "HORA_OBITO",
-        "hora:": "HORA_OBITO",
-        "sexo:": "SEXO",
-        "naturalidade": "CIDADE_NASCIMENTO",
-        "raÃ§a/cor": "RACA_COR",
-        "raca/cor": "RACA_COR",
-        "estado civil": "ESTADO_CIVIL",
-        "escolaridade": "ESCOLARIDADE",
-        "ocupaÃ§Ã£o habitual": "PROFISSAO",
-        "ocupacao habitual": "PROFISSAO",
-        "profissÃ£o": "PROFISSAO",
-        "profissao": "PROFISSAO",
-        "endereÃ§o": "LOGRADOURO",
-        "endereco": "LOGRADOURO",
-        "logradouro": "LOGRADOURO",
-        "nÃºmero": "NUMERO",
-        "numero": "NUMERO",
-        "nÂº": "NUMERO",
-        "complemento": "COMPLEMENTO",
-        "bairro": "BAIRRO",
-        "bairro/distrito": "BAIRRO",
-        "municÃ­pio de residÃªncia": "CIDADE",
-        "municipio de residencia": "CIDADE",
-        "municÃ­pio de ocorrÃªncia": "CIDADE_OBITO",
-        "municipio de ocorrencia": "CIDADE_OBITO",
-        "cidade": "CIDADE_OBITO",
-        "uf residÃªncia": "UF",
-        "uf ocorrÃªncia": "UF_OBITO",
-        "uf ocorrencia": "UF_OBITO",
-        "uf:": "UF_OBITO",
-        "cep:": "CEP",
-        "causa bÃ¡sica": "CAUSA_BASICA",
-        "causa basica": "CAUSA_BASICA",
-        "causa da morte": "CAUSA_MORTE",
-        "nome do mÃ©dico": "MEDICO_ATESTANTE",
-        "nome do medico": "MEDICO_ATESTANTE",
-        "crm:": "CRM_MEDICO",
-        "crm": "CRM_MEDICO",
-        "data do atestado": "DATA_ATESTADO",
-        "tipo de Ã³bito": "TIPO_OBITO",
-        "tipo de obito": "TIPO_OBITO",
-    }
-
-    lines = raw_text.split('\n')
-    current_field = None
-    continuation_count = {}
-
-    for line in lines:
-        line_stripped = line.strip()
-        if not line_stripped:
-            continue
-
-        line_lower = line_stripped.lower()
-
-        matched = False
-        for label, field in label_map.items():
-            if line_lower.startswith(label):
-                value = line_stripped[len(label):].strip()
-                if value.startswith(':'):
-                    value = value[1:].strip()
-                if value and not structured.get(field):
-                    structured[field] = value
-                current_field = field
-                continuation_count[current_field] = 0
-                matched = True
-                break
-
-        # NÃƒO continua se a linha tiver ":" (provavelmente Ã© outro campo)
-        if not matched and current_field and structured.get(current_field):
-            if ":" in line_stripped:
-                current_field = None
-            else:
-                cont_key = f"cont_{current_field}"
-                continuation_count[cont_key] = continuation_count.get(cont_key, 0) + 1
-                if continuation_count[cont_key] <= 2:
-                    structured[current_field] += " " + line_stripped
-                else:
-                    current_field = None
-    # Limpar prefixos "A - ", "B - ", "C - " das causas
-    for campo in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_BASICA"]:
-        val = structured.get(campo, "")
-        if val:
-            val = re.sub(r'^[A-E]\s*[-â€“â€”:]\s*', '', val).strip()
-            structured[campo] = val
-    # Normalizar datas "30 05 2020" â†’ "30/05/2020"
-    for campo_data in ["NASCIMENTO", "DATA_OBITO", "DATA_ATESTADO"]:
-        val = structured.get(campo_data, "")
-        if val and re.match(r'^\d{2}\s+\d{2}\s+\d{4}$', val):
-            partes = val.split()
-            structured[campo_data] = f"{partes[0]}/{partes[1]}/{partes[2]}"
-
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    # 3. LIMPEZA DE PREFIXOS NOS CAMPOS
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-
-    prefixos_para_remover = [
-    (r"^Descrição sumária do evento[:\s]*", ""),
-    (r"^DIAGNÓSTICO CONFIRMADO POR[:\s]*", ""),
-    (r"^Descricao sumaria do evento[:\s]*", ""),
-    (r"^DescriÃ§Ã£o sumÃ¡ria do evento[:\s]*", ""),
-    (r"^Nome do Falecido[:\s]*", ""),
-    (r"^DiagnÃ³stico confirmado por[:\s]*", ""),
-    (r"^DIAGNÃ“STICO CONFIRMADO POR[:\s]*", ""),
-    (r"^Devido ou como de[:\s]*", ""),
-    (r"^b\s*", ""),
-        (r"^\(rua,\s*praÃ§a,\s*avenida,\s*etc\):\s*", ""),
-        (r"^\(rua,\s*praca,\s*avenida,\s*etc\):\s*", ""),
-        (r"^de residÃªncia:\s*", ""),
-        (r"^de residencia:\s*", ""),
-        (r"^de ocorrÃªncia:\s*", ""),
-        (r"^de ocorrencia:\s*", ""),
-        (r"^/Distrito:\s*", ""),
-        (r"^/distrito:\s*", ""),
-        (r"^habitual:\s*", ""),
-        (r"^\(Ãºltima sÃ©rie concluÃ­da\):\s*", ""),
-        (r"^\(ultima serie concluida\):\s*", ""),
-        (r"\s+Idade:\s*\d+$", ""),
-        (r"\s+Idade\s*\d+$", ""),
-        (r"\s+CartÃ£o\s+SUS:?.*$", ""),
-        (r"\s+Cartao\s+SUS:?.*$", ""),
-        (r"^e a morte:\s*", ""),
-        (r"^UF do CRM:\s*", ""),
-        (r"^Devido ou como consequÃªncia de:\s*", ""),
-        (r"^Intervalo entre o inÃ­cio e o Ã³bito:\s*", ""),
-        (r"^Intervalo entre o inÃ­cio e a morte:\s*", ""),
-        (r"^e o Ã³bito:\s*", ""),
-        (r"^\(que contribuÃ­ram para a morte, mas nÃ£o relacionadas Ã  doenÃ§a ou condiÃ§Ã£o que a causou\):\s*", ""),
-        (r"^\(que contribuiram para a morte, mas nao relacionadas a doenca ou condicao que a causou\):\s*", ""),
-        (r"^habitual \(Informar anterior, se aposentado / desempregado\):\s*", ""),
-        (r"^habitual \(Informar anterior, se aposentada / desempregada\):\s*", ""),
-        (r"^que contribuÃ­ram para a morte, mas (?:que )?nÃ£o (?:entram (?:diretamente na seqÃ¼Ãªncia acima|relacionadas Ã  doenÃ§a ou condiÃ§Ã£o que a causou)|relacionadas Ã  doenÃ§a ou condiÃ§Ã£o que a causou)[^:]*:?\s*", ""),
-        (r"^imediatA[:\s]*", ""),
-        (r"^causa imediata[:\s]*", ""),
-        (r"^DoenÃ§a ou estado mÃ³rbido que causou diretamente a morte[:\s]*", ""),
-        (r"^CondiÃ§Ãµes ou causas mÃ³rbidas que ocasionaram diretamente[:\s]*", ""),
-        (r"^Afeccoes mÃ³rbidas, se houver, que produziram a causa acima[:\s]*", ""),
-        (r"^AfecÃ§Ãµes mÃ³rbidas, se houver, que produziram a causa acima[:\s]*", ""),
-        (r"^Parte\s+I[:\s]*", ""),
-        (r"^Imediata[:\s]*", ""),
-        (r"^Causa imediata[:\s]*", ""),
-        (r"^ANOTE SOMENTE UM DIAGNÃ“STICO POR LINHA\s*", ""),
-        (r"^Anote somente um diagnÃ³stico por linha\s*", ""),
-        (r"^NÃ£o preencher este espaÃ§o\s*", ""),
-        (r"^PREENCHEMENTO EXCLUSIVO[:\s]*", ""),
-        (r"^Nome:\s*", ""),
-        (r"^CondiÃ§Ãµes ou causas mÃ³rbidas que deram origem Ã  sequÃªncia de eventos que produziram a morte[:\s]*", ""),
-        (r"^DoenÃ§a ou condiÃ§Ãµes significativas[:\s]*", ""),
-        (r"^CondiÃ§Ãµes ou causas mÃ³rbidas que ocasionaram diretamente[:\s]*", ""),
-        (r":\s*\d+\s*$", ""),
-        (r"\s+\d{2,3}\s*$", ""),
-        (r"^:\s*", ""),
-        (r"^CÃ³digo:\s*", ""),
-        (r"^CÃ³digo\s+CID[:\s]*", ""),
-        (r"^Tempo aproximado entre o inÃ­cio e a morte[:\s]*", ""),
-        (r"^entre o inÃ­cio e[:\s]*", ""),
-        (r"^como consequÃªncia de:\s*", ""),
-        (r"^ou como consequÃªncia de:\s*", ""),
-        (r"^Devido ou como consequÃªncia de:\s*", ""),
-        (r"^,\s*mas\s+nÃ£o\s+", ""),
-        (r"^\d+:\s*", ""),         
-        (r"^Aponte\s+(a\s+)?(cadeia|doenÃ§a|eventos|condiÃ§Ã£o).*", ""),
-        (r"^Preencha\s+(o\s+)?(atestado|cada|a\s+cadeia).*", ""),
-        (r"^Coloque,\s*em\s+cada\s+linha.*", ""),
-        (r"^Denote\s+o\s+evento.*", ""),
-        (r"^SeÃ§Ã£o\s+mÃ©dica.*", ""),
-        (r"^Estado\s+mÃ³rbido\s+que\s+causou.*", ""),
-        (r"^DoenÃ§a,\s+lesÃ£o\s+ou\s+estado.*", ""),
-        (r"^CondiÃ§Ãµes\s+morbosas.*", ""),
-        (r"^Causas\s+mÃ³rbidas.*", ""),
-        (r"^ANOTE\s+SOMENTE\s+UM\s+DIAGNÃ“STICO.*", ""),
-        (r"^Deve\s+ser\s+usada\s+esta\s+parte.*", ""),
-        (r"^:\s*", ""),
-        (r"^NÃºmero[:\s]*", ""),
-        (r"^CÃ³digo[:\s]*", ""),
-        (r"^CÃ³digo\s+CID[:\s]*", ""),
-        (r"^\(a doenÃ§a ou estado mÃ³rbido que causou diretamente a morte\)[:\s]*", ""),
-        (r"^\(Ãºltima doenÃ§a ou condiÃ§Ã£o que causou diretamente a morte\)[:\s]*", ""),
-        (r"^Tempo aproximado entre o inÃ­cio e a morte[:\s]*", ""),
-        (r"^entre o inÃ­cio[:\s]*", ""),
-        (r"^:\s*", ""),
-        (r"^NÃºmero[:\s]*", ""),
-        (r"^CÃ³digo[:\s]*", ""),
-        (r"^CÃ³digo\s+CID[:\s]*", ""),
-        (r"^\(a doenÃ§a ou estado mÃ³rbido que causou diretamente a morte\)[:\s]*", ""),
-        (r"^\(Ãºltima doenÃ§a ou condiÃ§Ã£o que causou diretamente a morte\)[:\s]*", ""),
-        (r"^Tempo aproximado entre o inÃ­cio e a morte[:\s]*", ""),
-        (r"^entre o inÃ­cio[:\s]*", ""),
-           
-    ]
-
-    campos_para_limpar = [
-        "NOME", "NOME_MAE", "NOME_PAI", "PROFISSAO",
-        "LOGRADOURO", "NUMERO", "COMPLEMENTO", "BAIRRO",
-        "CIDADE", "CIDADE_OBITO", "CIDADE_NASCIMENTO",
-        "NASCIMENTO", "DATA_OBITO", "HORA_OBITO",
-        "CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3",
-        "CAUSA_MORTE_4", "CAUSA_MORTE_5", "CAUSA_BASICA",
-        "LOCAL_OBITO", "MEDICO_ATESTANTE", "PARTE_II",
-        "INTERVALO_DOENCA_MORTE", "DATA_ATESTADO",
-        "CRM_MEDICO", "RACA_COR",
-    ]
-
-    for campo in campos_para_limpar:
-        val = structured.get(campo, "")
-        if val:
-            for padrao, substituto in prefixos_para_remover:
-                val = re.sub(padrao, substituto, val, flags=re.IGNORECASE)
-            structured[campo] = val.strip()
-
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    # 4. PÃ“S-PROCESSAMENTO ADICIONAL
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-
-    # Se CAUSA_MORTE ou CAUSA_BASICA estÃ£o com nome de mÃ©dico, limpar
-    nomes_medicos_conhecidos = ["julia lins fabbri", "julia lins fabbi", "julia"]
-    for campo_causa in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_BASICA"]:
-        val = structured.get(campo_causa, "")
-        if val:
-            val = re.sub(r'\s+PARTE\s+(I|II)\s+.*$', '', val, flags=re.IGNORECASE).strip()
-            structured[campo_causa] = val
-
-    # â”€â”€ Validar HORA_OBITO â”€â”€
-    hora = structured.get("HORA_OBITO", "")
-    if hora and (len(hora) > 5 or re.search(r'\s{2,}', hora.strip()) or ':' not in hora):
-        structured["HORA_OBITO"] = ""
-       
-    # Se DATA_ATESTADO tem texto extra depois da data, limpar
-    data_atestado = structured.get("DATA_ATESTADO", "")
-    if data_atestado:
-        match_data = re.match(r'^(\d{2}/\d{2}/\d{4})', data_atestado)
-        if match_data:
-            structured["DATA_ATESTADO"] = match_data.group(1)
-    # â”€â”€ Extrair primeira data vÃ¡lida em NASCIMENTO â”€â”€
-    nasc = structured.get("NASCIMENTO", "")
-    if nasc:
-        match_data = re.search(r'(\d{2}/\d{2}/\d{4})', nasc)
-        if match_data:
-            structured["NASCIMENTO"] = match_data.group(1)
-        else:
-            # Tentar extrair data no formato YYYY MM DD
-            match_ymd = re.search(r'(\d{4})\s+(\d{1,2})\s+(\d{1,2})', nasc)
-            if match_ymd:
-                ano, mes, dia = match_ymd.group(1), match_ymd.group(2), match_ymd.group(3)
-                if int(mes) > 12:
-                    mes, dia = dia, mes
-                if 1 <= int(mes) <= 12 and 1 <= int(dia) <= 31:
-                    structured["NASCIMENTO"] = f"{dia.zfill(2)}/{mes.zfill(2)}/{ano}"
-
-    # â”€â”€ Extrair primeira data vÃ¡lida em DATA_OBITO â”€â”€
-    data_obito = structured.get("DATA_OBITO", "")
-    if data_obito:
-        match_data = re.search(r'(\d{2}/\d{2}/\d{4})', data_obito)
-        if match_data:
-            structured["DATA_OBITO"] = match_data.group(1)
-        else:
-            match_ymd = re.search(r'(\d{4})\s+(\d{1,2})\s+(\d{1,2})', data_obito)
-            if match_ymd:
-                ano, mes, dia = match_ymd.group(1), match_ymd.group(2), match_ymd.group(3)
-                if int(mes) > 12:
-                    mes, dia = dia, mes
-                if 1 <= int(mes) <= 12 and 1 <= int(dia) <= 31:
-                    structured["DATA_OBITO"] = f"{dia.zfill(2)}/{mes.zfill(2)}/{ano}"
-
-    # Limpar RACA_COR se tiver ":" ou for muito longo
-    raca = structured.get("RACA_COR", "")
-    if raca and (":" in raca or len(raca) > 20):
-        structured["RACA_COR"] = ""
-
-    # â”€â”€ Limpeza de UF_OBITO â”€â”€
-    uf_obito = structured.get("UF_OBITO", "")
-    if uf_obito:
-        uf_obito = re.sub(r'[`\s]', '', uf_obito)
-        match_uf = re.search(r'([A-Za-z]{2})', uf_obito)
-        if match_uf:
-            structured["UF_OBITO"] = match_uf.group(1).upper()
-
-    # Se COMPLEMENTO contiver "CEP:", limpar
-    compl = structured.get("COMPLEMENTO", "")
-    if compl and re.search(r'CEP:\s', compl, re.IGNORECASE):
-        structured["COMPLEMENTO"] = ""
-
-    # â”€â”€ Limpeza de cidade duplicada â”€â”€
-    for campo_cidade in ["CIDADE_OBITO"]:
-        val = structured.get(campo_cidade, "")
-        if val:
-            partes = val.split()
-            # Se a mesma palavra aparece repetida, manter sÃ³ uma
-            palavras_vistas = []
-            resultado = []
-            for p in partes:
-                if p not in palavras_vistas:
-                    palavras_vistas.append(p)
-                    resultado.append(p)
-            if len(resultado) < len(partes):
-                structured[campo_cidade] = " ".join(resultado)
-    # â”€â”€ Limpar CIDADE_OBITO com labels capturadas â”€â”€
-    cidade = structured.get("CIDADE_OBITO", "")
-    if cidade:
-        cidade = re.sub(
-            r'\s+(?:CAUSAS\s+DA\s+MORTE|CÃ³digo|UF|CEP).*$',
-            '', cidade, flags=re.IGNORECASE
-        ).strip()
-        structured["CIDADE_OBITO"] = cidade
-    # â”€â”€ Normalizar HORA_OBITO â”€â”€
-    hora = structured.get("HORA_OBITO", "")
-    if hora:
-        # Remover labels
-        hora = re.sub(r'(Hora|hora|HORA)\s*', '', hora).strip()
-        # "2 6" â†’ "02:06"
-        hora = re.sub(r'^(\d{1})\s+(\d{2})$', r'0\1:\2', hora)
-        # "06 19" â†’ "06:19"
-        hora = re.sub(r'^(\d{2})\s+(\d{2})$', r'\1:\2', hora)
-        # "02 06" â†’ "02:06"
-        hora = re.sub(r'^(\d{2})\s+(\d{2})$', r'\1:\2', hora)
-        # "20 12 03" â†’ "20:12:03"
-        hora = re.sub(r'^(\d{2}):(\d{2})\s+(\d{2})$', r'\1:\2:\3', hora)
-        # "2 6" com espaÃ§os variados
-        hora = re.sub(r'^(\d{1,2})\s+(\d{2})$', lambda m: f"{int(m.group(1)):02d}:{m.group(2)}", hora)
-        structured["HORA_OBITO"] = hora
-    # â”€â”€ Limpeza de CRM_MEDICO â”€â”€
-    crm = structured.get("CRM_MEDICO", "")
-    if crm:
-        crm = re.sub(r'[`\s]+', ' ', crm).strip()
-        crm = re.sub(
-            r'(?:Data do atestado|Ã“bito atestado por|MunicÃ­pio|Meio de contato|SP \d+|RQE).*',
-            '', crm, flags=re.IGNORECASE
-        ).strip()
-        structured["CRM_MEDICO"] = crm
-
-    # â”€â”€ Limpeza de INTERVALO_DOENCA_MORTE â”€â”€
-    intervalo = structured.get("INTERVALO_DOENCA_MORTE", "")
-    if intervalo:
-        intervalo = re.sub(
-            r'^(?:entre\s+)?o\s+in[iÃ­]cio\s+(?:da\s+doen[cÃ§]a\s+)?e\s+(?:a\s+)?morte[:\s]*',
-            '', intervalo, flags=re.IGNORECASE
-        ).strip()
-        structured["INTERVALO_DOENCA_MORTE"] = intervalo
-
-    # â”€â”€ IDADE (calcular) â”€â”€
-    idade_calc = ""
-    if structured.get("NASCIMENTO") and structured.get("DATA_OBITO"):
-        try:
-            dn = dt.datetime.strptime(structured["NASCIMENTO"], "%d/%m/%Y")
-            do = dt.datetime.strptime(structured["DATA_OBITO"], "%d/%m/%Y")
-            anos = do.year - dn.year - ((do.month, do.day) < (dn.month, dn.day))
-            if 0 <= anos <= 130:
-                idade_calc = str(anos)
-        except Exception:
-            pass
-    structured["IDADE_ANOS"] = idade_calc
-
-    # NOME_MES
-    if structured["DATA_OBITO"]:
-        partes = structured["DATA_OBITO"].split("/")
-        if len(partes) == 3:
-            mes = partes[1].zfill(2)
-            structured["NOME_MES"] = MESES_PT.get(mes, "")
-
-    # Hashes
-    structured["HASH_ARQUIVO"] = ""
-    structured["HASH_CONTEUDO"] = _sha256_text(raw_text)
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    # 5. VALIDAÃ‡ÃƒO
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    validate_obito(structured)
-
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    # 6. FALLBACK LLM (se QUALIDADE_SCORE < 50)
-    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    score = int(structured.get("QUALIDADE_SCORE", 0))
-    if score < 50 and raw_text and OPENAI_API_KEY:
-        try:
-            llm_data = _llm_parse_fallback(raw_text)
-            for k, v in llm_data.items():
-                if v and not structured.get(k):
-                    structured[k] = v
-        except Exception:
-            pass
-    # Limpar sufixo "PARTE I" / "PARTE II" das causas
-    for campo in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_BASICA"]:
-        val = structured.get(campo, "")
-        if val:
-            val = re.sub(r'\s+PARTE\s+(I|II)\s*$', '', val, flags=re.IGNORECASE).strip()
-            structured[campo] = val
-    # â”€â”€ PÃ³s-processamento: limpar labels dos campos â”€â”€
-    
-    # Limpar PARTE_II
-        parte_ii = structured.get("PARTE_II", "")
-    if parte_ii:
-        parte_ii = re.sub(
-            r'(?:Outras\s+)?condi[cÃ§][Ãµo]es?\s+significativas?\s+que\s+contribu[iÃ­]ram\s+para\s+a\s+morte.*?(?:acima:|acima\s)',
-            '', parte_ii, flags=re.IGNORECASE | re.DOTALL
-        ).strip()
-        parte_ii = re.sub(
-            r'que\s+contribu[iÃ­]ram\s+para\s+a\s+morte.*?(?:acima:|acima\s|eventos:)',
-            '', parte_ii, flags=re.IGNORECASE | re.DOTALL
-        ).strip()
-        structured["PARTE_II"] = parte_ii
-    
-    # Limpar CAUSA_MORTE de labels como "A - Imediata:", "A - DoenÃ§a ou estado mÃ³rbido..."
-    for campo in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_BASICA"]:
-        val = structured.get(campo, "")
-        if val:
-            # Remove prefixos como "A - Imediata:", "B - Devido ou como consequÃªncia de:", "C - Covid-19"
-            val = re.sub(r'^[A-Da-d][\s)*.:-]+\s*(?:Imediata|Devido|Devida|ConsequÃªncia|DoenÃ§a|Causa)[^:]*:\s*', '', val, flags=re.IGNORECASE).strip()
-            val = re.sub(r'^[A-Da-d][\s)*.:-]+\s*', '', val).strip()
-            structured[campo] = val
-    
-    # Limpar sufixo "PARTE I" / "PARTE II" das causas
-    for campo in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_BASICA"]:
-        val = structured.get(campo, "")
-        if val:
-            val = re.sub(r'\s+PARTE\s+(I|II)\s*$', '', val, flags=re.IGNORECASE).strip()
-            structured[campo] = val               
-    return structured
-    # â”€â”€ Remover instruÃ§Ãµes do formulÃ¡rio dos campos de causa â”€â”€
-    instrucoes = [
-        "anote somente um diagnÃ³stico por linha",
-        "nÃ£o preencher este espaÃ§o",
-        "preenchimento exclusivo",
-    ]
-    for campo in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_BASICA"]:
-        val = structured.get(campo, "")
-        if val:
-            for inst in instrucoes:
-                if inst in val.lower():
-                    structured[campo] = ""
-                    break
-    # â”€â”€ Limpar PARTE_II â”€â”€
-    parte_ii = structured.get("PARTE_II", "")
-    if parte_ii:
-        # Remove labels do formulÃ¡rio no inÃ­cio
-        parte_ii = re.sub(
-            r'^\(?que\s+contribu[iÃ­]ram\s+para\s+a\s+morte.*?(?:acima:|acima\s|eventos:|seq[uÃ¼e]ncia\s+acima)\)?\s*',
-            '', parte_ii, flags=re.IGNORECASE | re.DOTALL
-        ).strip()
-        parte_ii = re.sub(
-            r'^\(?(?:Outras\s+)?condi[cÃ§][Ãµo]es?\s+significativas?\s+que\s+contribu[iÃ­]ram.*?(?:acima:|acima\s)\)?\s*',
-            '', parte_ii, flags=re.IGNORECASE | re.DOTALL
-        ).strip()
-        structured["PARTE_II"] = parte_ii
-           
-def _llm_parse_fallback(raw_text: str) -> Dict[str, str]:
-    """Usa GPT-4o-mini para extrair campos de DO quando o parser tradicional falha."""
-    prompt = f"""Extraia os campos abaixo deste texto de DeclaraÃ§Ã£o de Ã“bito.
-Retorne APENAS um JSON vÃ¡lido com os campos encontrados (string vazia se nÃ£o encontrar).
-
-Campos: NOME, NOME_MAE, NOME_PAI, NASCIMENTO (DD/MM/AAAA), DATA_OBITO (DD/MM/AAAA),
-HORA_OBITO, CIDADE_OBITO, UF_OBITO, CAUSA_MORTE, CAUSA_BASICA,
-DO_NUMERO, MEDICO_ATESTANTE, CRM_MEDICO, TIPO_OBITO, SEXO,
-LOGRADOURO, NUMERO, BAIRRO, CIDADE, CEP, PROFISSAO
-
-Texto OCR:
-{raw_text}
-"""
-    try:
-        resp = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            json={
-                "model": "gpt-4o-mini",
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.0,
-                "response_format": {"type": "json_object"},
-            },
-            headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            timeout=120,
-        )
-        result = resp.json()
-        content = result["choices"][0]["message"]["content"]
-        return json.loads(content)
-    except Exception as e:
-        print(f"[LLM_FALLBACK] Erro: {e}")
-        return {}
-# â”€â”€ ValidaÃ§Ã£o â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-def _valid_date(value: str) -> bool:
-    if not value:
-        return False
-    try:
-        d, m, y = value.split("/")
-        dt.date(int(y), int(m), int(d))
-        return True
-    except Exception:
-        return False
-
-def _valid_uf(value: str) -> bool:
-    return bool(value) and value.upper() in UF_VALIDAS
-
-def _valid_cep(value: str) -> bool:
-    return bool(re.fullmatch(r"\d{5}-\d{3}", value or ""))
-
-def _age_coherence(nasc: str, obito: str) -> Tuple[Optional[str], Optional[int]]:
-    if not (_valid_date(nasc) and _valid_date(obito)):
-        return None, None
-    try:
-        dn = dt.datetime.strptime(nasc, "%d/%m/%Y")
-        do = dt.datetime.strptime(obito, "%d/%m/%Y")
-        if do < dn:
-            return "Data de Ã³bito anterior Ã  data de nascimento", None
-        idade = int((do - dn).days / 365.25)
-        if idade < 0 or idade > 130:
-            return f"Idade incoerente: {idade} anos", None
-        return None, idade
-    except Exception:
-        return None, None
-
-def validate_obito(structured: Dict[str, Any]) -> Dict[str, Any]:
-    """Gera validaÃ§Ã£o e preenche campos derivados."""
-    errors: List[str] = []
-    warnings: List[str] = []
-
-    campos_criticos = ["NOME", "NOME_MAE", "NASCIMENTO", "DATA_OBITO", "CIDADE_OBITO", "UF_OBITO"]
-    for campo in campos_criticos:
-        if not structured.get(campo):
-            errors.append(f"Campo crÃ­tico ausente: {campo}")
-
-    if structured.get("NASCIMENTO") and not _valid_date(structured["NASCIMENTO"]):
-        errors.append("NASCIMENTO com data invÃ¡lida")
-    if structured.get("DATA_OBITO") and not _valid_date(structured["DATA_OBITO"]):
-        errors.append("DATA_OBITO com data invÃ¡lida")
-    if structured.get("HORA_OBITO") and not _is_valid_hour(structured["HORA_OBITO"]):
-        warnings.append("HORA_OBITO com formato invÃ¡lido")
-    if structured.get("UF_OBITO") and not _valid_uf(structured["UF_OBITO"]):
-        warnings.append("UF_OBITO invÃ¡lida")
-    if structured.get("UF") and not _valid_uf(structured["UF"]):
-        warnings.append("UF do endereÃ§o invÃ¡lida")
-    if structured.get("CEP") and not _valid_cep(structured["CEP"]):
-        warnings.append("CEP com formato invÃ¡lido")
-
-    age_err, idade = _age_coherence(
-        structured.get("NASCIMENTO", ""), structured.get("DATA_OBITO", "")
-    )
-    if age_err:
-        errors.append(age_err)
-
-    structured["NOME_OK"] = "SIM" if structured.get("NOME") else "NAO"
-    structured["NOMES_OK"] = "SIM" if (structured.get("NOME") and structured.get("NOME_MAE")) else "NAO"
-
-    total_campos = len(HEADER)
-    preenchidos = sum(1 for k in HEADER if structured.get(k))
-    score = int((preenchidos / total_campos) * 100)
-    score = max(0, score - len(errors) * 10)
-    structured["QUALIDADE_SCORE"] = score
-
-    if errors:
-        status = "REVISAR"
-    elif not structured.get("CAUSA_BASICA"):
-        status = "REVISAR"
-    else:
-        status = "OK"
-    structured["STATUS"] = status
-    structured["ERROS"] = " | ".join(errors)
-
-    return {
-        "ok": len(errors) == 0,
-        "errors": errors,
-        "warnings": warnings,
-    }
-
-# â”€â”€ Google Drive / Sheets â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-def _get_credentials(scopes: List[str]):
-    if not DRIVE_SERVICE_ACCOUNT_JSON:
-        raise RuntimeError("DRIVE_SERVICE_ACCOUNT_JSON nÃ£o configurado.")
-    return service_account.Credentials.from_service_account_info(
-        json.loads(DRIVE_SERVICE_ACCOUNT_JSON), scopes=scopes,
-    )
-
-def _get_drive_service():
-    return build(
-        "drive", "v3",
-        credentials=_get_credentials(["https://www.googleapis.com/auth/drive.readonly"]),
-    )
-
-def _get_sheets_service():
-    return build(
-        "sheets", "v4",
-        credentials=_get_credentials(["https://www.googleapis.com/auth/spreadsheets"]),
-    )
-
-def _get_sheet_name() -> str:
-    return "Auditoria"
-
-def _list_images_in_folder(
-    folder_id: str, since: Optional[datetime] = None, _depth: int = 0
-) -> List[dict]:
-    """Lista imagens recursivamente com limite de profundidade."""
-    MAX_DEPTH = 5
-    if _depth > MAX_DEPTH:
-        logger.warning(f"Profundidade mÃ¡xima ({MAX_DEPTH}) atingida na pasta {folder_id}")
-        return []
-
-    drive = _get_drive_service()
-    query = (
-        f"'{folder_id}' in parents and "
-        f"(mimeType='image/jpeg' or mimeType='image/png' or "
-        f"mimeType='image/gif' or mimeType='image/bmp' or "
-        f"mimeType='image/tiff') and trashed=false"
-    )
-    files = []
-    page_token = None
-    while True:
-        resp = drive.files().list(
-            q=query,
-            fields="files(id, name, mimeType, modifiedTime, parents)",
-            pageToken=page_token,
-            pageSize=200,
-        ).execute()
-        batch = resp.get("files", [])
-        if since:
-            batch = [
-                f for f in batch
-                if _parse_rfc3339(f.get("modifiedTime", "")) > since
-            ]
-        files.extend(batch)
-        page_token = resp.get("nextPageToken")
-        if not page_token:
-            break
-
-    # Subpastas (recursÃ£o controlada)
-    folder_query = (
-        f"'{folder_id}' in parents and "
-        f"mimeType='application/vnd.google-apps.folder' and trashed=false"
-    )
-    page_token = None
-    while True:
-        folders_resp = drive.files().list(
-            q=folder_query,
-            fields="files(id, name)",
-            pageToken=page_token,
-            pageSize=100,
-        ).execute()
-        for subfolder in folders_resp.get("files", []):
-            logger.info(f"Explorando subpasta (depth {_depth+1}): {subfolder['name']}")
-            sub_files = _list_images_in_folder(
-                subfolder["id"], since=since, _depth=_depth + 1
-            )
-            files.extend(sub_files)
-        page_token = folders_resp.get("nextPageToken")
-        if not page_token:
-            break
-    return files
-
-def _parse_rfc3339(ts: str) -> Optional[datetime]:
-    try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    except Exception:
-        return None
-
-def _download_image_bytes(file_id: str) -> Tuple[bytes, str]:
-    drive = _get_drive_service()
-    meta = drive.files().get(fileId=file_id, fields="name, mimeType").execute()
-    request = drive.files().get_media(fileId=file_id)
-    fh = io.BytesIO()
-    downloader = MediaIoBaseDownload(fh, request)
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
-    return fh.getvalue(), meta.get("mimeType", "image/jpeg")
-
-def _ensure_sheet_exists() -> str:
-    """Cria/verifica planilha e aba 'Auditoria' com cabeÃ§alhos."""
-    sheets = _get_sheets_service()
-    if SHEET_ID:
-        try:
-            metadata = sheets.spreadsheets().get(
-                spreadsheetId=SHEET_ID,
-                fields="sheets.properties.title",
-            ).execute()
-        except Exception as e:
-            raise RuntimeError(
-                f"Planilha {SHEET_ID} nÃ£o acessÃ­vel. Verifique SHEET_ID e permissÃµes da service account. Erro: {e}"
-            )
-        tab_names = [s["properties"]["title"] for s in metadata.get("sheets", [])]
-        if "Auditoria" not in tab_names:
-            sheets.spreadsheets().batchUpdate(
-                spreadsheetId=SHEET_ID,
-                body={"requests": [{"addSheet": {"properties": {"title": "Auditoria"}}}]},
-            ).execute()
-            sheets.spreadsheets().values().update(
-                spreadsheetId=SHEET_ID,
-                range="Auditoria!A1",
-                valueInputOption="RAW",
-                body={"values": [AUDIT_COLUMNS]},
-            ).execute()
-            logger.info(f"Aba 'Auditoria' criada na planilha {SHEET_ID}")
-        else:
-            # Verifica se cabeÃ§alho existe
-            existing = sheets.spreadsheets().values().get(
-                spreadsheetId=SHEET_ID,
-                range="Auditoria!A1:Z1",
-            ).execute()
-            values = existing.get("values", [])
-            if not values or not values[0] or not values[0][0]:
-                sheets.spreadsheets().values().update(
-                    spreadsheetId=SHEET_ID,
-                    range="Auditoria!A1",
-                    valueInputOption="RAW",
-                    body={"values": [AUDIT_COLUMNS]},
-                ).execute()
-                logger.info(f"CabeÃ§alhos escritos na aba 'Auditoria' da planilha {SHEET_ID}")
-        return SHEET_ID
-
-    # Cria nova planilha
-    spreadsheet = {
-        "properties": {"title": AUDIT_SHEET_TITLE},
-        "sheets": [{"properties": {"title": "Auditoria"}}],
-    }
-    sheet = sheets.spreadsheets().create(body=spreadsheet, fields="spreadsheetId").execute()
-    sid = sheet.get("spreadsheetId")
-    sheets.spreadsheets().values().update(
-        spreadsheetId=sid,
-        range="Auditoria!A1",
-        valueInputOption="RAW",
-        body={"values": [AUDIT_COLUMNS]},
-    ).execute()
-    logger.info(f"Nova planilha criada: {sid}")
-    return sid
-
-def _get_existing_data(sheet_id: str) -> Tuple[dict, set]:
-    """LÃª TODAS as colunas da planilha e retorna (dict_nome_para_linha, hashes)."""
-    try:
-        sheets = _get_sheets_service()
-        sheet_name = _get_sheet_name()
-        result = sheets.spreadsheets().values().get(
-            spreadsheetId=sheet_id,
-            range=f"{sheet_name}!A:Z",
-        ).execute()
-        values = result.get("values", [])
-        nomes = {}  # nome_arquivo â†’ nÃºmero da linha (1-based)
-        hashes = set()
-        try:
-            idx_nome = AUDIT_COLUMNS.index("NOME_ARQUIVO")
-            idx_hash = AUDIT_COLUMNS.index("HASH_ARQUIVO")
-        except ValueError:
-            return {}, set()
-        for i, row in enumerate(values):
-            if not row:
-                continue
-            if row and row[0] == "DATA_PROCESSAMENTO":
-                continue
-            if len(row) > idx_nome and row[idx_nome].strip():
-                nomes[row[idx_nome].strip()] = i + 1  # +1 porque planilha Ã© 1-based
-            if len(row) > idx_hash and row[idx_hash].strip():
-                hashes.add(row[idx_hash].strip())
-        return nomes, hashes
-    except Exception as e:
-        logger.warning(f"NÃ£o foi possÃ­vel ler dados existentes: {e}")
-        return {}, set()
-
-def _col_to_letter(col: int) -> str:
-    letters = ""
-    while col > 0:
-        col -= 1
-        letters = chr(ord("A") + col % 26) + letters
-        col //= 26
-    return letters
-
-def _append_rows_to_sheet(sheet_id: str, rows: List[dict]):
-    if not rows:
-        return
-    sheets = _get_sheets_service()
-    sheet_name = _get_sheet_name()
-    values = []
-    for row in rows:
-        values.append([row.get(col, "") for col in AUDIT_COLUMNS])
-    sheets.spreadsheets().values().append(
-        spreadsheetId=sheet_id,
-        range=f"{sheet_name}!A1",
-        valueInputOption="RAW",
-        insertDataOption="INSERT_ROWS",
-        body={"values": values},
-    ).execute()
-def _update_row_in_sheet(sheet_id: str, row_number: int, row: dict):
-    """Atualiza uma linha existente (upsert) com os valores do registro."""
-    sheets = _get_sheets_service()
-    sheet_name = _get_sheet_name()
-    values = [[row.get(col, "") for col in AUDIT_COLUMNS]]
-    sheets.spreadsheets().values().update(
-        spreadsheetId=sheet_id,
-        range=f"{sheet_name}!A{row_number}",
-        valueInputOption="RAW",
-        body={"values": values},
-    ).execute()
-       
-# â”€â”€ Processamento individual â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-def _process_single_image(file_id: str, file_name: str) -> dict:
-    """Pipeline completo: baixar â†’ OCR â†’ parse â†’ validar."""
-    logger.info(f"Processando: {file_name} ({file_id})")
-    forcar_revisar = False
-    try:
-        image_bytes, mime_type = _download_image_bytes(file_id)
-    except Exception as e:
-        return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_DRIVE", "ERROS": str(e)}
-    # â”€â”€ 1Âª tentativa: Gemini multimodal (campos estruturados) â”€â”€
-    structured = None
-    raw_text = ""
-    if GEMINI_API_KEY:
-        try:
-            gemini_data, gemini_conf = _ocr_gemini(image_bytes)
-            if gemini_data:
-                _MAP = {
-                    "NOME": ("NOME", "nome"),
-                    "NOME_MAE": ("NOME_MAE", "nome_mae"),
-                    "NASCIMENTO": ("NASCIMENTO", "nascimento"),
-                    "IDADE_ANOS": ("IDADE_ANOS", "idade_anos"),
-                    "DATA_OBITO": ("DATA_OBITO", "data_obito"),
-                    "HORA_OBITO": ("HORA_OBITO", "hora_obito"),
-                    "CIDADE_OBITO": ("CIDADE_OBITO", "cidade_obito"),
-                    "UF_OBITO": ("UF_OBITO", "uf_obito"),
-                    "CAUSA_MORTE": ("CAUSA_MORTE", "causa_morte"),
-                    "CAUSA_BASICA": ("CAUSA_BASICA", "causa_basica"),
-                    "CID_BASICA": ("CID_BASICA", "cid_basica"),
-                    "TIPO_OBITO": ("TIPO_OBITO", "tipo_obito"),
-                    "DO_NUMERO": ("DO_NUMERO", "do_numero"),
-                    "MEDICO_ATESTANTE": ("MEDICO_ATESTANTE", "medico_atestante"),
-                    "CRM_MEDICO": ("CRM_MEDICO", "crm_medico"),
-                    "PARTE_II": ("PARTE_II", "parte_ii"),
-                    "INTERVALO_DOENCA_MORTE": ("INTERVALO_DOENCA_MORTE", "intervalo_doenca_morte"),
-                }
-                structured = {}
-                for _out, _keys in _MAP.items():
-                    _val = ""
-                    for _k in _keys:
-                        if gemini_data.get(_k):
-                            _val = gemini_data.get(_k)
-                            break
-                    structured[_out] = _val
-                if not any(structured.values()):
-                    structured = None
-                else:
-                    logger.info(f"{file_name}: Gemini extraiu {sum(1 for v in structured.values() if v)} campos.")
-        except OCRProviderError as e:
-            logger.warning(f"Gemini falhou ({e}), usando fluxo Vision/parser.")
-
-    # â”€â”€ Se Gemini nÃ£o funcionou, fluxo atual (Vision + parser) â”€â”€
-    if structured is None:
-        try:
-            raw_text, confidence = ocr_image(image_bytes, mime_type)
-        except Exception as e:
-            return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_OCR", "ERROS": str(e)}
-        if not _is_valid_obito(raw_text):
-            # Alteracao 2: detecta verso da DO
-            if detectar_verso(raw_text):
-                logger.info(f"{file_name}: verso de DO detectado")
-                ressalvas = extrair_ressalvas(raw_text)
-                if ressalvas:
-                    msg = "VERSO - Ressalvas: " + "; ".join(
-                        f"{r['campo']}: {r['valor']}" for r in ressalvas)
-                else:
-                    msg = "VERSO (sem ressalvas identificadas)"
-                return {
-                    "NOME_ARQUIVO": file_name,
-                    "STATUS": "VERSO",
-                    "ERROS": msg,
-                }
-            # Alteracao 3: validacao tolerante
-            if parece_do(raw_text):
-                logger.info(f"{file_name}: parece DO, marcada para revisao")
-                forcar_revisar = True
-            else:
-                logger.warning(f"{file_name}: texto nÃ£o reconhecido como DO, pulando")
-                return {
-                    "NOME_ARQUIVO": file_name, "STATUS": "REJEITADO",
-                    "ERROS": "Imagem nÃ£o contÃ©m uma DeclaraÃ§Ã£o de Ã“bito vÃ¡lida",
-                }
-        try:
-            structured = parse_obito(raw_text)
-        except Exception as e:
-            structured = {k: "" for k in HEADER}
-            structured["ERROS"] = f"Erro no parser: {e}"
-
-    structured = limpar_campos_extraidos(_limpeza_avancada(structured))
-    structured["HASH_ARQUIVO"] = _sha256_bytes(image_bytes)
-    structured["HASH_CONTEUDO"] = _sha256_text(raw_text)
-    validate_obito(structured)
-    if forcar_revisar:
-        structured["STATUS"] = "REVISAR"
-        structured["ERROS"] = "Possivel DO, porem validacao rigida falhou - revisar manualmente"
-
-    return {
-        "DATA_PROCESSAMENTO": datetime.utcnow().strftime("%d/%m/%Y %H:%M:%S"),
-        "NOME_ARQUIVO": file_name,
-        "STATUS": structured.get("STATUS", ""),
-        "QUALIDADE_SCORE": str(structured.get("QUALIDADE_SCORE", "")),
-        "NOME": structured.get("NOME", ""),
-        "NOME_MAE": structured.get("NOME_MAE", ""),
-        "NASCIMENTO": structured.get("NASCIMENTO", ""),
-        "IDADE_ANOS": structured.get("IDADE_ANOS", ""),
-        "DATA_OBITO": structured.get("DATA_OBITO", ""),
-        "HORA_OBITO": structured.get("HORA_OBITO", ""),
-        "CIDADE_OBITO": structured.get("CIDADE_OBITO", ""),
-        "UF_OBITO": structured.get("UF_OBITO", ""),
-        "CAUSA_MORTE": structured.get("CAUSA_MORTE", ""),
-        "CAUSA_BASICA": structured.get("CAUSA_BASICA", ""),
-        "CID_BASICA": structured.get("CID_BASICA", ""),
-        "TIPO_OBITO": structured.get("TIPO_OBITO", ""),
-        "DO_NUMERO": structured.get("DO_NUMERO", ""),
-        "MEDICO_ATESTANTE": structured.get("MEDICO_ATESTANTE", ""),
-        "CRM_MEDICO": structured.get("CRM_MEDICO", ""),
-        "PARTE_II": structured.get("PARTE_II", ""),
-        "INTERVALO_DOENCA_MORTE": structured.get("INTERVALO_DOENCA_MORTE", ""),
-        "ERROS": structured.get("ERROS", ""),
-        "HASH_ARQUIVO": structured.get("HASH_ARQUIVO", ""),
-    }
-
-# â”€â”€ Batch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-def run_batch(
-    folder_id: str = None, force_reprocess: bool = False, limit: int = 0
-) -> dict:
-    """Pipeline completo do lote: lista â†’ OCR â†’ planilha."""
-    fid = folder_id or DRIVE_FOLDER_ID
-    if not fid:
-        return {"success": False, "error": "Nenhum DRIVE_FOLDER_ID configurado."}
-    if not SHEET_ID:
-        return {
-            "success": False,
-            "error": "SHEET_ID nÃ£o configurado. Configure a variÃ¡vel de ambiente SHEET_ID.",
-        }
-
-    images = _list_images_in_folder(fid)
-    sheet_id = _ensure_sheet_exists()
-
-    # Planilha como Ãºnica fonte da verdade para deduplicaÃ§Ã£o
-    existing_names, existing_hashes = _get_existing_data(sheet_id)
-
-    new_images = []
-    for img in images:
-        if not force_reprocess:
-            if img["name"] in existing_names:
-                logger.info(f"{img['name']} jÃ¡ estÃ¡ na planilha, pulando...")
-                continue
-        new_images.append(img)
-
-    if not new_images:
-        return {
-            "success": True,
-            "total": len(images),
-            "processed": 0,
-            "new": 0,
-            "message": "Nenhuma imagem nova encontrada.",
-        }
-
-    if limit > 0:
-        new_images = new_images[:limit]
-
-    success_count = 0
-    fail_count = 0
-    last_error = None
-
-    for img in new_images:
-        if limit > 0 and len(new_images) > limit:
-            break
-        try:
-            row = _process_single_image(img["id"], img["name"])
-            nome = img["name"].strip()
-            # UPSERT: se o arquivo jÃ¡ existe na planilha, atualiza a linha; senÃ£o, adiciona
-            if nome in existing_names:
-                linha = existing_names[nome]   # nÃºmero da linha (1-based)
-                _update_row_in_sheet(sheet_id, linha, row)
-                logger.info(f"{nome} atualizado (upsert) na linha {linha}.")
-            else:
-                _append_rows_to_sheet(sheet_id, [row])
-            success_count += 1
-            gc.collect()
-        except Exception as e:
-            fail_count += 1
-            last_error = str(e)
-            logger.error(f"Falha ao processar {img['name']}: {e}")
-    return {
-        "success": True,
-        "total": len(images),
-        "new": len(new_images),
-        "processed": success_count,
-        "failed": fail_count,
-        "sheet_id": sheet_id,
-        "message": f"{success_count} imagens processadas, {fail_count} falhas.",
-    }
-
-# â”€â”€ Monitor (thread de polling) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-_monitor_thread: Optional[Thread] = None
-_monitor_stop = Event()
-_monitor_lock = Lock()
-_monitor_force = False
-
-def _monitor_worker():
-    global _monitor_force
-    logger.info(f"Monitor iniciado: a cada {POLL_INTERVAL_MINUTES} minuto(s).")
-    while not _monitor_stop.is_set():
-        if not _monitor_lock.acquire(blocking=False):
-            logger.warning("Batch anterior ainda estÃ¡ executando, pulando ciclo...")
-            _monitor_stop.wait(POLL_INTERVAL_MINUTES * 60)
-            continue
-        try:
-            result = run_batch(limit=3, force_reprocess=_monitor_force)
-            import gc
-            gc.collect()
-            if result.get("new", 0) > 0:
-                logger.info(f"Monitor: {result['message']}")
-        except Exception as e:
-            logger.error(f"Erro no monitor: {e}")
-        finally:
-            _monitor_lock.release()
-        _monitor_stop.wait(POLL_INTERVAL_MINUTES * 60)
-
-
-
-def stop_monitor():
-    _monitor_stop.set()
-    if _monitor_thread:
-        _monitor_thread.join(timeout=10)
-    logger.info("Monitor parado.")
-
-# â”€â”€ FastAPI App â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-app = FastAPI(title="obito-ocr-service", version="2.0.0")
-
-@app.get("/health")
-def health():
-    return {"status": "ok", "service": "obito-ocr-service", "version": "2.0.0"}
-
-# â”€â”€ AutenticaÃ§Ã£o â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-def _check_auth(authorization: Optional[str]) -> None:
-    if not ENDPOINT_AUTH_TOKEN:
-        return
-    if not authorization:
-        raise HTTPException(status_code=401, detail={
-            "code": "UNAUTHORIZED",
-            "message": "CabeÃ§alho Authorization ausente.",
-            "requestId": None,
-        })
-    parts = authorization.split(" ", 1)
-    if len(parts) != 2 or parts[0].lower() != "bearer" or parts[1] != ENDPOINT_AUTH_TOKEN:
-        raise HTTPException(status_code=401, detail={
-            "code": "UNAUTHORIZED",
-            "message": "Token Bearer invÃ¡lido.",
-            "requestId": None,
-        })
-
-# â”€â”€ Endpoint /ocr â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-@app.post("/ocr")
-async def ocr_endpoint(request: Request, authorization: Optional[str] = Header(None)):
-    _check_auth(authorization)
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse(status_code=400, content={
-            "code": "INVALID_JSON",
-            "message": "Corpo da requisiÃ§Ã£o nÃ£o Ã© JSON vÃ¡lido.",
-            "requestId": None,
-        })
-
-    request_id = body.get("requestId") or body.get("request_id") or None
-    file_b64 = body.get("file")
-    mime_type = body.get("mimeType") or body.get("mime_type")
-    file_name = body.get("fileName") or body.get("file_name") or ""
-
-    if not file_b64:
-        return JSONResponse(status_code=400, content={
-            "code": "MISSING_FILE",
-            "message": "Campo 'file' (base64) Ã© obrigatÃ³rio.",
-            "requestId": request_id,
-        })
-    if not mime_type:
-        return JSONResponse(status_code=400, content={
-            "code": "MISSING_MIME_TYPE",
-            "message": "Campo 'mimeType' Ã© obrigatÃ³rio.",
-            "requestId": request_id,
-        })
-    if "pdf" in mime_type.lower() or file_name.lower().endswith(".pdf"):
-        return JSONResponse(status_code=422, content={
-            "code": "PDF_NOT_SUPPORTED",
-            "message": "PDF nÃ£o Ã© suportado. Envie imagem (PNG/JPG).",
-            "requestId": request_id,
-        })
-
-    try:
-        file_bytes = base64.b64decode(file_b64, validate=False)
-    except Exception:
-        return JSONResponse(status_code=400, content={
-            "code": "INVALID_BASE64",
-            "message": "NÃ£o foi possÃ­vel decodificar o base64 de 'file'.",
-            "requestId": request_id,
-        })
-    if len(file_bytes) > MAX_FILE_SIZE_BYTES:
-        return JSONResponse(status_code=413, content={
-            "code": "FILE_TOO_LARGE",
-            "message": f"Arquivo excede o limite de {MAX_FILE_SIZE_MB} MB.",
-            "requestId": request_id,
-        })
-
-    hash_arquivo = _sha256_bytes(file_bytes)
-    try:
-        raw_text, confidence = ocr_image(file_bytes, mime_type)
-    except OCRProviderError as e:
-        return JSONResponse(status_code=e.status_code, content={
-            "code": e.code, "message": str(e), "requestId": request_id,
-        })
-    except Exception as e:
-        return JSONResponse(status_code=502, content={
-            "code": "OCR_PROVIDER_ERROR",
-            "message": f"Erro inesperado no OCR: {e}",
-            "requestId": request_id,
-        })
-
-    try:
-        structured = parse_obito(raw_text)
-    except Exception as e:
-        structured = {k: "" for k in HEADER}
-        structured["ERROS"] = f"Erro no parser: {e}"
-
-    structured["HASH_ARQUIVO"] = hash_arquivo
-    structured["HASH_CONTEUDO"] = _sha256_text(raw_text)
-    validation = validate_obito(structured)
-
-    warnings = list(validation.get("warnings", []))
-    if validation.get("errors"):
-        warnings.extend([f"ERRO: {e}" for e in validation["errors"]])
-
-    return JSONResponse(status_code=200, content={
-        "text": raw_text,
-        "confidence": confidence,
-        "provider": OCR_PROVIDER,
-        "requestId": request_id,
-        "warnings": warnings,
-        "rawText": raw_text,
-        "structured": structured,
-        "validation": validation,
-        "headerOrder": HEADER,
-    })
-# â”€â”€ DiagnÃ³stico (OCR bruto para debug) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-# â”€â”€ DiagnÃ³stico por file_id do Drive â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-@app.post("/diagnose/{file_id}")
-async def diagnose_file(file_id: str, authorization: Optional[str] = Header(None)):
-    _check_auth(authorization)
-    try:
-        image_bytes, mime_type = _download_image_bytes(file_id)
-    except Exception as e:
-        return JSONResponse(status_code=502, content={
-            "code": "DRIVE_ERROR",
-            "message": f"Erro ao baixar imagem do Drive: {e}",
-        })
-
-    try:
-        raw_text, confidence = ocr_image(image_bytes, mime_type)
-    except Exception as e:
-        return {"file_id": file_id, "error": str(e), "raw_text": "", "confidence": 0}
-
-    structured = parse_obito(raw_text)
-    validate_obito(structured)
-
-    return {
-        "file_id": file_id,
-        "confidence": confidence,
-        "provider": OCR_LAST_PROVIDER,
-        "raw_text": raw_text,
-        "structured": structured,
-        "is_valid_obito": _is_valid_obito(raw_text),
-    }
-       
-# â”€â”€ Endpoints Batch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-@app.post("/batch/process")
-async def batch_process(request: Request, authorization: Optional[str] = Header(None)):
-    _check_auth(authorization)
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    folder_id = body.get("folderId") or body.get("folder_id") or None
-    force = body.get("force_reprocess", body.get("force", False))
-    request_id = body.get("requestId") or body.get("request_id") or None
-    limit = int(request.query_params.get("limit", 5))
-    result = run_batch(folder_id=folder_id, force_reprocess=force, limit=limit)
-    result["requestId"] = request_id
-    status_code = 200 if result.get("success") else 500
-    return JSONResponse(status_code=status_code, content=result)
-
-@app.get("/batch/status")
-async def batch_status(authorization: Optional[str] = Header(None)):
-    _check_auth(authorization)
-    return {
-        "monitor_running": _monitor_thread is not None and _monitor_thread.is_alive(),
-        "drive_folder_id": DRIVE_FOLDER_ID,
-        "sheet_id": SHEET_ID,
-        "auto_process_enabled": AUTO_PROCESS_ENABLED,
-        "poll_interval_minutes": POLL_INTERVAL_MINUTES,
-        "ocr_provider": OCR_PROVIDER,
-    }
-
-@app.post("/batch/monitor/start")
-def start_monitor(force_reprocess=False):
-    global _monitor_thread, _monitor_force
-    # Se existe uma thread, garante que ela estÃ¡ realmente parada
-    if _monitor_thread and _monitor_thread.is_alive():
-        _monitor_stop.set()          # sinaliza parada
-        _monitor_thread.join(timeout=5)  # aguarda encerrar (mÃ¡x 5s)
-    _monitor_force = force_reprocess
-    _monitor_stop.clear()
-    _monitor_thread = Thread(target=_monitor_worker, daemon=True)
-    _monitor_thread.start()
-@app.post("/batch/monitor/stop")
-async def monitor_stop(authorization: Optional[str] = Header(None)):
-    _check_auth(authorization)
-    stop_monitor()
-    return {"success": True, "message": "Monitor parado."}
-
-@app.post("/batch/config/sheet")
-async def config_sheet(request: Request, authorization: Optional[str] = Header(None)):
-    _check_auth(authorization)
-    try:
-        sheet_id = _ensure_sheet_exists()
-        return {"success": True, "sheet_id": sheet_id}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={
-            "success": False, "error": str(e),
-        })
-
-# â”€â”€ Tratamento de erros global â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
-    detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
-    if "code" not in detail:
-        detail["code"] = "HTTP_ERROR"
-    if "requestId" not in detail:
-        detail["requestId"] = None
-    return JSONResponse(status_code=exc.status_code, content=detail)
-
-# â”€â”€ Entry point â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-if AUTO_PROCESS_ENABLED and DRIVE_FOLDER_ID and DRIVE_SERVICE_ACCOUNT_JSON and SHEET_ID:
-    start_monitor()
-
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=False)
-
-# â”€â”€ Listar imagens da pasta (para diagnÃ³stico) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-@app.get("/diagnose/files")
-async def diagnose_list_files(authorization: Optional[str] = Header(None)):
-    _check_auth(authorization)
-    folder_id = os.getenv("DRIVE_FOLDER_ID")
-    if not folder_id:
-        return JSONResponse(status_code=400, content={"error": "DRIVE_FOLDER_ID nÃ£o configurado"})
-    
-    images = _list_images_in_folder(folder_id)
-    return {
-        "total": len(images),
-        "files": [
-            {
-                "id": img["id"],
-                "name": img["name"],
-                "mimeType": img.get("mimeType", "unknown"),
-            }
-            for img in images[:20]  # primeiras 20
-        ]
-    }
-# â”€â”€ Salvar/Atualizar resultado na planilha â”€â”€
-def _save_or_update_result(sheet, result: dict, existing_data: dict):
-    """Salva ou atualiza uma linha na planilha. Se jÃ¡ existe para o mesmo arquivo, atualiza."""
-    nome_arquivo = result.get("NOME_ARQUIVO", "")
-    linha_existente = existing_data.get("nomes", {}).get(nome_arquivo)
-
-    novaLinha = [[result.get(col, "") for col in AUDIT_COLUMNS]]
-
-    if linha_existente:
-        # Atualizar linha existente
-        sheet.update(f'A{linha_existente}:W{linha_existente}', novaLinha)
-        logger.info(f"Atualizada linha {linha_existente} para {nome_arquivo}")
-    else:
-        # Inserir nova linha
-        sheet.append_rows(novaLinha)
-        logger.info(f"Inserida nova linha para {nome_arquivo}")
+        logger.error(f"Erro no dedupe: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+# deploy touch 28/08/2026 09:59:39
