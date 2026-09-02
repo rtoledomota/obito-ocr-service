@@ -312,6 +312,8 @@ def _sanitize_person_name(value: str) -> str:
     if not value:
         return ""
     v = str(value).strip().rstrip("|.,;:")
+    v = re.sub(r'\s*Munic[ií]pio\s*/\s*UF\s*\(se\s+estrangeiro\s+informar\s+Pa[ií]s\)[:.\s]*$', '', v, flags=re.IGNORECASE)
+    v = re.sub(r'^Munic[ií]pio\s*/\s*UF\s*\(se\s+estrangeiro\s+informar\s+Pa[ií]s\)[:.\s]*', '', v, flags=re.IGNORECASE)
     v = re.sub(r'^(nome do falecido|nome do\(a\)|falecido|nome|data de nascimento'
                r'|nome do pai|nome da mae|nome da mãe)\s*[:\-]?\s*', '', v, flags=re.IGNORECASE)
     if re.match(r'^\d{1,2}\s+[A-Za-zÀ-ÿ]', v):
@@ -398,6 +400,8 @@ def _normalize_hora(raw: str) -> str:
     if not raw:
         return ""
     m = re.search(r'(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?!\d)', str(raw))
+    if not m:
+        m = re.search(r'(?<!\d)([01]?\d|2[0-3])[hH]([0-5]\d)(?!\d)', str(raw))
     if m:
         return f"{int(m.group(1)):02d}:{m.group(2)}"
     return ""
@@ -406,6 +410,8 @@ def _normalize_cidade(value: str) -> str:
     if not value:
         return ""
     v = str(value).strip().rstrip("|.,;:")
+    v = re.sub(r'\s*Munic[ií]pio\s*/\s*UF\s*\(se\s+estrangeiro\s+informar\s+Pa[ií]s\)[:.\s]*$', '', v, flags=re.IGNORECASE)
+    v = re.sub(r'^Munic[ií]pio\s*/\s*UF\s*\(se\s+estrangeiro\s+informar\s+Pa[ií]s\)[:.\s]*', '', v, flags=re.IGNORECASE)
     low = v.lower()
     if low in CITY_OCR_FIX:
         return CITY_OCR_FIX[low]
