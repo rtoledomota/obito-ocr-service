@@ -940,7 +940,7 @@ def batch_process(request: BatchRequest):
     return _run_batch(limit=request.limit, reprocess=False)
 
 @app.post("/batch/reprocess")
-def batch_reprocess(limit: int = 10):
+def batch_reprocess(limit: int = 10, min_score: float = None, files: str = None):
     return _run_batch(limit=limit, reprocess=True)
 
 @app.post("/admin/dedupe")
