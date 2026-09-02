@@ -1,4 +1,4 @@
-import os, io, re, uuid, hashlib, logging, time, base64
+﻿import os, io, re, uuid, hashlib, logging, time, base64
 from datetime import datetime
 
 import requests
@@ -782,7 +782,7 @@ def _process_single_image(file_id, file_name, existing):
 
 # ── Batch ────────────────────────────────────────────────────────
 
-def _run_batch(limit: int, reprocess: bool = False) -> dict:
+def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, files: str = None) -> dict:
     logger.info(f"Iniciando {'reprocessamento' if reprocess else 'batch'} com limit={limit}")
     try:
         drive = _get_drive_service()
@@ -790,7 +790,39 @@ def _run_batch(limit: int, reprocess: bool = False) -> dict:
         all_files = _list_all_files_recursive(DRIVE_FOLDER_ID, drive)
         total = len(all_files)
         logger.info(f"Total de arquivos no Drive: {total}")
-        to_process = all_files[:limit]
+        # Filtro por min_score (reprocessar so as de score baixo) ou files (nomes especificos)
+        if reprocess and (min_score is not None or files):
+            low_names = set()
+            if min_score is not None:
+                try:
+                    sheets = _get_sheets_service()
+                    res = sheets.spreadsheets().values().get(
+                        spreadsheetId=SHEET_ID, range="Auditoria!B1:D1579"
+                    ).execute()
+                    for r in res.get("values", []):
+                        if len(r) < 3:
+                            continue
+                        fname = str(r[0]).strip()
+                        try:
+                            sc = float(r[2])
+                        except Exception:
+                            continue
+                        if fname and fname != "NOME_ARQUIVO" and sc < min_score:
+                            low_names.add(fname)
+                except Exception as e:
+                    logger.warning(f"Falha ao ler scores da planilha: {e}")
+            if files:
+                for f in files.split(","):
+                    f = f.strip()
+                    if f:
+                        low_names.add(f)
+            if low_names:
+                to_process = [img for img in all_files if img.get("name", "") in low_names]
+                logger.info(f"Filtro aplicado: {len(to_process)} arquivos (min_score={min_score}, files={files})")
+            else:
+                to_process = all_files[:limit]
+        else:
+            to_process = all_files[:limit]
         existing = {"hashes": {}, "names": set()} if reprocess else _get_existing_data()
         rows_to_insert = []
         processed, duplicates, rejected, failed = 0, 0, 0, 0
