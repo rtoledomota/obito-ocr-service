@@ -256,19 +256,21 @@ def _ocr_image_from_bytes(image_bytes, mime_type="image/jpeg"):
             logger.error(f"[OCR GEMINI] HTTP {resp.status_code}: {err}")
             return "", 0.0
         data = resp.json()
-        # DUPLA LEITURA: roda o Gemini 2x e mescla os textos
-        try:
-            resp2 = requests.post(url, json=payload, timeout=90)
-            if resp2.status_code == 200:
-                data2 = resp2.json()
-                parts2 = data2.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-                text2 = "".join(p.get("text", "") for p in parts2).strip()
-                if len(text2) > len(text):
-                    text = text2
-        except Exception:
-            pass
+
         parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
         text = "".join(p.get("text", "") for p in parts).strip()
+        # RELEITURA CONDICIONAL: reler so se o texto veio curto/duvidoso (economiza tokens)
+        if len(text) < 200:
+            try:
+                resp2 = requests.post(url, json=payload, timeout=90)
+                if resp2.status_code == 200:
+                    data2 = resp2.json()
+                    parts2 = data2.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                    text2 = "".join(p.get("text", "") for p in parts2).strip()
+                    if len(text2) > len(text):
+                        text = text2
+            except Exception:
+                pass
         logger.info(f"[OCR GEMINI] OK - texto: {len(text)} chars")
         return text, 1.0
     except Exception as e:
