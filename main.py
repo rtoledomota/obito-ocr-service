@@ -446,6 +446,8 @@ def _normalize_cidade(value: str) -> str:
     v = str(value).strip().rstrip("|.,;:")
     v = re.sub(r'\s*Munic[ií]pio\s*/\s*UF\s*\(se\s+estrangeiro\s+informar\s+Pa[ií]s\)[:.\s]*$', '', v, flags=re.IGNORECASE)
     v = re.sub(r'^Munic[ií]pio\s*/\s*UF\s*\(se\s+estrangeiro\s+informar\s+Pa[ií]s\)[:.\s]*', '', v, flags=re.IGNORECASE)
+    v = re.sub(r'\s*c.digo(?:\s+\d+)?(?:\s*UF\s*[A-Z]{2})?\s*$', '', v, flags=re.IGNORECASE)
+    v = re.sub(r'^[.\-:;,\s]+', '', v)
     low = v.lower()
     if low in CITY_OCR_FIX:
         return CITY_OCR_FIX[low]
