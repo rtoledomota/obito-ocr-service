@@ -1,4 +1,4 @@
-﻿import os, io, re, uuid, hashlib, logging, time, base64
+import os, io, re, uuid, hashlib, logging, time, base64
 from datetime import datetime
 
 import requests
@@ -482,6 +482,8 @@ def _normalize_cidade(value: str) -> str:
     v = re.sub(r'^[.\-:;,\s]+', '', v)
     v = re.sub(r'\s*c.digo(?:\s+\d+)?(?:\s*UF\s*[A-Z]{2})?\s*$', '', v, flags=re.IGNORECASE)
     v = re.sub(r'^[.\-:;,\s]+', '', v)
+    v = re.sub(r'\s*c.digo(?:\s+\d+)?(?:\s*UF\s*[A-Z]{2})?\s*$', '', v, flags=re.IGNORECASE)
+    v = re.sub(r'^[.\-:;,\s]+', '', v)
     low = v.lower()
     if low in CITY_OCR_FIX:
         return CITY_OCR_FIX[low]
@@ -806,6 +808,13 @@ def parse_obito(text: str) -> dict:
             _causas_dedup.append(_c)
     for _idx, _k in enumerate(["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_MORTE_4"]):
         structured[_k] = _causas_dedup[_idx] if _idx < len(_causas_dedup) else ""
+    # --- 1b.3: CAUSA_BASICA duplicada da CAUSA_MORTE ---
+    try:
+        if (structured.get("CAUSA_MORTE") and structured.get("CAUSA_BASICA")
+                and str(structured["CAUSA_BASICA"]).strip().lower() == str(structured["CAUSA_MORTE"]).strip().lower()):
+            structured["CAUSA_BASICA"] = ""
+    except Exception:
+        pass
     structured["CAUSA_BASICA"] = _clean_causa(structured.get("CAUSA_BASICA", ""))
 
     structured["MEDICO_ATESTANTE"] = _clean_field(_find_block_value(text, [
@@ -841,6 +850,33 @@ def parse_obito(text: str) -> dict:
 # ── Validacao ────────────────────────────────────────────────────
 
 def validate_obito(structured: dict) -> None:
+    # --- Limpeza da causa antes de validar (aumenta aprovados) ---
+
+    # --- Deteccao de poluicao em campos criticos ---
+    _padroes_lixo = re.compile(r'(?:data do atestado|descri[cç][aã]o sum[aá]ria|logradouro|n[uú]mero|bairro|munic[ií]pio|c[oó]digo|registro|ocupa[cç][aã]o habitual|tempo aproximado|parte\s*i{1,2}|devido ou como|m[eé]dico|cremesp|crm[- ]?sp|uf[: ]|anos completos|menores de 1 ano|necr[oó]psia|assistente|ocorr[eê]ncia|diagn[oó]stico confirmado|fetal ou menor)', re.IGNORECASE)
+    _poluido = []
+    for _f in ("NOME", "NOME_MAE", "CAUSA_MORTE", "CAUSA_BASICA", "MEDICO_ATESTANTE", "CRM_MEDICO"):
+        _v = str(structured.get(_f, "") or "").strip()
+        if not _v:
+            continue
+        if _padroes_lixo.search(_v):
+            _poluido.append(f"{_f} contem texto do formulario")
+    if structured.get("CAUSA_MORTE") and re.search(r'^\s*(?:[bBaA](?:\)|\.)?|[•])\s*[:.\-]?\s*', str(structured["CAUSA_MORTE"])):
+        _poluido.append("CAUSA_MORTE com prefixo de marcador")
+    if _poluido:
+        structured["STATUS"] = "REVISAR"
+        structured["ERROS"] = ((structured.get("ERROS", "") + " | ") if structured.get("ERROS") else "") + " | ".join(_poluido)
+
+    _causa = str(structured.get("CAUSA_MORTE", "") or "").strip()
+    if _causa:
+        _causa = re.sub(r'^\s*(?:[a-dA-D](?:\)|\.)?|[.\-\u2022])\s*[:.\-]?\s*', '', _causa)
+        _causa = re.sub(r'^(?:causa\s+(?:imediata|b[aá]sica|antecedente)|devido\s+ou\s+como\s+consequ[eê]ncia\s+de|tempo\s+aproximado\s+entre\s+o\s+in[ií]cio|parte\s+ii?[:\s]*)[:\s\-]*', '', _causa, flags=re.IGNORECASE).strip()
+        if re.search(r'\b(?:data do atestado|m[eé]dico|ocorr[eê]ncia|assistente|diagn[oó]stico confirmado)\b', _causa, flags=re.IGNORECASE) or re.fullmatch(r'[\d.\s]+', _causa):
+            _causa = ""
+        structured["CAUSA_MORTE"] = _causa
+    if not structured.get("CAUSA_MORTE") and structured.get("CAUSA_BASICA"):
+        structured["CAUSA_MORTE"] = str(structured.get("CAUSA_BASICA", "")).strip()
+        structured["CAUSA_BASICA"] = ""
     missing = [f for f in CRITICAL_FIELDS if not structured.get(f)]
     score = round((len(CRITICAL_FIELDS) - len(missing)) / len(CRITICAL_FIELDS) * 100, 1)
     structured["QUALIDADE_SCORE"] = str(score)
