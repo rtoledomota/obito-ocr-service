@@ -1092,16 +1092,19 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
             if row.get("NOME_ARQUIVO"):
                 existing["names"].add(row["NOME_ARQUIVO"])
             rows_to_insert.append([row.get(h, "") for h in HEADER])
+            # Grava incrementalmente a cada imagem (evita perda se o servico reiniciar)
+            if len(rows_to_insert) >= 1:
+                _res = _append_rows_to_sheet(rows_to_insert)
+                if _res:
+                    logger.info(f"Linha persistida: {row.get('NOME_ARQUIVO','')}")
+                else:
+                    logger.error(f"Falha ao persistir linha: {row.get('NOME_ARQUIVO','')}")
+                rows_to_insert = []
             _BATCH_INFO["processed"] = processed
             _BATCH_INFO["duplicates"] = duplicates
             _BATCH_INFO["rejected"] = rejected
             _BATCH_INFO["failed"] = failed
-        if rows_to_insert:
-            result = _append_rows_to_sheet(rows_to_insert)
-            if result:
-                logger.info(f"Inseridas {len(rows_to_insert)} linhas na planilha.")
-            else:
-                logger.error("Falha ao inserir linhas na planilha.")
+
         _BATCH_INFO["active"] = False
         _BATCH_INFO["current"] = ""
         if not STOP_REQUESTED:
