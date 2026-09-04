@@ -918,6 +918,19 @@ def _process_single_image(file_id, file_name, existing):
                         structured[_k] = str(_json_fields[_k]).strip()
         except Exception:
             pass
+    # --- Recuperacao estruturada (JSON Schema): so quando faltam campos criticos ---
+    _missing_crit = [f for f in CRITICAL_FIELDS if not structured.get(f)]
+    if _missing_crit and raw_text:
+        try:
+            _json_fields = _ocr_structured_fields(image_bytes, mime_type)
+            if _json_fields:
+                for _k in ("NOME", "NOME_MAE", "NASCIMENTO", "DATA_OBITO", "HORA_OBITO",
+                           "CIDADE_OBITO", "UF_OBITO", "CAUSA_MORTE", "CAUSA_BASICA",
+                           "MEDICO_ATESTANTE", "CRM_MEDICO"):
+                    if not structured.get(_k) and _json_fields.get(_k):
+                        structured[_k] = str(_json_fields[_k]).strip()
+        except Exception:
+            pass
     validate_obito(structured)
     structured["DATA_PROCESSAMENTO"] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     structured["NOME_ARQUIVO"] = file_name
