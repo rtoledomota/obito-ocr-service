@@ -986,18 +986,6 @@ STOP_REQUESTED = False
 _BATCH_INFO = {"active": False, "current": "", "processed": 0, "duplicates": 0,
                "rejected": 0, "failed": 0, "total": 0, "stop_pending": False}
 
-@app.get("/batch/status")
-def batch_status():
-    _BATCH_INFO["stop_pending"] = STOP_REQUESTED
-    return _BATCH_INFO
-
-@app.post("/batch/stop")
-def batch_stop():
-    global STOP_REQUESTED
-    STOP_REQUESTED = True
-    _BATCH_INFO["stop_pending"] = True
-    return {"ok": True, "message": "Parada solicitada. O batch sera encerrado apos a imagem atual."}
-
 def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, files: str = None) -> dict:
     logger.info(f"Iniciando {'reprocessamento' if reprocess else 'batch'} com limit={limit}")
     try:
@@ -1165,6 +1153,18 @@ class BatchRequest(BaseModel):
 @app.get("/")
 def root():
     return {"status": "running", "service": "Obito OCR Service", "version": "3.1"}
+
+@app.get("/batch/status")
+def batch_status():
+    _BATCH_INFO["stop_pending"] = STOP_REQUESTED
+    return _BATCH_INFO
+
+@app.post("/batch/stop")
+def batch_stop():
+    global STOP_REQUESTED
+    STOP_REQUESTED = True
+    _BATCH_INFO["stop_pending"] = True
+    return {"ok": True, "message": "Parada solicitada. O batch sera encerrado apos a imagem atual."}
 
 @app.post("/batch/process")
 def batch_process(request: BatchRequest):
