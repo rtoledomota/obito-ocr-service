@@ -276,6 +276,71 @@ def _ocr_image_from_bytes(image_bytes, mime_type="image/jpeg"):
     except Exception as e:
         logger.error(f"[OCR GEMINI] erro: {e}")
         return "", 0.0
+def _ocr_structured_fields(image_bytes, mime_type="image/jpeg"):
+    """Leitura estruturada (JSON Schema): extrai campos-chave da DO quando faltam."""
+    import json as _json
+    img_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    gemini_key = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
+    if not gemini_key:
+        return {}
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={gemini_key}"
+    prompt = (
+        "Extraia da Declaracao de Obito os campos abaixo e devolva APENAS um JSON valido "
+        "(sem markdown, sem comentarios), com as chaves exatas: NOME, NOME_MAE, NASCIMENTO "
+        "(dd/mm/aaaa), DATA_OBITO (dd/mm/aaaa), HORA_OBITO (HH:MM), CIDADE_OBITO, UF_OBITO, "
+        "CAUSA_MORTE (causa imediata, linha a da Parte I, SEM prefixo de letra), CAUSA_BASICA "
+        "(linha d / causa basica, SEM prefixo), MEDICO_ATESTANTE, CRM_MEDICO, NUMERO_DO. "
+        "Se um campo nao estiver visivel, use string vazia. "
+        "Transcreva nomes e causas EXATAMENTE como escritos, sem abreviar."
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt},
+                                {"inline_data": {"mime_type": mime_type, "data": img_b64}}]}],
+        "generationConfig": {
+            "temperature": 0.0,
+            "maxOutputTokens": 1024,
+            "responseMimeType": "application/json",
+            "responseSchema": {
+                "type": "OBJECT",
+                "properties": {
+                    "NOME": {"type": "STRING"},
+                    "NOME_MAE": {"type": "STRING"},
+                    "NASCIMENTO": {"type": "STRING"},
+                    "DATA_OBITO": {"type": "STRING"},
+                    "HORA_OBITO": {"type": "STRING"},
+                    "CIDADE_OBITO": {"type": "STRING"},
+                    "UF_OBITO": {"type": "STRING"},
+                    "CAUSA_MORTE": {"type": "STRING"},
+                    "CAUSA_BASICA": {"type": "STRING"},
+                    "MEDICO_ATESTANTE": {"type": "STRING"},
+                    "CRM_MEDICO": {"type": "STRING"},
+                    "NUMERO_DO": {"type": "STRING"}
+                }
+            }
+        },
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=90)
+        if resp.status_code != 200:
+            logger.error(f"[OCR JSON] HTTP {resp.status_code}")
+            return {}
+        data = resp.json()
+        parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+        txt = "".join(p.get("text", "") for p in parts).strip()
+        try:
+            return _json.loads(txt)
+        except Exception:
+            m = re.search(r"\{.*\}", txt, re.DOTALL)
+            if m:
+                try:
+                    return _json.loads(m.group(0))
+                except Exception:
+                    return {}
+            return {}
+    except Exception as e:
+        logger.error(f"[OCR JSON] erro: {e}")
+        return {}
+
 def _ocr_image_retry(image_bytes, mime_type="image/jpeg"):
     """Segunda leitura do OCR com prompt direcionado p/ imagens de baixa qualidade."""
     img_b64 = base64.b64encode(image_bytes).decode("utf-8")
@@ -918,19 +983,8 @@ def _process_single_image(file_id, file_name, existing):
                         structured[_k] = str(_json_fields[_k]).strip()
         except Exception:
             pass
-    # --- Recuperacao estruturada (JSON Schema): so quando faltam campos criticos ---
-    _missing_crit = [f for f in CRITICAL_FIELDS if not structured.get(f)]
-    if _missing_crit and raw_text:
-        try:
-            _json_fields = _ocr_structured_fields(image_bytes, mime_type)
-            if _json_fields:
-                for _k in ("NOME", "NOME_MAE", "NASCIMENTO", "DATA_OBITO", "HORA_OBITO",
-                           "CIDADE_OBITO", "UF_OBITO", "CAUSA_MORTE", "CAUSA_BASICA",
-                           "MEDICO_ATESTANTE", "CRM_MEDICO"):
-                    if not structured.get(_k) and _json_fields.get(_k):
-                        structured[_k] = str(_json_fields[_k]).strip()
-        except Exception:
-            pass
+
+
     validate_obito(structured)
     structured["DATA_PROCESSAMENTO"] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     structured["NOME_ARQUIVO"] = file_name
