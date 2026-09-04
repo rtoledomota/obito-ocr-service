@@ -180,7 +180,22 @@ def _download_image_bytes(file_id):
     while not done:
         status, done = downloader.next_chunk()
     metadata = drive.files().get(fileId=file_id, fields="mimeType,name").execute()
-    return fh.getvalue(), metadata.get("mimeType", "image/jpeg")
+    # Downscale para reduzir memoria (plano free ~512MB). Fallback seguro se Pillow ausente.
+    try:
+        from PIL import Image
+        import io as _io
+        _img = Image.open(_io.BytesIO(fh.getvalue()))
+        _img = _img.convert("RGB")
+        _max_side = 2000
+        _w, _h = _img.size
+        if max(_w, _h) > _max_side:
+            _ratio = _max_side / float(max(_w, _h))
+            _img = _img.resize((int(_w * _ratio), int(_h * _ratio)), Image.LANCZOS)
+        _out = _io.BytesIO()
+        _img.save(_out, format="JPEG", quality=85)
+        return _out.getvalue(), "image/jpeg"
+    except Exception:
+        return fh.getvalue(), metadata.get("mimeType", "image/jpeg")
 
 # â”€â”€ Busca recursiva em subpastas â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
