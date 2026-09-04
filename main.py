@@ -308,38 +308,6 @@ def _ocr_image_retry(image_bytes, mime_type="image/jpeg"):
     except Exception as e:
         logger.error(f"[OCR GEMINI RETRY] erro: {e}")
         return "", 0.0
-def _ocr_image_retry(image_bytes, mime_type="image/jpeg"):
-    """Segunda leitura do OCR com prompt direcionado p/ imagens de baixa qualidade."""
-    img_b64 = base64.b64encode(image_bytes).decode("utf-8")
-    gemini_key = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
-    if not gemini_key:
-        return "", 0.0
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={gemini_key}"
-    prompt = (
-        "Esta imagem pode ter QUALIDADE RUIM (torta, borrada ou com baixo contraste). "
-        "Examine com atencao redobrada TODA a Declaracao de Obito e transcreva campo a campo, "
-        "na ordem: Nome do falecido; Nome da mae; Data de nascimento; Data do obito e hora; "
-        "Municipio e UF de ocorrencia; Tipo de obito; Causas da morte (Parte I e Parte II, na ordem a/b/c/d); "
-        "CID se visivel; Nome e CRM do medico atestante; Numero da Declaracao. "
-        "Escreva apenas o texto transcrito, sem comentarios, sem markdown."
-    )
-    payload = {
-        "contents": [{"parts": [{"text": prompt},
-                                {"inline_data": {"mime_type": mime_type, "data": img_b64}}]}],
-        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 4096},
-    }
-    try:
-        resp = requests.post(url, json=payload, timeout=120)
-        if resp.status_code != 200:
-            return "", 0.0
-        data = resp.json()
-        parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-        text = "".join(p.get("text", "") for p in parts).strip()
-        logger.info(f"[OCR GEMINI RETRY] OK - texto: {len(text)} chars")
-        return text, 1.0
-    except Exception as e:
-        logger.error(f"[OCR GEMINI RETRY] erro: {e}")
-        return "", 0.0
 # Validacao / limpeza
 
 def _is_valid_obito(ocr_text: str) -> bool:
@@ -937,44 +905,6 @@ def _process_single_image(file_id, file_name, existing):
         structured["ERROS"] = f"Erro no parser: {e}"
     structured["HASH_ARQUIVO"] = h
     structured["HASH_CONTEUDO"] = _sha256_text(raw_text)
-    # --- Segunda passada: re-OCR se a extracao veio fraca (score < 40) ---
-    try:
-        _score1 = float(str(structured.get("QUALIDADE_SCORE", "0") or "0") or "0")
-    except Exception:
-        _score1 = 0.0
-    if _score1 < 40 and raw_text:
-        try:
-            raw2, _ = _ocr_image_retry(image_bytes, mime_type)
-            if raw2 and len(raw2) > len(raw_text):
-                structured2 = parse_obito(raw2)
-                if any(structured2.get(k) for k in ("NOME", "NOME_MAE", "CAUSA_MORTE", "DATA_OBITO")):
-                    validate_obito(structured2)
-                    _score2 = float(str(structured2.get("QUALIDADE_SCORE", "0") or "0") or "0")
-                    if _score2 > _score1:
-                        structured = structured2
-                        structured["HASH_ARQUIVO"] = h
-                        structured["HASH_CONTEUDO"] = _sha256_text(raw2)
-        except Exception:
-            pass
-    # --- Segunda passada: re-OCR se a extracao veio fraca (score < 40) ---
-    try:
-        _score1 = float(str(structured.get("QUALIDADE_SCORE", "0") or "0") or "0")
-    except Exception:
-        _score1 = 0.0
-    if _score1 < 40 and raw_text:
-        try:
-            raw2, _ = _ocr_image_retry(image_bytes, mime_type)
-            if raw2 and len(raw2) > len(raw_text):
-                structured2 = parse_obito(raw2)
-                if any(structured2.get(k) for k in ("NOME", "NOME_MAE", "CAUSA_MORTE", "DATA_OBITO")):
-                    validate_obito(structured2)
-                    _score2 = float(str(structured2.get("QUALIDADE_SCORE", "0") or "0") or "0")
-                    if _score2 > _score1:
-                        structured = structured2
-                        structured["HASH_ARQUIVO"] = h
-                        structured["HASH_CONTEUDO"] = _sha256_text(raw2)
-        except Exception:
-            pass
     validate_obito(structured)
     structured["DATA_PROCESSAMENTO"] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     structured["NOME_ARQUIVO"] = file_name
