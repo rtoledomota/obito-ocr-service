@@ -1,4 +1,4 @@
-import os, io, re, uuid, hashlib, logging, time, base64
+﻿import os, io, re, uuid, hashlib, logging, time, base64
 from datetime import datetime
 
 import requests
@@ -11,7 +11,7 @@ from pydantic import BaseModel
 logger = logging.getLogger("uvicorn")
 logger.setLevel(logging.INFO)
 
-# ── Service account: suporta JSON inline via env var ─────────────
+# â”€â”€ Service account: suporta JSON inline via env var â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 _SERVICE_ACCOUNT_JSON_ENV = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 if _SERVICE_ACCOUNT_JSON_ENV and _SERVICE_ACCOUNT_JSON_ENV.strip().startswith("{"):
     _sa_path = "/tmp/service-account.json"
@@ -64,36 +64,36 @@ HEADER = [
 ]
 
 FORM_JUNK = [
-    "nome do falecido", "data de nascimento", "data do óbito", "data do obito",
-    "endereço do local do acidente", "descrição sumária do evento",
-    "complexo hospitalar de clínicas", "identificação", "cartório",
-    "município de residência", "município de ocorrência", "local de ocorrência",
-    "nome do médico", "situação conjugal", "raça/cor", "ocupação habitual",
-    "logradouro (rua", "bairro/distrito", "nome do pai", "nome da mãe",
-    "data do atestado", "assistência médica", "parte ii", "causas da morte",
-    "condições e causas", "causas externas", "fetal ou menor",
+    "nome do falecido", "data de nascimento", "data do Ã³bito", "data do obito",
+    "endereÃ§o do local do acidente", "descriÃ§Ã£o sumÃ¡ria do evento",
+    "complexo hospitalar de clÃ­nicas", "identificaÃ§Ã£o", "cartÃ³rio",
+    "municÃ­pio de residÃªncia", "municÃ­pio de ocorrÃªncia", "local de ocorrÃªncia",
+    "nome do mÃ©dico", "situaÃ§Ã£o conjugal", "raÃ§a/cor", "ocupaÃ§Ã£o habitual",
+    "logradouro (rua", "bairro/distrito", "nome do pai", "nome da mÃ£e",
+    "data do atestado", "assistÃªncia mÃ©dica", "parte ii", "causas da morte",
+    "condiÃ§Ãµes e causas", "causas externas", "fetal ou menor",
     "preenchimento exclusivo", "republica federativa", "ministerio da saude",
-    "declaracao de obito", "declaração de óbito", "seqüência de causas",
+    "declaracao de obito", "declaraÃ§Ã£o de Ã³bito", "seqÃ¼Ãªncia de causas",
     "sequencia de causas", "preencha o estado", "anote a cadeia",
-    "anote somente", "devido ou como consequência", "tempo aproximado entre",
-    "que contribuíram", "outras condições significativas",
-    "nascidos vivos", "número de filhos", "tipo de gravidez", "tipo de parto",
-    "peso ao nascer", "cartão sus", "naturalidade", "escolaridade",
-    "meio de contato", "morte em relação", "óbito de mulher",
+    "anote somente", "devido ou como consequÃªncia", "tempo aproximado entre",
+    "que contribuÃ­ram", "outras condiÃ§Ãµes significativas",
+    "nascidos vivos", "nÃºmero de filhos", "tipo de gravidez", "tipo de parto",
+    "peso ao nascer", "cartÃ£o sus", "naturalidade", "escolaridade",
+    "meio de contato", "morte em relaÃ§Ã£o", "Ã³bito de mulher",
 ]
 
 CITY_OCR_FIX = {
-    "são cantando do sul": "São Caetano do Sul",
-    "são cenário do sul": "São Caetano do Sul",
-    "são caetano sul": "São Caetano do Sul",
-    "caetano do sul": "São Caetano do Sul",
-    "são carlos do sul": "São Caetano do Sul",
-    "são gabriel do sul": "São Caetano do Sul",
-    "são bernardo do sul": "São Caetano do Sul",
-    "são lourenço do sul": "São Caetano do Sul",
-    "santo antônio do sul": "São Caetano do Sul",
-    "santa paula": "São Caetano do Sul",
-    "são paulo - sp": "São Paulo",
+    "sÃ£o cantando do sul": "SÃ£o Caetano do Sul",
+    "sÃ£o cenÃ¡rio do sul": "SÃ£o Caetano do Sul",
+    "sÃ£o caetano sul": "SÃ£o Caetano do Sul",
+    "caetano do sul": "SÃ£o Caetano do Sul",
+    "sÃ£o carlos do sul": "SÃ£o Caetano do Sul",
+    "sÃ£o gabriel do sul": "SÃ£o Caetano do Sul",
+    "sÃ£o bernardo do sul": "SÃ£o Caetano do Sul",
+    "sÃ£o lourenÃ§o do sul": "SÃ£o Caetano do Sul",
+    "santo antÃ´nio do sul": "SÃ£o Caetano do Sul",
+    "santa paula": "SÃ£o Caetano do Sul",
+    "sÃ£o paulo - sp": "SÃ£o Paulo",
 }
 
 VALID_UFS = {"AC","AL","AP","AM","BA","CE","DF","ES","GO","MA","MT","MS","MG",
@@ -102,7 +102,7 @@ VALID_UFS = {"AC","AL","AP","AM","BA","CE","DF","ES","GO","MA","MT","MS","MG",
 CRITICAL_FIELDS = ["NOME", "NOME_MAE", "NASCIMENTO", "DATA_OBITO",
                    "CIDADE_OBITO", "UF_OBITO", "CAUSA_MORTE"]
 
-# ── Google API ───────────────────────────────────────────────────
+# â”€â”€ Google API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _get_credentials():
     return service_account.Credentials.from_service_account_file(
@@ -182,7 +182,7 @@ def _download_image_bytes(file_id):
     metadata = drive.files().get(fileId=file_id, fields="mimeType,name").execute()
     return fh.getvalue(), metadata.get("mimeType", "image/jpeg")
 
-# ── Busca recursiva em subpastas ─────────────────────────────────
+# â”€â”€ Busca recursiva em subpastas â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _list_all_files_recursive(folder_id, drive):
     files = []
@@ -217,7 +217,7 @@ def _list_all_files_recursive(folder_id, drive):
             break
     return files
 
-# ── Hash ─────────────────────────────────────────────────────────
+# â”€â”€ Hash â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -225,7 +225,7 @@ def _sha256_bytes(data: bytes) -> str:
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-# ── OCR via Google Cloud Vision REST API (multi-chave) ───────────
+# â”€â”€ OCR via Google Cloud Vision REST API (multi-chave) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _ocr_image_from_bytes(image_bytes, mime_type="image/jpeg"):
     img_b64 = base64.b64encode(image_bytes).decode("utf-8")
@@ -259,8 +259,8 @@ def _ocr_image_from_bytes(image_bytes, mime_type="image/jpeg"):
 
         parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
         text = "".join(p.get("text", "") for p in parts).strip()
-        # RELEITURA CONDICIONAL: reler so se o texto veio curto/duvidoso (economiza tokens)
-        if len(text) < 200:
+        # RELEITURA CONDICIONAL: reler apenas em casos extremos (economiza tokens)
+        if len(text) < 60:
             try:
                 resp2 = requests.post(url, json=payload, timeout=90)
                 if resp2.status_code == 200:
@@ -346,14 +346,14 @@ def _is_valid_obito(ocr_text: str) -> bool:
     if not ocr_text or len(ocr_text.strip()) < 50:
         return False
     t = ocr_text.lower()
-    if ("definiÃ§Ãµes" in t or "definicoes" in t) and ("cid-10" in t or "nascimento vivo" in t):
+    if ("definiÃƒÂ§ÃƒÂµes" in t or "definicoes" in t) and ("cid-10" in t or "nascimento vivo" in t):
         return False
-    strong = ["declaração de óbito", "declaracao de obito", "atestado de óbito",
-              "nome do falecido", "causas da morte", "tipo de óbito",
+    strong = ["declaraÃ§Ã£o de Ã³bito", "declaracao de obito", "atestado de Ã³bito",
+              "nome do falecido", "causas da morte", "tipo de Ã³bito",
               "tipo de obito", "parte i", "parte ii"]
     if any(k in t for k in strong):
         return True
-    if len(ocr_text.strip()) > 400 and ("óbito" in t or "obito" in t):
+    if len(ocr_text.strip()) > 400 and ("Ã³bito" in t or "obito" in t):
         return True
     return False
 
@@ -371,20 +371,20 @@ def _collapse_repeats(text: str) -> str:
     prev = None
     while prev != text:
         prev = text
-        text = re.sub(r'\b([A-ZÁÉÍÓÚÂÊÔÃÕÇ][A-Za-zÁÉÍÓÚÂÊÔÃÕÇ]{8,})\s+\1\b', r'\1', text)
+        text = re.sub(r'\b([A-ZÃÃ‰ÃÃ“ÃšÃ‚ÃŠÃ”ÃƒÃ•Ã‡][A-Za-zÃÃ‰ÃÃ“ÃšÃ‚ÃŠÃ”ÃƒÃ•Ã‡]{8,})\s+\1\b', r'\1', text)
     return text
 
 def _sanitize_person_name(value: str) -> str:
     if not value:
         return ""
     v = str(value).strip().rstrip("|.,;:")
-    v = re.sub(r'\s*Munic[ií]pio\s*/\s*UF\s*\(se\s+estrangeiro\s+informar\s+Pa[ií]s\)[:.\s]*$', '', v, flags=re.IGNORECASE)
-    v = re.sub(r'^Munic[ií]pio\s*/\s*UF\s*\(se\s+estrangeiro\s+informar\s+Pa[ií]s\)[:.\s]*', '', v, flags=re.IGNORECASE)
+    v = re.sub(r'\s*Munic[iÃ­]pio\s*/\s*UF\s*\(se\s+estrangeiro\s+informar\s+Pa[iÃ­]s\)[:.\s]*$', '', v, flags=re.IGNORECASE)
+    v = re.sub(r'^Munic[iÃ­]pio\s*/\s*UF\s*\(se\s+estrangeiro\s+informar\s+Pa[iÃ­]s\)[:.\s]*', '', v, flags=re.IGNORECASE)
     v = re.sub(r'^(nome do falecido|nome do\(a\)|falecido|nome|data de nascimento'
-               r'|nome do pai|nome da mae|nome da mãe)\s*[:\-]?\s*', '', v, flags=re.IGNORECASE)
-    if re.match(r'^\d{1,2}\s+[A-Za-zÀ-ÿ]', v):
+               r'|nome do pai|nome da mae|nome da mÃ£e)\s*[:\-]?\s*', '', v, flags=re.IGNORECASE)
+    if re.match(r'^\d{1,2}\s+[A-Za-zÃ€-Ã¿]', v):
         v = re.sub(r'^\d{1,2}\s+', '', v)
-    v = re.sub(r'\s+(Identificação|Cartório|Médico|Nome do Pai|Nome da Mãe).*$',
+    v = re.sub(r'\s+(IdentificaÃ§Ã£o|CartÃ³rio|MÃ©dico|Nome do Pai|Nome da MÃ£e).*$',
                '', v, flags=re.IGNORECASE)
     v = _collapse_repeats(v).strip()
     low = v.lower()
@@ -405,11 +405,11 @@ def _clean_causa(value: str) -> str:
     v = re.sub(r'^a\s+(?=[A-Z\u00c0-\u00da])', '', v).strip()
     v = re.sub(r'^(?:parte\s+[iv]+)\s*[: ]*', '', v, flags=re.IGNORECASE).strip()
 
-    v = re.sub(r'^\(?a doença ou estado mórbido que causou diretamente a morte\)?[: ]*',
+    v = re.sub(r'^\(?a doenÃ§a ou estado mÃ³rbido que causou diretamente a morte\)?[: ]*',
                '', v, flags=re.IGNORECASE)
-    v = re.sub(r'^(seqüência|sequencia) de causas[^:]*[: ]*', '', v, flags=re.IGNORECASE)
-    v = re.sub(r'^(devido ou como consequência de)[: ]*', '', v, flags=re.IGNORECASE)
-    v = re.sub(r'^(causa básica|causa basica)[: ]*', '', v, flags=re.IGNORECASE)
+    v = re.sub(r'^(seqÃ¼Ãªncia|sequencia) de causas[^:]*[: ]*', '', v, flags=re.IGNORECASE)
+    v = re.sub(r'^(devido ou como consequÃªncia de)[: ]*', '', v, flags=re.IGNORECASE)
+    v = re.sub(r'^(causa bÃ¡sica|causa basica)[: ]*', '', v, flags=re.IGNORECASE)
     v = v.strip()
     if re.fullmatch(r'\d+\s*(anos?|meses?|dias?|horas?|min\w*)?', v, re.IGNORECASE):
         return ""
@@ -476,8 +476,8 @@ def _normalize_cidade(value: str) -> str:
     if not value:
         return ""
     v = str(value).strip().rstrip("|.,;:")
-    v = re.sub(r'\s*Munic[ií]pio\s*/\s*UF\s*\(se\s+estrangeiro\s+informar\s+Pa[ií]s\)[:.\s]*$', '', v, flags=re.IGNORECASE)
-    v = re.sub(r'^Munic[ií]pio\s*/\s*UF\s*\(se\s+estrangeiro\s+informar\s+Pa[ií]s\)[:.\s]*', '', v, flags=re.IGNORECASE)
+    v = re.sub(r'\s*Munic[iÃ­]pio\s*/\s*UF\s*\(se\s+estrangeiro\s+informar\s+Pa[iÃ­]s\)[:.\s]*$', '', v, flags=re.IGNORECASE)
+    v = re.sub(r'^Munic[iÃ­]pio\s*/\s*UF\s*\(se\s+estrangeiro\s+informar\s+Pa[iÃ­]s\)[:.\s]*', '', v, flags=re.IGNORECASE)
     v = re.sub(r'\s*c.digo(?:\s+\d+)?(?:\s*UF\s*[A-Z]{2})?\s*$', '', v, flags=re.IGNORECASE)
     v = re.sub(r'^[.\-:;,\s]+', '', v)
     v = re.sub(r'\s*c.digo(?:\s+\d+)?(?:\s*UF\s*[A-Z]{2})?\s*$', '', v, flags=re.IGNORECASE)
@@ -487,7 +487,7 @@ def _normalize_cidade(value: str) -> str:
     low = v.lower()
     if low in CITY_OCR_FIX:
         return CITY_OCR_FIX[low]
-    if v.upper() in {"UF", "CEP", "MÉDICO", "MEDICO", "CARTÓRIO", "LOCAL DE OCORRÊNCIA"}:
+    if v.upper() in {"UF", "CEP", "MÃ‰DICO", "MEDICO", "CARTÃ“RIO", "LOCAL DE OCORRÃŠNCIA"}:
         return ""
     if re.fullmatch(r'\d+', v) or len(v) < 3:
         return ""
@@ -502,7 +502,7 @@ def _normalize_uf(value: str) -> str:
     uf = {"IC": "SP"}.get(uf, uf)
     return uf if uf in VALID_UFS else ""
 
-# ── Parser da DO ─────────────────────────────────────────────────
+# â”€â”€ Parser da DO â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _find_block_value(text: str, labels: list, stop_labels: list = None) -> str:
     if stop_labels is None:
@@ -534,7 +534,7 @@ def _find_block_value(text: str, labels: list, stop_labels: list = None) -> str:
                 candidate = lines[j].strip()
                 if not candidate or len(candidate) < 2:
                     continue
-                if re.match(r"^\d+\s+[A-ZÁÉÍÓÚÂÊÔÃÕÇ]", candidate):
+                if re.match(r"^\d+\s+[A-ZÃÃ‰ÃÃ“ÃšÃ‚ÃŠÃ”ÃƒÃ•Ã‡]", candidate):
                     continue
                 cand_lower = candidate.lower().strip("|.,;:")
                 if cand_lower in skip_headers:
@@ -598,7 +598,7 @@ def _parsed_do_form(lines: list) -> dict:
         line = line.strip()
         if not line:
             continue
-        m = re.match(r"^(\d{1,2})\s+[A-Za-zÀ-ÿ]", line)
+        m = re.match(r"^(\d{1,2})\s+[A-Za-zÃ€-Ã¿]", line)
         if m:
             if current_field and current_lines:
                 field_values[current_field] = "\n".join(current_lines)
@@ -633,14 +633,14 @@ def _parsed_do_form(lines: list) -> dict:
     return result
 
 def _detect_obito_type(text: str) -> str:
-    if re.search(r'X\s*(Nao|Não)\s*fetal', text, re.IGNORECASE):
-        return "Não Fetal"
-    if re.search(r'X\s*Fetal', text) and not re.search(r'X\s*(Nao|Não)\s*fetal', text, re.IGNORECASE):
+    if re.search(r'X\s*(Nao|NÃ£o)\s*fetal', text, re.IGNORECASE):
+        return "NÃ£o Fetal"
+    if re.search(r'X\s*Fetal', text) and not re.search(r'X\s*(Nao|NÃ£o)\s*fetal', text, re.IGNORECASE):
         return "Fetal"
     if re.search(r'\bFatal\b', text, re.IGNORECASE):
-        return "Não Fetal"
-    if re.search(r'\b(Nao|Não)\s*fetal\b', text, re.IGNORECASE):
-        return "Não Fetal"
+        return "NÃ£o Fetal"
+    if re.search(r'\b(Nao|NÃ£o)\s*fetal\b', text, re.IGNORECASE):
+        return "NÃ£o Fetal"
     if re.search(r'\bFetal\b', text, re.IGNORECASE):
         return "Fetal"
     return ""
@@ -649,14 +649,14 @@ def _extract_uf_ocorrencia(text: str) -> str:
     if not text:
         return ""
     ocorrencia_match = re.search(
-        r'Local de ocorrência do óbito[:\s]*\n?(.*?)(?:III[\)\.\s]|PREENCHEMENTO|IV[\)\.\s]|$)',
+        r'Local de ocorrÃªncia do Ã³bito[:\s]*\n?(.*?)(?:III[\)\.\s]|PREENCHEMENTO|IV[\)\.\s]|$)',
         text, re.DOTALL | re.IGNORECASE
     )
     if ocorrencia_match:
         uf_match = re.search(r'UF\s*[:\s]*([A-Z]{2})', ocorrencia_match.group(1))
         if uf_match:
             return _normalize_uf(uf_match.group(1))
-    ufs = re.findall(r'(?<!Município\s.*)UF\s*[:\s]*([A-Z]{2})', text)
+    ufs = re.findall(r'(?<!MunicÃ­pio\s.*)UF\s*[:\s]*([A-Z]{2})', text)
     if ufs:
         return _normalize_uf(ufs[-1])
     return ""
@@ -670,8 +670,8 @@ def _parse_parte_i(text: str) -> dict:
     )
     if not parte_i_match:
         parte_i_match = re.search(
-            r'Causas?\s+da?\s+morte[:\s]*\n?(.*?)(?:PARTE\s+II|Outras condições|'
-            r'Nome do médico|CRM|$)',
+            r'Causas?\s+da?\s+morte[:\s]*\n?(.*?)(?:PARTE\s+II|Outras condiÃ§Ãµes|'
+            r'Nome do mÃ©dico|CRM|$)',
             text, re.DOTALL | re.IGNORECASE
         )
     if not parte_i_match:
@@ -705,7 +705,7 @@ def parse_obito(text: str) -> dict:
 
     nome = _sanitize_person_name(_find_block_value(text, [
         "Nome do Falecido", "Nome do falecido", "Falecido", "Nome",
-    ], stop_labels=["Nome do Pai", "Nome da Mãe", "Nome do pai", "Nome da mãe"]))
+    ], stop_labels=["Nome do Pai", "Nome da MÃ£e", "Nome do pai", "Nome da mÃ£e"]))
     if not nome:
         nome = _sanitize_person_name(_parsed_do_form(text.split("\n")).get("NOME", ""))
     if not nome:
@@ -714,10 +714,10 @@ def parse_obito(text: str) -> dict:
     # --- Ponto 1a: limpar nome poluido com labels do formulario ---
     if nome and any(j in nome.lower() for j in FORM_JUNK):
         _labels = re.compile(
-            r'descri[çc][ãa]o sum[áa]ria|endere[çc]o|logradouro|n[uú]mero|bairro|'
-            r'munic[ií]pio|c[oó]digo|registro|complemento|cart[oó]rio|'
-            r'ocupa[çc][ãa]o habitual|situa[çc][ãa]o conjugal|ra[çc]a/cor|'
-            r'naturalidade|escolaridade|meio de contato|identifica[çc][ãa]o', re.IGNORECASE)
+            r'descri[Ã§c][Ã£a]o sum[Ã¡a]ria|endere[Ã§c]o|logradouro|n[uÃº]mero|bairro|'
+            r'munic[iÃ­]pio|c[oÃ³]digo|registro|complemento|cart[oÃ³]rio|'
+            r'ocupa[Ã§c][Ã£a]o habitual|situa[Ã§c][Ã£a]o conjugal|ra[Ã§c]a/cor|'
+            r'naturalidade|escolaridade|meio de contato|identifica[Ã§c][Ã£a]o', re.IGNORECASE)
         _partes = [p.strip().rstrip("|.,;:") for p in _labels.split(nome) if p.strip()]
         _nome_limpo = ""
         for _p in reversed(_partes):
@@ -728,15 +728,15 @@ def parse_obito(text: str) -> dict:
         structured["NOME"] = _sanitize_person_name(_nome_limpo) if _nome_limpo else ""
 
     mae = _sanitize_person_name(_find_block_value(text, [
-        "Nome da Mãe", "Nome da mãe", "Nome da Mae", "Nome da mae",
-    ], stop_labels=["Nome do Pai", "Nome do pai", "Endereço", "Logradouro"]))
+        "Nome da MÃ£e", "Nome da mÃ£e", "Nome da Mae", "Nome da mae",
+    ], stop_labels=["Nome do Pai", "Nome do pai", "EndereÃ§o", "Logradouro"]))
     if not mae:
         mae = _sanitize_person_name(_parsed_do_form(text.split("\n")).get("NOME_MAE", ""))
     structured["NOME_MAE"] = mae
 
     _raw_nasc = _find_block_value(text, [
         "Data de nascimento", "Data de Nascimento", "Nascimento", "Nasc.",
-    ], stop_labels=["Data do óbito", "Data do obito", "Idade"])
+    ], stop_labels=["Data do Ã³bito", "Data do obito", "Idade"])
     structured["NASCIMENTO"] = _normalize_date(_normalize_date_ocr(_raw_nasc))
     if not structured["NASCIMENTO"]:
         _lines_t = text.split("\n")
@@ -755,7 +755,7 @@ def parse_obito(text: str) -> dict:
                 break
 
         _raw_data_obito = ""
-    for label in ["Data do óbito", "Data de óbito", "Data do obito", "Data de obito"]:
+    for label in ["Data do Ã³bito", "Data de Ã³bito", "Data do obito", "Data de obito"]:
         for line in text.split('\n'):
             if label.lower() in line.lower():
                 resto = line[line.lower().index(label.lower()) + len(label):].strip()
@@ -771,22 +771,22 @@ def parse_obito(text: str) -> dict:
     structured["DATA_OBITO"] = _normalize_date(_normalize_date_ocr(_raw_data_obito))
 
     _raw_hora = _find_block_value(text, [
-        "Hora do óbito", "Hora do obito", "Hora",
-    ], stop_labels=["Data do óbito", "Data do obito", "Local do óbito", "Local do obito"])
+        "Hora do Ã³bito", "Hora do obito", "Hora",
+    ], stop_labels=["Data do Ã³bito", "Data do obito", "Local do Ã³bito", "Local do obito"])
     if _raw_hora:
         hora = _normalize_hora(_raw_hora)
         if hora:
             structured["HORA_OBITO"] = hora
 
     structured["CIDADE_OBITO"] = _normalize_cidade(_find_block_value(text, [
-        "Município de ocorrência", "Municipio de ocorrencia", "Município de Ocorrência",
+        "MunicÃ­pio de ocorrÃªncia", "Municipio de ocorrencia", "MunicÃ­pio de OcorrÃªncia",
     ]))
     structured["UF_OBITO"] = _normalize_uf(_extract_uf_ocorrencia(text))
     if not structured["UF_OBITO"]:
         structured["UF_OBITO"] = _normalize_uf(_find_block_value(text, ["UF"]))
 
     structured["TIPO_OBITO"] = _detect_obito_type(text)
-    if structured["TIPO_OBITO"] not in ("Fetal", "Não Fetal", ""):
+    if structured["TIPO_OBITO"] not in ("Fetal", "NÃ£o Fetal", ""):
         structured["TIPO_OBITO"] = ""
 
     causas = _parse_parte_i(text)
@@ -799,7 +799,7 @@ def parse_obito(text: str) -> dict:
     _causas_seq = []
     for _k in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_MORTE_4"]:
         _v = _clean_causa(structured.get(_k, ""))
-        _v = re.sub(r'^[a-z]\s+(?=[A-ZÀ-Ú])', '', _v, flags=re.IGNORECASE).strip()
+        _v = re.sub(r'^[a-z]\s+(?=[A-ZÃ€-Ãš])', '', _v, flags=re.IGNORECASE).strip()
         if _v:
             _causas_seq.append(_v)
     _causas_dedup = []
@@ -818,22 +818,22 @@ def parse_obito(text: str) -> dict:
     structured["CAUSA_BASICA"] = _clean_causa(structured.get("CAUSA_BASICA", ""))
 
     structured["MEDICO_ATESTANTE"] = _clean_field(_find_block_value(text, [
-        "Médico", "Medico", "Nome do Médico", "Nome do medico",
+        "MÃ©dico", "Medico", "Nome do MÃ©dico", "Nome do medico",
     ], stop_labels=["CRM"]))
     structured["CRM_MEDICO"] = _clean_field(_find_block_value(text, ["CRM"]))
 
-    do_match = re.search(r'Declaração\s+de\s+Óbito\s+(\d+(?:-\d+)?)', text, re.IGNORECASE)
+    do_match = re.search(r'DeclaraÃ§Ã£o\s+de\s+Ã“bito\s+(\d+(?:-\d+)?)', text, re.IGNORECASE)
     if do_match:
         structured["DO_NUMERO"] = do_match.group(1)
 
     parte_ii_match = re.search(
-        r'PARTE\s+II[:\s]*\n?(.*?)(?:Outros episódios|Nome do médico|CRM|$)',
+        r'PARTE\s+II[:\s]*\n?(.*?)(?:Outros episÃ³dios|Nome do mÃ©dico|CRM|$)',
         text, re.DOTALL | re.IGNORECASE
     )
     if parte_ii_match:
-        p2 = re.sub(r'^que contribuíram para a morte[^:]*[: ]*', '',
+        p2 = re.sub(r'^que contribuÃ­ram para a morte[^:]*[: ]*', '',
                     parte_ii_match.group(1).strip(), flags=re.IGNORECASE)
-        p2 = re.sub(r'^outras condições significativas[^:]*[: ]*', '', p2, flags=re.IGNORECASE)
+        p2 = re.sub(r'^outras condiÃ§Ãµes significativas[^:]*[: ]*', '', p2, flags=re.IGNORECASE)
         p2 = _clean_field(p2[:200])
         if p2 and not any(j in p2.lower() for j in FORM_JUNK):
             structured["PARTE_II"] = p2
@@ -847,13 +847,13 @@ def parse_obito(text: str) -> dict:
 
     return structured
 
-# ── Validacao ────────────────────────────────────────────────────
+# â”€â”€ Validacao â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def validate_obito(structured: dict) -> None:
     # --- Limpeza da causa antes de validar (aumenta aprovados) ---
 
     # --- Deteccao de poluicao em campos criticos ---
-    _padroes_lixo = re.compile(r'(?:data do atestado|descri[cç][aã]o sum[aá]ria|logradouro|n[uú]mero|bairro|munic[ií]pio|c[oó]digo|registro|ocupa[cç][aã]o habitual|tempo aproximado|parte\s*i{1,2}|devido ou como|m[eé]dico|cremesp|crm[- ]?sp|uf[: ]|anos completos|menores de 1 ano|necr[oó]psia|assistente|ocorr[eê]ncia|diagn[oó]stico confirmado|fetal ou menor)', re.IGNORECASE)
+    _padroes_lixo = re.compile(r'(?:data do atestado|descri[cÃ§][aÃ£]o sum[aÃ¡]ria|logradouro|n[uÃº]mero|bairro|munic[iÃ­]pio|c[oÃ³]digo|registro|ocupa[cÃ§][aÃ£]o habitual|tempo aproximado|parte\s*i{1,2}|devido ou como|m[eÃ©]dico|cremesp|crm[- ]?sp|uf[: ]|anos completos|menores de 1 ano|necr[oÃ³]psia|assistente|ocorr[eÃª]ncia|diagn[oÃ³]stico confirmado|fetal ou menor)', re.IGNORECASE)
     _poluido = []
     for _f in ("NOME", "NOME_MAE", "CAUSA_MORTE", "CAUSA_BASICA", "MEDICO_ATESTANTE", "CRM_MEDICO"):
         _v = str(structured.get(_f, "") or "").strip()
@@ -861,7 +861,7 @@ def validate_obito(structured: dict) -> None:
             continue
         if _padroes_lixo.search(_v):
             _poluido.append(f"{_f} contem texto do formulario")
-    if structured.get("CAUSA_MORTE") and re.search(r'^\s*(?:[bBaA](?:\)|\.)?|[•])\s*[:.\-]?\s*', str(structured["CAUSA_MORTE"])):
+    if structured.get("CAUSA_MORTE") and re.search(r'^\s*(?:[bBaA](?:\)|\.)?|[â€¢])\s*[:.\-]?\s*', str(structured["CAUSA_MORTE"])):
         _poluido.append("CAUSA_MORTE com prefixo de marcador")
     if _poluido:
         structured["STATUS"] = "REVISAR"
@@ -870,8 +870,8 @@ def validate_obito(structured: dict) -> None:
     _causa = str(structured.get("CAUSA_MORTE", "") or "").strip()
     if _causa:
         _causa = re.sub(r'^\s*(?:[a-dA-D](?:\)|\.)?|[.\-\u2022])\s*[:.\-]?\s*', '', _causa)
-        _causa = re.sub(r'^(?:causa\s+(?:imediata|b[aá]sica|antecedente)|devido\s+ou\s+como\s+consequ[eê]ncia\s+de|tempo\s+aproximado\s+entre\s+o\s+in[ií]cio|parte\s+ii?[:\s]*)[:\s\-]*', '', _causa, flags=re.IGNORECASE).strip()
-        if re.search(r'\b(?:data do atestado|m[eé]dico|ocorr[eê]ncia|assistente|diagn[oó]stico confirmado)\b', _causa, flags=re.IGNORECASE) or re.fullmatch(r'[\d.\s]+', _causa):
+        _causa = re.sub(r'^(?:causa\s+(?:imediata|b[aÃ¡]sica|antecedente)|devido\s+ou\s+como\s+consequ[eÃª]ncia\s+de|tempo\s+aproximado\s+entre\s+o\s+in[iÃ­]cio|parte\s+ii?[:\s]*)[:\s\-]*', '', _causa, flags=re.IGNORECASE).strip()
+        if re.search(r'\b(?:data do atestado|m[eÃ©]dico|ocorr[eÃª]ncia|assistente|diagn[oÃ³]stico confirmado)\b', _causa, flags=re.IGNORECASE) or re.fullmatch(r'[\d.\s]+', _causa):
             _causa = ""
         structured["CAUSA_MORTE"] = _causa
     if not structured.get("CAUSA_MORTE") and structured.get("CAUSA_BASICA"):
@@ -908,7 +908,7 @@ def validate_obito(structured: dict) -> None:
         structured["STATUS"] = "OK"
         structured["ERROS"] = ""
 
-# ── Processamento individual (com dedup) ─────────────────────────
+# â”€â”€ Processamento individual (com dedup) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _process_single_image(file_id, file_name, existing):
     logger.info(f"Processando: {file_name} ({file_id})")
@@ -980,7 +980,7 @@ def _process_single_image(file_id, file_name, existing):
     structured["NOME_ARQUIVO"] = file_name
     return structured
 
-# ── Batch ────────────────────────────────────────────────────────
+# â”€â”€ Batch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, files: str = None) -> dict:
     logger.info(f"Iniciando {'reprocessamento' if reprocess else 'batch'} com limit={limit}")
@@ -1062,7 +1062,7 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
         logger.error(f"Erro no batch: {e}", exc_info=True)
         return {"success": False, "error": str(e), "message": "Erro interno"}
 
-# ── Dedupe da aba Auditoria ──────────────────────────────────────
+# â”€â”€ Dedupe da aba Auditoria â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _dedupe_auditoria(sheet_id: str = SHEET_ID) -> dict:
     """Remove duplicatas mantendo o melhor registro por HASH_ARQUIVO.
@@ -1124,7 +1124,7 @@ def _dedupe_auditoria(sheet_id: str = SHEET_ID) -> dict:
         "observacao": "Revise a aba Auditoria_LIMPA. Se estiver ok, posso substituir a Auditoria pela versao limpa.",
     }
 
-# ── FastAPI App ──────────────────────────────────────────────────
+# â”€â”€ FastAPI App â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 app = FastAPI(title="Obito OCR Service", version="3.1")
 
