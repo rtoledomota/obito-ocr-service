@@ -982,6 +982,22 @@ def _process_single_image(file_id, file_name, existing):
 
 # â”€â”€ Batch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+STOP_REQUESTED = False
+_BATCH_INFO = {"active": False, "current": "", "processed": 0, "duplicates": 0,
+               "rejected": 0, "failed": 0, "total": 0, "stop_pending": False}
+
+@app.get("/batch/status")
+def batch_status():
+    _BATCH_INFO["stop_pending"] = STOP_REQUESTED
+    return _BATCH_INFO
+
+@app.post("/batch/stop")
+def batch_stop():
+    global STOP_REQUESTED
+    STOP_REQUESTED = True
+    _BATCH_INFO["stop_pending"] = True
+    return {"ok": True, "message": "Parada solicitada. O batch sera encerrado apos a imagem atual."}
+
 def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, files: str = None) -> dict:
     logger.info(f"Iniciando {'reprocessamento' if reprocess else 'batch'} com limit={limit}")
     try:
@@ -1027,7 +1043,14 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
         rows_to_insert = []
         processed, duplicates, rejected, failed = 0, 0, 0, 0
         _ensure_sheet_header()
+        _BATCH_INFO["active"] = True
+        _BATCH_INFO["total"] = len(to_process)
         for img in to_process:
+            if STOP_REQUESTED:
+                logger.info("Parada solicitada. Encerrando batch de forma graciosa.")
+                _BATCH_INFO["active"] = False
+                break
+            _BATCH_INFO["current"] = img.get("name", "unknown")
             time.sleep(1)
             row = _process_single_image(img["id"], img.get("name", "unknown"), existing)
             status = row.get("STATUS", "")
@@ -1046,12 +1069,20 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
             if row.get("NOME_ARQUIVO"):
                 existing["names"].add(row["NOME_ARQUIVO"])
             rows_to_insert.append([row.get(h, "") for h in HEADER])
+            _BATCH_INFO["processed"] = processed
+            _BATCH_INFO["duplicates"] = duplicates
+            _BATCH_INFO["rejected"] = rejected
+            _BATCH_INFO["failed"] = failed
         if rows_to_insert:
             result = _append_rows_to_sheet(rows_to_insert)
             if result:
                 logger.info(f"Inseridas {len(rows_to_insert)} linhas na planilha.")
             else:
                 logger.error("Falha ao inserir linhas na planilha.")
+        _BATCH_INFO["active"] = False
+        _BATCH_INFO["current"] = ""
+        if not STOP_REQUESTED:
+            _BATCH_INFO["stop_pending"] = False
         msg = (f"{processed} processadas, {duplicates} duplicadas puladas, "
                f"{rejected} rejeitadas, {failed} falhas (total no Drive: {total})")
         return {"success": True, "total": total, "new": len(to_process),
