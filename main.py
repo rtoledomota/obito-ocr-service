@@ -1,5 +1,5 @@
 ﻿import os, io, re, uuid, hashlib, logging, time, base64
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 from google.oauth2 import service_account
@@ -450,6 +450,22 @@ def _clean_causa(value: str) -> str:
     if any(j in low for j in FORM_JUNK):
         return ""
     return v
+
+def _excel_serial_to_date(value):
+    """Converte serial de data (Excel/planilha, ex.: 19665) para dd/mm/aaaa."""
+    try:
+        s = str(value).strip().replace(".", "").replace(",", "")
+        if not re.fullmatch(r"\d{4,6}", s):
+            return ""
+        n = int(s)
+        if n < 1:
+            return ""
+        _dt_conv = datetime(1899, 12, 30) + timedelta(days=n)
+        if 1900 <= _dt_conv.year <= datetime.now().year + 1:
+            return _dt_conv.strftime("%d/%m/%Y")
+        return ""
+    except Exception:
+        return ""
 
 def _normalize_date_ocr(raw: str) -> str:
     if not raw or not raw.strip():
@@ -923,7 +939,7 @@ def validate_obito(structured: dict) -> None:
     _idade = structured.get("IDADE_ANOS", "")
     if _nasc and _dob and _idade and _idade.isdigit():
         try:
-            from datetime import datetime as _dt
+            from datetime import datetime, timedelta as _dt
             _calc = (_dt.strptime(_dob, "%d/%m/%Y") - _dt.strptime(_nasc, "%d/%m/%Y")).days // 365
             if abs(_calc - int(_idade)) > 5:
                 _erros_extra.append(f"Idade inconsistente com datas (calculada ~{_calc})")
@@ -980,7 +996,16 @@ def _process_single_image(file_id, file_name, existing):
                            "CIDADE_OBITO", "UF_OBITO", "CAUSA_MORTE", "CAUSA_BASICA",
                            "MEDICO_ATESTANTE", "CRM_MEDICO"):
                     if not structured.get(_k) and _json_fields.get(_k):
-                        structured[_k] = str(_json_fields[_k]).strip()
+                        _v = str(_json_fields[_k]).strip()
+                        if _k in ("NASCIMENTO", "DATA_OBITO"):
+                            _norm = _normalize_date(_normalize_date_ocr(_v))
+                            if not _norm:
+                                _norm = _excel_serial_to_date(_v)
+                            _v = _norm
+                        elif _k == "HORA_OBITO":
+                            _v = _normalize_hora(_v)
+                        if _v:
+                            structured[_k] = _v
         except Exception:
             pass
 
