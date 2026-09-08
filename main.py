@@ -240,9 +240,29 @@ def _sha256_bytes(data: bytes) -> str:
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
+def _downscale_image(image_bytes, max_dim=2000):
+    """Reduz a imagem para no maximo max_dim px no maior lado (mantem proporcao).
+    Reduz drasticamente a memoria e o payload enviado ao Gemini."""
+    try:
+        from PIL import Image
+        import io as _io
+        img = Image.open(_io.BytesIO(image_bytes))
+        img = img.convert("RGB")
+        w, h = img.size
+        if max(w, h) > max_dim:
+            ratio = max_dim / float(max(w, h))
+            img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+        buf = _io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        return buf.getvalue()
+    except Exception as e:
+        logger.warning(f"[DOWNSCALE] nao aplicado: {e}")
+        return image_bytes
+
 # â”€â”€ OCR via Google Cloud Vision REST API (multi-chave) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _ocr_image_from_bytes(image_bytes, mime_type="image/jpeg"):
+    image_bytes = _downscale_image(image_bytes)
     img_b64 = base64.b64encode(image_bytes).decode("utf-8")
     gemini_key = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
     if not gemini_key:
@@ -356,6 +376,7 @@ def _ocr_structured_fields(ocr_text):
 
 def _ocr_image_retry(image_bytes, mime_type="image/jpeg"):
     """Segunda leitura do OCR com prompt direcionado p/ imagens de baixa qualidade."""
+    image_bytes = _downscale_image(image_bytes)
     img_b64 = base64.b64encode(image_bytes).decode("utf-8")
     gemini_key = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
     if not gemini_key:
