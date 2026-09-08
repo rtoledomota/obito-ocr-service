@@ -243,6 +243,7 @@ def _sha256_text(text: str) -> str:
 # â”€â”€ OCR via Google Cloud Vision REST API (multi-chave) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _ocr_image_from_bytes(image_bytes, mime_type="image/jpeg"):
+    img_b64 = base64.b64encode(image_bytes).decode("utf-8")
     gemini_key = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
     if not gemini_key:
         logger.error("[OCR] GEMINI_API_KEY nao configurada")
@@ -355,6 +356,7 @@ def _ocr_structured_fields(ocr_text):
 
 def _ocr_image_retry(image_bytes, mime_type="image/jpeg"):
     """Segunda leitura do OCR com prompt direcionado p/ imagens de baixa qualidade."""
+    img_b64 = base64.b64encode(image_bytes).decode("utf-8")
     gemini_key = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
     if not gemini_key:
         return "", 0.0
@@ -368,7 +370,8 @@ def _ocr_image_retry(image_bytes, mime_type="image/jpeg"):
         "Escreva apenas o texto transcrito, sem comentarios, sem markdown."
     )
     payload = {
-        "contents": [{"parts": [{"text": prompt + "\n\n" + ocr_text}]}],
+        "contents": [{"parts": [{"text": prompt},
+                                {"inline_data": {"mime_type": mime_type, "data": img_b64}}]}],
         "generationConfig": {"temperature": 0.0, "maxOutputTokens": 4096},
     }
     try:
