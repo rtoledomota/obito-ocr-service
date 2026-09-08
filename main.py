@@ -254,6 +254,7 @@ def _downscale_image(image_bytes, max_dim=1400):
             img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
         buf = _io.BytesIO()
         img.save(buf, format="JPEG", quality=85)
+        logger.info(f"[DOWNSCALE] imagem {w}x{h} -> {img.size[0]}x{img.size[1]} ({len(image_bytes)} bytes)")
         return buf.getvalue()
     except Exception as e:
         logger.warning(f"[DOWNSCALE] nao aplicado: {e}")
@@ -1092,6 +1093,8 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
             if low_names:
                 to_process = [img for img in all_files if img.get("name", "") in low_names]
                 logger.info(f"Filtro aplicado: {len(to_process)} arquivos (min_score={min_score}, files={files})")
+                if min_score is not None and not files:
+                    to_process = to_process[:limit]
             else:
                 to_process = all_files[:limit]
         else:
