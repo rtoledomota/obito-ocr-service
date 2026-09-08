@@ -243,7 +243,6 @@ def _sha256_text(text: str) -> str:
 # â”€â”€ OCR via Google Cloud Vision REST API (multi-chave) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _ocr_image_from_bytes(image_bytes, mime_type="image/jpeg"):
-    img_b64 = base64.b64encode(image_bytes).decode("utf-8")
     gemini_key = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
     if not gemini_key:
         logger.error("[OCR] GEMINI_API_KEY nao configurada")
@@ -291,16 +290,15 @@ def _ocr_image_from_bytes(image_bytes, mime_type="image/jpeg"):
     except Exception as e:
         logger.error(f"[OCR GEMINI] erro: {e}")
         return "", 0.0
-def _ocr_structured_fields(image_bytes, mime_type="image/jpeg"):
+def _ocr_structured_fields(ocr_text):
     """Leitura estruturada (JSON Schema): extrai campos-chave da DO quando faltam."""
     import json as _json
-    img_b64 = base64.b64encode(image_bytes).decode("utf-8")
     gemini_key = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
     if not gemini_key:
         return {}
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={gemini_key}"
     prompt = (
-        "Extraia da Declaracao de Obito os campos abaixo e devolva APENAS um JSON valido "
+        "Abaixo esta o texto transcrito de uma Declaracao de Obito. Extraia os campos e devolva APENAS um JSON valido "
         "(sem markdown, sem comentarios), com as chaves exatas: NOME, NOME_MAE, NASCIMENTO "
         "(dd/mm/aaaa), DATA_OBITO (dd/mm/aaaa), HORA_OBITO (HH:MM), CIDADE_OBITO, UF_OBITO, "
         "CAUSA_MORTE (causa imediata, linha a da Parte I, SEM prefixo de letra), CAUSA_BASICA "
@@ -309,8 +307,7 @@ def _ocr_structured_fields(image_bytes, mime_type="image/jpeg"):
         "Transcreva nomes e causas EXATAMENTE como escritos, sem abreviar."
     )
     payload = {
-        "contents": [{"parts": [{"text": prompt},
-                                {"inline_data": {"mime_type": mime_type, "data": img_b64}}]}],
+        "contents": [{"parts": [{"text": prompt + "\n\n" + ocr_text}]}],
         "generationConfig": {
             "temperature": 0.0,
             "maxOutputTokens": 1024,
@@ -358,7 +355,6 @@ def _ocr_structured_fields(image_bytes, mime_type="image/jpeg"):
 
 def _ocr_image_retry(image_bytes, mime_type="image/jpeg"):
     """Segunda leitura do OCR com prompt direcionado p/ imagens de baixa qualidade."""
-    img_b64 = base64.b64encode(image_bytes).decode("utf-8")
     gemini_key = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
     if not gemini_key:
         return "", 0.0
@@ -372,8 +368,7 @@ def _ocr_image_retry(image_bytes, mime_type="image/jpeg"):
         "Escreva apenas o texto transcrito, sem comentarios, sem markdown."
     )
     payload = {
-        "contents": [{"parts": [{"text": prompt},
-                                {"inline_data": {"mime_type": mime_type, "data": img_b64}}]}],
+        "contents": [{"parts": [{"text": prompt + "\n\n" + ocr_text}]}],
         "generationConfig": {"temperature": 0.0, "maxOutputTokens": 4096},
     }
     try:
@@ -1005,7 +1000,7 @@ def _process_single_image(file_id, file_name, existing):
     _missing_crit = [f for f in CRITICAL_FIELDS if not structured.get(f)]
     if _missing_crit and raw_text:
         try:
-            _json_fields = _ocr_structured_fields(image_bytes, mime_type)
+            _json_fields = _ocr_structured_fields(raw_text)
             if _json_fields:
                 for _k in ("NOME", "NOME_MAE", "NASCIMENTO", "DATA_OBITO", "HORA_OBITO",
                            "CIDADE_OBITO", "UF_OBITO", "CAUSA_MORTE", "CAUSA_BASICA",
