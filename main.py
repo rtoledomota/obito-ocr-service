@@ -240,11 +240,12 @@ def _sha256_bytes(data: bytes) -> str:
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-def _downscale_image(image_bytes, max_dim=1400):
+def _downscale_image(image_bytes, max_dim=1100):
     """Reduz a imagem para no maximo max_dim px no maior lado (mantem proporcao).
     Reduz drasticamente a memoria e o payload enviado ao Gemini."""
     try:
         from PIL import Image
+        logger.info(f"[DOWNLOAD] original {len(image_bytes)} bytes")
         import io as _io
         img = Image.open(_io.BytesIO(image_bytes))
         img = img.convert("RGB")
@@ -254,8 +255,12 @@ def _downscale_image(image_bytes, max_dim=1400):
             img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
         buf = _io.BytesIO()
         img.save(buf, format="JPEG", quality=85)
+        out = buf.getvalue()
+        buf.close()
+        img.close()
+        import gc; gc.collect()
+        return out
         logger.info(f"[DOWNSCALE] imagem {w}x{h} -> {img.size[0]}x{img.size[1]} ({len(image_bytes)} bytes)")
-        return buf.getvalue()
     except Exception as e:
         logger.warning(f"[DOWNSCALE] nao aplicado: {e}")
         return image_bytes
