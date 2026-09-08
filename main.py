@@ -240,7 +240,7 @@ def _sha256_bytes(data: bytes) -> str:
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-def _downscale_image(image_bytes, max_dim=2000):
+def _downscale_image(image_bytes, max_dim=1400):
     """Reduz a imagem para no maximo max_dim px no maior lado (mantem proporcao).
     Reduz drasticamente a memoria e o payload enviado ao Gemini."""
     try:
