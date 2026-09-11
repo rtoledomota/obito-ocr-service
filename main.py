@@ -269,8 +269,11 @@ def _downscale_image(image_bytes, max_dim=2600):
 # â”€â”€ OCR via Google Cloud Vision REST API (multi-chave) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _ocr_image_from_bytes(image_bytes, mime_type="image/jpeg"):
+    return _ocr_tiled(image_bytes, mime_type)
+
+def _ocr_tiled(image_bytes, mime_type="image/jpeg", faixas=3):
+    """OCR em faixas horizontais para garantir a leitura do rodape (causas, medico)."""
     image_bytes = _downscale_image(image_bytes)
-    img_b64 = base64.b64encode(image_bytes).decode("utf-8")
     gemini_key = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
     if not gemini_key:
         logger.error("[OCR] GEMINI_API_KEY nao configurada")
@@ -282,43 +285,49 @@ def _ocr_image_from_bytes(image_bytes, mime_type="image/jpeg"):
         "Transcreva cada rotulo e cada valor preenchido a mao, na ordem em que aparecem. "
         "NAO omita nenhuma linha. Inclua nome do falecido, data de nascimento, data do obito, municipio, UF e todas as causas da morte. Responda apenas com o texto transcrito, sem comentarios."
     )
-    payload = {
-        "contents": [{
-            "parts": [
-                {"text": prompt},
-                {"inline_data": {"mime_type": mime_type, "data": img_b64}},
-            ]
-        }],
-        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 8192},
-    }
     try:
-        resp = requests.post(url, json=payload, timeout=90)
-        if resp.status_code != 200:
-            err = resp.json().get("error", {}).get("message", "")
-            logger.error(f"[OCR GEMINI] HTTP {resp.status_code}: {err}")
-            return "", 0.0
-        data = resp.json()
-
-        parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-        text = "".join(p.get("text", "") for p in parts).strip()
-        logger.info(f"[OCR GEMINI] finishReason={data.get('candidates', [{}])[0].get('finishReason', '?')} | chars={len(text)}")
-        # RELEITURA CONDICIONAL: reler apenas em casos extremos (economiza tokens)
-        if len(text) < 60:
+        from PIL import Image
+        img = Image.open(io.BytesIO(image_bytes))
+        w, h = img.size
+        texts = []
+        for i in range(faixas):
+            top = int(h * i / faixas)
+            bot = int(h * (i + 1) / faixas)
+            faixa = img.crop((0, top, w, bot))
+            buf = io.BytesIO()
+            faixa.save(buf, format="JPEG", quality=92)
+            img_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+            payload = {
+                "contents": [{
+                    "parts": [
+                        {"text": prompt},
+                        {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}},
+                    ]
+                }],
+                "generationConfig": {"temperature": 0.1, "maxOutputTokens": 8192},
+            }
             try:
-                resp2 = requests.post(url, json=payload, timeout=90)
-                if resp2.status_code == 200:
-                    data2 = resp2.json()
-                    parts2 = data2.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-                    text2 = "".join(p.get("text", "") for p in parts2).strip()
-                    if len(text2) > len(text):
-                        text = text2
-            except Exception:
-                pass
-        logger.info(f"[OCR GEMINI] OK - texto: {len(text)} chars")
-        return text, 1.0
+                resp = requests.post(url, json=payload, timeout=90)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    _cand = data.get("candidates", [{}])[0]
+                    parts = _cand.get("content", {}).get("parts", [])
+                    _fr = _cand.get("finishReason", "?")
+                    t = "".join(p.get("text", "") for p in parts).strip()
+                    logger.info(f"[OCR FAIXA {i+1}/{faixas}] finishReason={_fr} | chars={len(t)}")
+                    texts.append(t)
+                else:
+                    logger.error(f"[OCR FAIXA {i+1}] HTTP {resp.status_code}")
+            except Exception as e:
+                logger.error(f"[OCR FAIXA {i+1}] erro: {e}")
+        img.close()
+        full = "\n".join(x for x in texts if x)
+        logger.info(f"[OCR GEMINI] OK - texto total: {len(full)} chars")
+        return full, 1.0
     except Exception as e:
-        logger.error(f"[OCR GEMINI] erro: {e}")
+        logger.error(f"[OCR GEMINI] erro tiling: {e}")
         return "", 0.0
+
 def _ocr_structured_fields(ocr_text):
     """Leitura estruturada (JSON Schema): extrai campos-chave da DO quando faltam."""
     import json as _json
