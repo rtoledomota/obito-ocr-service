@@ -1,4 +1,4 @@
-﻿import os, io, re, uuid, hashlib, logging, time, base64
+import os, io, re, uuid, hashlib, logging, time, base64
 from datetime import datetime, timedelta
 
 import requests
@@ -759,24 +759,46 @@ def _parse_parte_i(text: str) -> dict:
     )
     if not parte_i_match:
         parte_i_match = re.search(
-            r'Causas?\s+da?\s+morte[:\s]*\n?(.*?)(?:PARTE\s+II|Outras condiÃ§Ãµes|'
-            r'Nome do mÃ©dico|CRM|$)',
+            r'Causas?\s+da?\s+morte[:\s]*\n?(.*?)(?:PARTE\s+II|Outras condições|'
+            r'Nome do médico|CRM|$)',
             text, re.DOTALL | re.IGNORECASE
         )
     if not parte_i_match:
         return result
-    linhas = re.findall(
-        r'^(?:\d+[\)\.]\s*|[a-dA-D][\)\.]\s*|[IVXivx]+[\)\.]\s*)(.+?)$',
-        parte_i_match.group(1), re.MULTILINE
-    ) or re.findall(
-        r'(?:\d[\)\.]\s*|[a-dA-D][\)\.]\s*|I[\)\.]\s*|II[\)\.]\s*|III[\)\.]\s*|IV[\)\.]\s*)(.+)',
-        parte_i_match.group(1)
+
+    bloco = parte_i_match.group(1)
+    marcador = re.compile(r'^(?:\d+[\)\.]\s*|[a-dA-D][\)\.]\s*|[IVXivx]+[\)\.]\s*)(.*)$')
+    rotulo = re.compile(
+        r'^\s*(?:tempo aproximado|cid da causa|causa básica|causa basica|'
+        r'data do atestado|ocorr[eê]ncia|assinatura|atestante|m[eé]dico|medico)',
+        re.IGNORECASE
     )
     causas = []
-    for l in linhas:
-        c = _clean_causa(l)
-        if c and len(c) >= 3:
-            causas.append(c)
+    for linha in bloco.splitlines():
+        linha = linha.strip()
+        if not linha:
+            continue
+        m = marcador.match(linha)
+        if m:
+            c = _clean_causa(m.group(1))
+            if c and len(c) >= 3:
+                causas.append(c)
+        elif causas and not rotulo.match(linha):
+            c = _clean_causa(linha)
+            if c and len(c) >= 3:
+                causas[-1] = f"{causas[-1]} {c}".strip()
+
+    if not causas:
+        linhas = re.findall(
+            r'(?:\d[\)\.]\s*|[a-dA-D][\)\.]\s*|I[\)\.]\s*|II[\)\.]\s*|III[\)\.]\s*|IV[\)\.]\s*)'
+            r'(.+?)(?=(?:\d[\)\.]\s*|[a-dA-D][\)\.]\s*|I[\)\.]\s*|II[\)\.]\s*|III[\)\.]\s*|IV[\)\.]\s*|$))',
+            bloco
+        )
+        for l in linhas:
+            c = _clean_causa(l)
+            if c and len(c) >= 3:
+                causas.append(c)
+
     if not causas:
         return result
     result["CAUSA_MORTE"] = causas[0]
