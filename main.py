@@ -186,13 +186,14 @@ def _download_image_bytes(file_id):
         import io as _io
         _img = Image.open(_io.BytesIO(fh.getvalue()))
         _img = _img.convert("RGB")
-        _max_side = 2000
+        _img = _img.convert("L")
+        _max_side = 2600
         _w, _h = _img.size
         if max(_w, _h) > _max_side:
             _ratio = _max_side / float(max(_w, _h))
             _img = _img.resize((int(_w * _ratio), int(_h * _ratio)), Image.LANCZOS)
         _out = _io.BytesIO()
-        _img.save(_out, format="JPEG", quality=85)
+        _img.save(_out, format="JPEG", quality=92)
         return _out.getvalue(), "image/jpeg"
     except Exception:
         return fh.getvalue(), metadata.get("mimeType", "image/jpeg")
@@ -300,6 +301,7 @@ def _ocr_image_from_bytes(image_bytes, mime_type="image/jpeg"):
 
         parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
         text = "".join(p.get("text", "") for p in parts).strip()
+        logger.info(f"[OCR GEMINI] finishReason={data.get('candidates', [{}])[0].get('finishReason', '?')} | chars={len(text)}")
         # RELEITURA CONDICIONAL: reler apenas em casos extremos (economiza tokens)
         if len(text) < 60:
             try:
