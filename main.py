@@ -241,7 +241,7 @@ def _sha256_bytes(data: bytes) -> str:
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-def _downscale_image(image_bytes, max_dim=1100):
+def _downscale_image(image_bytes, max_dim=2600):
     """Reduz a imagem para no maximo max_dim px no maior lado (mantem proporcao).
     Reduz drasticamente a memoria e o payload enviado ao Gemini."""
     try:
@@ -249,13 +249,13 @@ def _downscale_image(image_bytes, max_dim=1100):
         logger.info(f"[DOWNLOAD] original {len(image_bytes)} bytes")
         import io as _io
         img = Image.open(_io.BytesIO(image_bytes))
-        img = img.convert("RGB")
+        img = img.convert("L")
         w, h = img.size
         if max(w, h) > max_dim:
             ratio = max_dim / float(max(w, h))
             img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
         buf = _io.BytesIO()
-        img.save(buf, format="JPEG", quality=85)
+        img.save(buf, format="JPEG", quality=92)
         out = buf.getvalue()
         buf.close()
         img.close()
