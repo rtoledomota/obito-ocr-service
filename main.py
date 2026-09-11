@@ -288,7 +288,7 @@ def _ocr_image_from_bytes(image_bytes, mime_type="image/jpeg"):
                 {"inline_data": {"mime_type": mime_type, "data": img_b64}},
             ]
         }],
-        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 4096},
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 8192},
     }
     try:
         resp = requests.post(url, json=payload, timeout=90)
