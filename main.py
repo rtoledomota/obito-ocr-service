@@ -1044,6 +1044,8 @@ def _process_single_image(file_id, file_name, existing):
         return {"NOME_ARQUIVO": file_name, "STATUS": "DUPLICADO", "ERROS": ""}
     try:
         raw_text, confidence = _ocr_image_from_bytes(image_bytes, mime_type)
+        for _ci in range(0, len(raw_text), 500):
+            logger.info(f"[OCR FULL {_ci//500+1}] " + raw_text[_ci:_ci+500])
         if raw_text:
             logger.info(f"[OCR RESPONSE] {file_name}: {raw_text[:300]}")
     except Exception as e:
