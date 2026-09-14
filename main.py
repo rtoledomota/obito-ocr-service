@@ -241,6 +241,48 @@ def _sha256_bytes(data: bytes) -> str:
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
+
+def _preprocess_image(image_bytes, max_dim=2600):
+    """Pre-processa a imagem para melhorar a leitura OCR:
+    upscale de imagens pequenas, autocontraste, nitidez e deskew (se OpenCV disponivel)."""
+    from PIL import Image, ImageOps, ImageFilter
+    import io as _io
+    _has_cv = False
+    try:
+        import cv2
+        import numpy as np
+        _has_cv = True
+    except Exception:
+        _has_cv = False
+    img = Image.open(_io.BytesIO(image_bytes))
+    orig_w, orig_h = img.size
+    if max(orig_w, orig_h) < 1800:
+        _scale = 2000.0 / max(orig_w, orig_h)
+        img = img.resize((int(orig_w * _scale), int(orig_h * _scale)), Image.LANCZOS)
+    img = ImageOps.autocontrast(img, cutoff=1)
+    img = img.filter(ImageFilter.SHARPEN)
+    if _has_cv:
+        try:
+            _arr = np.array(img.convert("L"))
+            _coords = np.column_stack(np.where(_arr > 128))
+            if len(_coords) > 100:
+                _angle = cv2.minAreaRect(_coords)[-1]
+                if _angle < -45:
+                    _angle = 90 + _angle
+                if abs(_angle) > 0.3:
+                    (_h, _w) = _arr.shape
+                    _center = (_w // 2, _h // 2)
+                    _M = cv2.getRotationMatrix2D(_center, _angle, 1.0)
+                    _arr = cv2.warpAffine(_arr, _M, (_w, _h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+                    img = Image.fromarray(_arr).convert("RGB")
+        except Exception:
+            pass
+    if max(img.size) > max_dim:
+        img.thumbnail((max_dim, max_dim), Image.LANCZOS)
+    _buf = _io.BytesIO()
+    img.save(_buf, format="JPEG", quality=92)
+    return _buf.getvalue()
+
 def _downscale_image(image_bytes, max_dim=2600):
     """Reduz a imagem para no maximo max_dim px no maior lado (mantem proporcao).
     Reduz drasticamente a memoria e o payload enviado ao Gemini."""
@@ -272,7 +314,7 @@ def _downscale_image(image_bytes, max_dim=2600):
 def _extract_structured_from_image(image_bytes, mime_type="image/jpeg"):
     """Extracao estruturada dos campos da DO via modelo (JSON)."""
     import json as _json
-    image_bytes = _downscale_image(image_bytes)
+    image_bytes = _preprocess_image(image_bytes)
     gemini_key = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
     if not gemini_key:
         return {}
@@ -326,7 +368,7 @@ def _ocr_image_from_bytes(image_bytes, mime_type="image/jpeg"):
 
 def _ocr_tiled(image_bytes, mime_type="image/jpeg", faixas=3):
     """OCR em faixas horizontais para garantir a leitura do rodape (causas, medico)."""
-    image_bytes = _downscale_image(image_bytes)
+    image_bytes = _preprocess_image(image_bytes)
     gemini_key = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
     if not gemini_key:
         logger.error("[OCR] GEMINI_API_KEY nao configurada")
@@ -453,7 +495,7 @@ def _ocr_structured_fields(ocr_text):
 
 def _ocr_image_retry(image_bytes, mime_type="image/jpeg"):
     """Segunda leitura do OCR com prompt direcionado p/ imagens de baixa qualidade."""
-    image_bytes = _downscale_image(image_bytes)
+    image_bytes = _preprocess_image(image_bytes)
     img_b64 = base64.b64encode(image_bytes).decode("utf-8")
     gemini_key = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
     if not gemini_key:
