@@ -244,7 +244,7 @@ def _sha256_text(text: str) -> str:
 
 def _preprocess_image(image_bytes, max_dim=2600):
     """Pre-processa a imagem para melhorar a leitura OCR:
-    upscale de imagens pequenas, autocontraste, nitidez e deskew (se OpenCV disponivel)."""
+    upscale de imagens pequenas, autocontraste, nitidez e deskew leve (memoria controlada)."""
     from PIL import Image, ImageOps, ImageFilter
     import io as _io
     _has_cv = False
@@ -263,18 +263,23 @@ def _preprocess_image(image_bytes, max_dim=2600):
     img = img.filter(ImageFilter.SHARPEN)
     if _has_cv:
         try:
-            _arr = np.array(img.convert("L"))
+            _w, _h = img.size
+            _small_w = 800
+            _small_h = max(1, int(_h * _small_w / _w))
+            _small = img.convert("L").resize((_small_w, _small_h), Image.LANCZOS)
+            _arr = np.array(_small)
             _coords = np.column_stack(np.where(_arr > 128))
             if len(_coords) > 100:
                 _angle = cv2.minAreaRect(_coords)[-1]
                 if _angle < -45:
                     _angle = 90 + _angle
                 if abs(_angle) > 0.3:
-                    (_h, _w) = _arr.shape
-                    _center = (_w // 2, _h // 2)
+                    _gray = np.array(img.convert("L"))
+                    (_gh, _gw) = _gray.shape
+                    _center = (_gw // 2, _gh // 2)
                     _M = cv2.getRotationMatrix2D(_center, _angle, 1.0)
-                    _arr = cv2.warpAffine(_arr, _M, (_w, _h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
-                    img = Image.fromarray(_arr).convert("RGB")
+                    _rot = cv2.warpAffine(_gray, _M, (_gw, _gh), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+                    img = Image.fromarray(_rot).convert("RGB")
         except Exception:
             pass
     if max(img.size) > max_dim:
@@ -311,6 +316,15 @@ def _downscale_image(image_bytes, max_dim=2600):
 # â”€â”€ OCR via Google Cloud Vision REST API (multi-chave) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
+
+def _salvage_json_text(txt):
+    """Extrai pares CHAVE:valor de um JSON truncado."""
+    import re as _re
+    _out = {}
+    for _m in _re.finditer(r'"([A-Z_]+)"\s*:\s*"((?:[^"\]|\.)*)"', txt):
+        _out[_m.group(1)] = _m.group(2)
+    return _out
+
 def _extract_structured_from_image(image_bytes, mime_type="image/jpeg"):
     """Extracao estruturada dos campos da DO via modelo (JSON)."""
     import json as _json
@@ -333,7 +347,7 @@ def _extract_structured_from_image(image_bytes, mime_type="image/jpeg"):
             {"text": prompt},
             {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode("utf-8")}},
         ]}],
-        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 2048, "responseMimeType": "application/json"},
+        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 4096, "responseMimeType": "application/json"},
     }
     try:
         resp = requests.post(url, json=payload, timeout=120)
@@ -353,8 +367,11 @@ def _extract_structured_from_image(image_bytes, mime_type="image/jpeg"):
         if txt.endswith(_fence):
             txt = txt[:-len(_fence)]
         txt = txt.strip()
-        obj = _json.loads(txt)
-        if not isinstance(obj, dict):
+        try:
+            obj = _json.loads(txt)
+        except Exception:
+            obj = _salvage_json_text(txt)
+        if not isinstance(obj, dict) or not obj:
             return {}
         preenchidos = [k for k, v in obj.items() if isinstance(v, str) and v.strip()]
         logger.info(f"[OCR JSON] campos preenchidos: {preenchidos}")
