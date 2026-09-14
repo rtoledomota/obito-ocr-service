@@ -892,6 +892,8 @@ def parse_obito(text: str) -> dict:
         try:
             _jf = _json.loads(_raw)
             logger.info("[PARSE] JSON parse OK, campos=" + str(sorted(_jf.keys())))
+            _jf_pre = {k: v for k, v in _jf.items() if isinstance(v, str) and v.strip()}
+            logger.info("[PARSE] JSON preenchidos: " + str(_jf_pre))
         except Exception as _e:
             logger.error("[PARSE] JSON parse FALHOU: " + str(_e) + " | raw=" + _raw[:200])
             _jf = {}
@@ -1156,9 +1158,43 @@ def _process_single_image(file_id, file_name, existing):
         structured["ERROS"] = f"Erro no parser: {e}"
     structured["HASH_ARQUIVO"] = h
     structured["HASH_CONTEUDO"] = _sha256_text(raw_text)
+
+    # --- JSON estruturado: fonte autoritativa ---
+    if "<FIELDS_JSON>" in raw_text:
+        import json as _jmod
+        _rawj = raw_text.split("<FIELDS_JSON>", 1)[1].strip()
+        try:
+            _jf2 = _jmod.loads(_rawj)
+            _aplic2 = []
+            for _k in ("NOME", "NOME_MAE", "NASCIMENTO", "DATA_OBITO", "HORA_OBITO",
+                       "CIDADE_OBITO", "UF_OBITO", "TIPO_OBITO", "CAUSA_MORTE",
+                       "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_MORTE_4", "CAUSA_BASICA",
+                       "MEDICO_ATESTANTE", "CRM_MEDICO", "DO_NUMERO"):
+                _v2 = _jf2.get(_k)
+                if isinstance(_v2, str) and _v2.strip():
+                    _val2 = _v2.strip()
+                    if _k in ("NASCIMENTO", "DATA_OBITO"):
+                        _norm2 = _normalize_date(_normalize_date_ocr(_val2))
+                        if not _norm2:
+                            _norm2 = _excel_serial_to_date(_val2)
+                        _val2 = _norm2 or _val2
+                    elif _k == "HORA_OBITO":
+                        _val2 = _normalize_hora(_val2) or _val2
+                    elif _k == "UF_OBITO":
+                        _val2 = _normalize_uf(_val2) or _val2
+                    if _val2:
+                        structured[_k] = _val2
+                        _aplic2.append(_k)
+            if _aplic2:
+                logger.info("[JSON APLICADO] " + file_name + ": " + str(_aplic2))
+            else:
+                logger.warning("[JSON APLICADO] " + file_name + ": nenhum valor preenchido no JSON")
+        except Exception as _e2:
+            logger.error("[JSON APLICADO] " + file_name + ": erro " + str(_e2))
+
     # --- Recuperacao estruturada (JSON Schema): so quando faltam campos criticos ---
     _missing_crit = [f for f in CRITICAL_FIELDS if not structured.get(f)]
-    if _missing_crit and raw_text:
+    if _missing_crit and raw_text and "<FIELDS_JSON>" not in raw_text:
         try:
             _json_fields = _ocr_structured_fields(raw_text)
             if _json_fields:
