@@ -268,6 +268,59 @@ def _downscale_image(image_bytes, max_dim=2600):
 
 # â”€â”€ OCR via Google Cloud Vision REST API (multi-chave) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+
+def _extract_structured_from_image(image_bytes, mime_type="image/jpeg"):
+    """Extracao estruturada dos campos da DO via modelo (JSON)."""
+    import json as _json
+    image_bytes = _downscale_image(image_bytes)
+    gemini_key = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
+    if not gemini_key:
+        return {}
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={gemini_key}"
+    prompt = (
+        "Voce recebera a imagem de uma Declaracao de Obito (DO) brasileira, possivelmente preenchida a mao. "
+        "Extraia os campos e responda SOMENTE com um objeto JSON valido, sem markdown e sem comentarios. "
+        "Use string vazia para campo ilegivel ou ausente. Datas no formato DD/MM/AAAA e hora HH:MM. "
+        'Campos: {"NOME": "", "NOME_MAE": "", "NASCIMENTO": "", "DATA_OBITO": "", "HORA_OBITO": "", '
+        '"CIDADE_OBITO": "", "UF_OBITO": "", "TIPO_OBITO": "", "CAUSA_MORTE": "", "CAUSA_MORTE_2": "", '
+        '"CAUSA_MORTE_3": "", "CAUSA_MORTE_4": "", "CAUSA_BASICA": "", "MEDICO_ATESTANTE": "", '
+        '"CRM_MEDICO": "", "DO_NUMERO": ""}'
+    )
+    payload = {
+        "contents": [{"parts": [
+            {"text": prompt},
+            {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode("utf-8")}},
+        ]}],
+        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 2048, "responseMimeType": "application/json"},
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=120)
+        if resp.status_code != 200:
+            logger.error(f"[OCR JSON] HTTP {resp.status_code}")
+            return {}
+        data = resp.json()
+        cand = data.get("candidates", [{}])[0]
+        parts = cand.get("content", {}).get("parts", [])
+        txt = "".join(x.get("text", "") for x in parts).strip()
+        _fence = chr(96) * 3
+        txt = txt.strip()
+        if txt.startswith(_fence):
+            txt = txt[len(_fence):]
+            if txt[:4].lower() == "json":
+                txt = txt[4:]
+        if txt.endswith(_fence):
+            txt = txt[:-len(_fence)]
+        txt = txt.strip()
+        obj = _json.loads(txt)
+        if not isinstance(obj, dict):
+            return {}
+        preenchidos = [k for k, v in obj.items() if isinstance(v, str) and v.strip()]
+        logger.info(f"[OCR JSON] campos preenchidos: {preenchidos}")
+        return obj
+    except Exception as e:
+        logger.error(f"[OCR JSON] erro: {e}")
+        return {}
+
 def _ocr_image_from_bytes(image_bytes, mime_type="image/jpeg"):
     return _ocr_tiled(image_bytes, mime_type)
 
@@ -323,6 +376,13 @@ def _ocr_tiled(image_bytes, mime_type="image/jpeg", faixas=3):
         img.close()
         full = "\n".join(x for x in texts if x)
         logger.info(f"[OCR GEMINI] OK - texto total: {len(full)} chars")
+        try:
+            import json as _json
+            _jf = _extract_structured_from_image(image_bytes, mime_type)
+            if _jf:
+                full = full + "\n<FIELDS_JSON>" + _json.dumps(_jf, ensure_ascii=False)
+        except Exception as _e:
+            logger.error(f"[OCR JSON] merge erro: {_e}")
         return full, 1.0
     except Exception as e:
         logger.error(f"[OCR GEMINI] erro tiling: {e}")
@@ -823,6 +883,32 @@ def _parse_parte_i(text: str) -> dict:
     return result
 
 def parse_obito(text: str) -> dict:
+    import json as _json
+    _jf = {}
+    if "<FIELDS_JSON>" in text:
+        try:
+            _jf = _json.loads(text.split("<FIELDS_JSON>", 1)[1].strip())
+            text = text.split("<FIELDS_JSON>", 1)[0]
+        except Exception:
+            _jf = {}
+    _res = _parse_obito_regex(text)
+    for _k, _v in (_jf or {}).items():
+        if _k in _res and isinstance(_v, str) and _v.strip():
+            _res[_k] = _v.strip()
+    try:
+        if _res.get("NASCIMENTO"):
+            _res["NASCIMENTO"] = _normalize_date(_normalize_date_ocr(_res["NASCIMENTO"])) or _res["NASCIMENTO"]
+        if _res.get("DATA_OBITO"):
+            _res["DATA_OBITO"] = _normalize_date(_normalize_date_ocr(_res["DATA_OBITO"])) or _res["DATA_OBITO"]
+        if _res.get("UF_OBITO"):
+            _res["UF_OBITO"] = _normalize_uf(_res["UF_OBITO"]) or _res["UF_OBITO"]
+        if _res.get("TIPO_OBITO") and _res["TIPO_OBITO"] not in ("Fetal", "Nao Fetal", "Nao fetal"):
+            _res["TIPO_OBITO"] = ""
+    except Exception:
+        pass
+    return _res
+
+def _parse_obito_regex(text: str) -> dict:
     structured = {k: "" for k in HEADER}
 
     nome = _sanitize_person_name(_find_block_value(text, [
