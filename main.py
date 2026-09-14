@@ -1206,6 +1206,11 @@ def _process_single_image(file_id, file_name, existing):
             logger.info(f"[OCR RESPONSE] {file_name}: {raw_text[:300]}")
     except Exception as e:
         return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_OCR", "ERROS": str(e)}
+    try:
+        del image_bytes
+    except Exception:
+        pass
+    gc.collect()
     if not _is_valid_obito(raw_text):
         logger.warning(f"{file_name}: nao reconhecido como DO, pulando")
         return {"NOME_ARQUIVO": file_name, "STATUS": "REJEITADO",
@@ -1343,6 +1348,7 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
             _BATCH_INFO["current"] = img.get("name", "unknown")
             time.sleep(1)
             row = _process_single_image(img["id"], img.get("name", "unknown"), existing)
+            gc.collect()
             status = row.get("STATUS", "")
             if status == "DUPLICADO":
                 duplicates += 1
