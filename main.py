@@ -884,17 +884,26 @@ def _parse_parte_i(text: str) -> dict:
 
 def parse_obito(text: str) -> dict:
     import json as _json
+    import traceback as _tb
     _jf = {}
     if "<FIELDS_JSON>" in text:
+        _raw = text.split("<FIELDS_JSON>", 1)[1].strip()
+        logger.info("[PARSE] FIELDS_JSON encontrado, raw len=" + str(len(_raw)))
         try:
-            _jf = _json.loads(text.split("<FIELDS_JSON>", 1)[1].strip())
-            text = text.split("<FIELDS_JSON>", 1)[0]
-        except Exception:
+            _jf = _json.loads(_raw)
+            logger.info("[PARSE] JSON parse OK, campos=" + str(sorted(_jf.keys())))
+        except Exception as _e:
+            logger.error("[PARSE] JSON parse FALHOU: " + str(_e) + " | raw=" + _raw[:200])
             _jf = {}
+        text = text.split("<FIELDS_JSON>", 1)[0]
     _res = _parse_obito_regex(text)
+    _aplicados = []
     for _k, _v in (_jf or {}).items():
         if _k in _res and isinstance(_v, str) and _v.strip():
             _res[_k] = _v.strip()
+            _aplicados.append(_k)
+    if _aplicados:
+        logger.info("[PARSE] campos JSON aplicados: " + str(_aplicados))
     try:
         if _res.get("NASCIMENTO"):
             _res["NASCIMENTO"] = _normalize_date(_normalize_date_ocr(_res["NASCIMENTO"])) or _res["NASCIMENTO"]
@@ -904,8 +913,8 @@ def parse_obito(text: str) -> dict:
             _res["UF_OBITO"] = _normalize_uf(_res["UF_OBITO"]) or _res["UF_OBITO"]
         if _res.get("TIPO_OBITO") and _res["TIPO_OBITO"] not in ("Fetal", "Nao Fetal", "Nao fetal"):
             _res["TIPO_OBITO"] = ""
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.error("[PARSE] normalizacao falhou: " + str(_e) + " | " + _tb.format_exc())
     return _res
 
 def _parse_obito_regex(text: str) -> dict:
