@@ -1,4 +1,5 @@
 import os, io, re, uuid, hashlib, logging, time, base64
+import gc
 from datetime import datetime, timedelta
 
 import requests
@@ -1280,6 +1281,11 @@ def _process_single_image(file_id, file_name, existing):
             pass
 
 
+    try:
+        del raw_text
+    except Exception:
+        pass
+    gc.collect()
     validate_obito(structured)
     structured["DATA_PROCESSAMENTO"] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     structured["NOME_ARQUIVO"] = file_name
