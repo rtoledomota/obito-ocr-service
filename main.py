@@ -729,6 +729,15 @@ def _normalize_date_ocr(raw: str) -> str:
         return f"{d:02d}/{m:02d}/{y}"
     return ""
 
+def _forcar_ano_obito(valor: str) -> str:
+    """DO sao sempre de 2026: corrige o ano lido errado pelo OCR."""
+    if not valor:
+        return valor
+    m = re.search(r"(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})", str(valor))
+    if not m:
+        return valor
+    return f"{int(m.group(1)):02d}/{int(m.group(2)):02d}/2026"
+
 def _normalize_date(raw: str) -> str:
     if not raw or not raw.strip():
         return ""
@@ -902,7 +911,7 @@ def _parsed_do_form(lines: list) -> dict:
         txt = field_values[2]
         dm = re.search(r"(\d{2})(\d{2})(\d{4})", txt)
         if dm and 1 <= int(dm.group(2)) <= 12 and 1 <= int(dm.group(1)) <= 31:
-            result["DATA_OBITO"] = f"{int(dm.group(1)):02d}/{int(dm.group(2)):02d}/{dm.group(3)}"
+            result["DATA_OBITO"] = _forcar_ano_obito(f"{int(dm.group(1)):02d}/{int(dm.group(2)):02d}/{dm.group(3)}")
         hm = re.search(r"(\d{1,2}):(\d{2})", txt)
         if hm:
             hora = _normalize_hora(f"{hm.group(1)}:{hm.group(2)}")
@@ -1036,7 +1045,7 @@ def parse_obito(text: str) -> dict:
         if _res.get("NASCIMENTO"):
             _res["NASCIMENTO"] = _normalize_date(_normalize_date_ocr(_res["NASCIMENTO"])) or _res["NASCIMENTO"]
         if _res.get("DATA_OBITO"):
-            _res["DATA_OBITO"] = _normalize_date(_normalize_date_ocr(_res["DATA_OBITO"])) or _res["DATA_OBITO"]
+            _res["DATA_OBITO"] = _forcar_ano_obito(_normalize_date(_normalize_date_ocr(_res["DATA_OBITO"]))) or _res["DATA_OBITO"]
         if _res.get("UF_OBITO"):
             _res["UF_OBITO"] = _normalize_uf(_res["UF_OBITO"]) or _res["UF_OBITO"]
         if _res.get("TIPO_OBITO") and _res["TIPO_OBITO"] not in ("Fetal", "Nao Fetal", "Nao fetal"):
@@ -1113,7 +1122,7 @@ def _parse_obito_regex(text: str) -> dict:
                 break
         if _raw_data_obito:
             break
-    structured["DATA_OBITO"] = _normalize_date(_normalize_date_ocr(_raw_data_obito))
+    structured["DATA_OBITO"] = _forcar_ano_obito(_normalize_date(_normalize_date_ocr(_raw_data_obito)))
 
     _raw_hora = _find_block_value(text, [
         "Hora do óbito", "Hora do obito", "Hora",
@@ -1407,6 +1416,9 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
         else:
             to_process = all_files[:limit]
         existing = {"hashes": {}, "names": set()} if reprocess else _get_existing_data()
+        if not reprocess:
+            _ex_names = {_norm_name(n) for n in existing.get("names", set())}
+            to_process = [f for f in all_files if _norm_name(f.get("name", "")) not in _ex_names][:limit]
         _NAME_INDEX = _build_name_index()
         rows_to_insert = []
         processed, duplicates, rejected, failed = 0, 0, 0, 0
