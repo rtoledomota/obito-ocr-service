@@ -1422,6 +1422,7 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
         _NAME_INDEX = _build_name_index()
         rows_to_insert = []
         processed, duplicates, rejected, failed = 0, 0, 0, 0
+        duplicate_names, rejected_names, failed_names = [], [], []
         _ensure_sheet_header()
         _BATCH_INFO["active"] = True
         _BATCH_INFO["total"] = len(to_process)
@@ -1437,12 +1438,15 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
             status = row.get("STATUS", "")
             if status == "DUPLICADO":
                 duplicates += 1
+                duplicate_names.append(img.get("name", "unknown"))
                 continue
             if status == "REJEITADO":
                 rejected += 1
+                rejected_names.append(img.get("name", "unknown"))
                 continue
             if status in ("ERRO_DRIVE", "ERRO_OCR"):
                 failed += 1
+                failed_names.append(img.get("name", "unknown"))
                 continue
             processed += 1
             if row.get("HASH_ARQUIVO"):
@@ -1472,6 +1476,9 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
         return {"success": True, "total": total, "new": len(to_process),
                 "processed": processed, "duplicates": duplicates,
                 "rejected": rejected, "failed": failed,
+                "duplicated_files": duplicate_names,
+                "rejected_files": rejected_names,
+                "failed_files": failed_names,
                 "sheet_id": SHEET_ID, "message": msg, "requestId": str(uuid.uuid4())}
     except Exception as e:
         logger.error(f"Erro no batch: {e}", exc_info=True)
