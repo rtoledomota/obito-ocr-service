@@ -1,4 +1,4 @@
-import os, io, re, uuid, hashlib, logging, time, base64
+﻿import os, io, re, uuid, hashlib, logging, time, base64
 import gc
 from datetime import datetime, timedelta
 
@@ -122,7 +122,7 @@ def _get_existing_data():
     try:
         sheets = _get_sheets_service()
         result = sheets.spreadsheets().values().get(
-            spreadsheetId=SHEET_ID, range="Auditoria!B1:W1579"
+            spreadsheetId=SHEET_ID, range="Auditoria!B1:W"
         ).execute()
         for row in result.get("values", []):
             if not row:
@@ -157,6 +157,76 @@ def _ensure_sheet_header():
     except Exception as e:
         logger.error(f"Erro ao garantir cabecalho: {e}")
         return False
+
+def _norm_name(name) -> str:
+    """Normaliza o nome do arquivo para servir de chave de dedupe."""
+    return " ".join(str(name).strip().lower().split())
+
+def _col_to_letter(idx: int) -> str:
+    """Converte indice de coluna 0-based para letra (A, B, ..., AA)."""
+    s, idx = "", idx + 1
+    while idx > 0:
+        idx, rem = divmod(idx - 1, 26)
+        s = chr(65 + rem) + s
+    return s
+
+def _build_name_index() -> dict:
+    """Le a coluna B (NOME_ARQUIVO) e devolve {nome_normalizado: numero_da_linha}."""
+    index = {}
+    try:
+        sheets = _get_sheets_service()
+        result = sheets.spreadsheets().values().get(
+            spreadsheetId=SHEET_ID, range="Auditoria!B2:B"
+        ).execute()
+        for i, row in enumerate(result.get("values", []), start=2):
+            if not row:
+                continue
+            key = _norm_name(row[0])
+            if key:
+                index[key] = i
+    except Exception as e:
+        logger.warning(f"Nao foi possivel montar indice de nomes: {e}")
+    return index
+
+def _upsert_rows_to_sheet(rows, name_index=None):
+    """Insert-or-update por NOME_ARQUIVO: atualiza a linha se o arquivo ja existe."""
+    if not rows:
+        return None
+    if name_index is None:
+        name_index = _build_name_index()
+    try:
+        sheets = _get_sheets_service()
+        b_idx = HEADER.index("NOME_ARQUIVO") if "NOME_ARQUIVO" in HEADER else 1
+        to_append, last = [], None
+        for row in rows:
+            key = _norm_name(row[b_idx]) if len(row) > b_idx else ""
+            if key and key in name_index:
+                rownum = name_index[key]
+                end_col = _col_to_letter(len(row) - 1)
+                last = sheets.spreadsheets().values().update(
+                    spreadsheetId=SHEET_ID,
+                    range=f"Auditoria!A{rownum}:{end_col}{rownum}",
+                    valueInputOption="USER_ENTERED",
+                    body={"values": [row]},
+                ).execute()
+                logger.info(f"Linha atualizada (upsert): {row[b_idx]}")
+            else:
+                to_append.append(row)
+        if to_append:
+            last = sheets.spreadsheets().values().append(
+                spreadsheetId=SHEET_ID,
+                range="Auditoria!A:A",
+                valueInputOption="USER_ENTERED",
+                insertDataOption="INSERT_ROWS",
+                body={"values": to_append},
+            ).execute()
+        name_index.clear()
+        name_index.update(_build_name_index())
+        return last
+    except Exception as e:
+        logger.error(f"Erro no upsert da planilha: {e}")
+        return None
+
 
 def _append_rows_to_sheet(rows):
     try:
@@ -1341,6 +1411,7 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
         else:
             to_process = all_files[:limit]
         existing = {"hashes": {}, "names": set()} if reprocess else _get_existing_data()
+        _NAME_INDEX = _build_name_index()
         rows_to_insert = []
         processed, duplicates, rejected, failed = 0, 0, 0, 0
         _ensure_sheet_header()
@@ -1373,7 +1444,7 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
             rows_to_insert.append([row.get(h, "") for h in HEADER])
             # Grava incrementalmente a cada imagem (evita perda se o servico reiniciar)
             if len(rows_to_insert) >= 1:
-                _res = _append_rows_to_sheet(rows_to_insert)
+                _res = _upsert_rows_to_sheet(rows_to_insert, _NAME_INDEX)
                 if _res:
                     logger.info(f"Linha persistida: {row.get('NOME_ARQUIVO','')}")
                 else:
@@ -1401,11 +1472,11 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
 # â”€â”€ Dedupe da aba Auditoria â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _dedupe_auditoria(sheet_id: str = SHEET_ID) -> dict:
-    """Remove duplicatas mantendo o melhor registro por HASH_ARQUIVO.
+    """Remove duplicatas mantendo o melhor registro por NOME_ARQUIVO.
     Grava em aba nova 'Auditoria_LIMPA' (nao altera a original)."""
     sheets = _get_sheets_service()
     result = sheets.spreadsheets().values().get(
-        spreadsheetId=sheet_id, range="Auditoria!A1:W1579"
+        spreadsheetId=sheet_id, range="Auditoria!A1:W"
     ).execute()
     rows = result.get("values", [])
     if not rows:
@@ -1413,61 +1484,66 @@ def _dedupe_auditoria(sheet_id: str = SHEET_ID) -> dict:
     header = rows[0]
     data = rows[1:]
 
-    def _num(v):
+    def _idx(col, padrao):
         try:
-            return float(v)
+            return header.index(col)
+        except ValueError:
+            return padrao
+
+    i_name = _idx("NOME_ARQUIVO", 1)
+    i_status = _idx("STATUS", 2)
+    i_score = _idx("QUALIDADE_SCORE", 3)
+    i_hash = _idx("HASH_ARQUIVO", -1)
+
+    def _score(row):
+        if len(row) <= i_score:
+            return -1.0
+        try:
+            return float(str(row[i_score]).replace(",", "."))
         except Exception:
             return -1.0
 
-    def _key(r):
-        return (_num(r[3]), 1 if (r[2] or "").strip() == "OK" else 0, r[0] or "")
+    def _key(row):
+        nome = _norm_name(row[i_name]) if len(row) > i_name else ""
+        if nome:
+            return nome
+        if i_hash >= 0 and len(row) > i_hash and str(row[i_hash]).strip():
+            return "hash:" + str(row[i_hash]).strip()
+        return "row:" + "|".join(str(c) for c in row[:3])
 
-    best = {}
-    rejected = {}
-    for r in data:
-        r = r + [""] * (len(header) - len(r))
-        h = (r[22] or "").strip()
-        fname = (r[1] or "").strip()
-        if not h:
-            if fname:
-                rejected[fname] = r
+    def _eh_ok(row):
+        return len(row) > i_status and str(row[i_status]).strip().upper() == "OK"
+
+    melhores = {}
+    for row in data:
+        if not row or not any(str(c).strip() for c in row):
             continue
-        if h not in best or _key(r) > _key(best[h]):
-            best[h] = r
+        k = _key(row)
+        atual = melhores.get(k)
+        if atual is None or (_eh_ok(row), _score(row)) > (_eh_ok(atual), _score(atual)):
+            melhores[k] = row
+    limpos = list(melhores.values())
 
-    final = list(best.values()) + list(rejected.values())
-
-    info = sheets.spreadsheets().get(spreadsheetId=sheet_id, fields="sheets.properties.title").execute()
-    titles = [s["properties"]["title"] for s in info.get("sheets", [])]
-    if "Auditoria_LIMPA" not in titles:
+    try:
         sheets.spreadsheets().batchUpdate(
             spreadsheetId=sheet_id,
-            body={"requests": [{"addSheet": {"properties": {"title": "Auditoria_LIMPA"}}}]}
+            body={"requests": [{"addSheet": {"properties": {"title": "Auditoria_LIMPA"}}}]},
         ).execute()
+    except Exception:
+        pass
 
+    sheets.spreadsheets().values().clear(
+        spreadsheetId=sheet_id, range="Auditoria_LIMPA",
+    ).execute()
     sheets.spreadsheets().values().update(
         spreadsheetId=sheet_id, range="Auditoria_LIMPA!A1",
         valueInputOption="USER_ENTERED",
-        body={"values": [header] + final}
+        body={"values": [header] + limpos},
     ).execute()
+    return {"success": True, "originais": len(data), "unicos": len(limpos),
+            "removidos": len(data) - len(limpos), "aba": "Auditoria_LIMPA"}
 
-    return {
-        "success": True,
-        "linhas_originais": len(data),
-        "linhas_unicas": len(final),
-        "removidas": len(data) - len(final),
-        "aba": "Auditoria_LIMPA",
-        "observacao": "Revise a aba Auditoria_LIMPA. Se estiver ok, posso substituir a Auditoria pela versao limpa.",
-    }
 
-# â”€â”€ FastAPI App â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-app = FastAPI(title="Obito OCR Service", version="3.1")
-
-class BatchRequest(BaseModel):
-    limit: int = 10
-
-@app.get("/")
 def root():
     return {"status": "running", "service": "Obito OCR Service", "version": "3.1"}
 
