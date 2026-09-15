@@ -159,11 +159,9 @@ def _ensure_sheet_header():
         return False
 
 def _norm_name(name) -> str:
-    """Normaliza o nome do arquivo para servir de chave de dedupe."""
     return " ".join(str(name).strip().lower().split())
 
 def _col_to_letter(idx: int) -> str:
-    """Converte indice de coluna 0-based para letra (A, B, ..., AA)."""
     s, idx = "", idx + 1
     while idx > 0:
         idx, rem = divmod(idx - 1, 26)
@@ -171,7 +169,6 @@ def _col_to_letter(idx: int) -> str:
     return s
 
 def _build_name_index() -> dict:
-    """Le a coluna B (NOME_ARQUIVO) e devolve {nome_normalizado: numero_da_linha}."""
     index = {}
     try:
         sheets = _get_sheets_service()
@@ -189,7 +186,6 @@ def _build_name_index() -> dict:
     return index
 
 def _upsert_rows_to_sheet(rows, name_index=None):
-    """Insert-or-update por NOME_ARQUIVO: atualiza a linha se o arquivo ja existe."""
     if not rows:
         return None
     if name_index is None:
@@ -1472,8 +1468,7 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
 # â”€â”€ Dedupe da aba Auditoria â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _dedupe_auditoria(sheet_id: str = SHEET_ID) -> dict:
-    """Remove duplicatas mantendo o melhor registro por NOME_ARQUIVO.
-    Grava em aba nova 'Auditoria_LIMPA' (nao altera a original)."""
+    """Remove duplicatas mantendo o melhor registro por NOME_ARQUIVO."""
     sheets = _get_sheets_service()
     result = sheets.spreadsheets().values().get(
         spreadsheetId=sheet_id, range="Auditoria!A1:W"
@@ -1543,7 +1538,12 @@ def _dedupe_auditoria(sheet_id: str = SHEET_ID) -> dict:
     return {"success": True, "originais": len(data), "unicos": len(limpos),
             "removidos": len(data) - len(limpos), "aba": "Auditoria_LIMPA"}
 
+app = FastAPI(title="Obito OCR Service", version="3.1")
 
+class BatchRequest(BaseModel):
+    limit: int = 10
+
+@app.get("/")
 def root():
     return {"status": "running", "service": "Obito OCR Service", "version": "3.1"}
 
