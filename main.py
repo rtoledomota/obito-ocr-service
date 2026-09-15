@@ -1,4 +1,4 @@
-﻿import os, io, re, uuid, hashlib, logging, time, base64
+import os, io, re, uuid, hashlib, logging, time, base64
 import gc
 from datetime import datetime, timedelta
 
@@ -1542,6 +1542,8 @@ app = FastAPI(title="Obito OCR Service", version="3.1")
 
 class BatchRequest(BaseModel):
     limit: int = 10
+    reprocess: bool = False
+    force_reprocess: bool = False
 
 @app.get("/")
 def root():
@@ -1561,7 +1563,8 @@ def batch_stop():
 
 @app.post("/batch/process")
 def batch_process(request: BatchRequest):
-    return _run_batch(limit=request.limit, reprocess=False)
+    reprocess = request.reprocess or request.force_reprocess
+    return _run_batch(limit=request.limit, reprocess=reprocess)
 
 @app.post("/batch/reprocess")
 def batch_reprocess(limit: int = 10, min_score: float = None, files: str = None):
