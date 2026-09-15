@@ -113,6 +113,42 @@ def _get_credentials():
 def _get_drive_service():
     return build("drive", "v3", credentials=_get_credentials())
 
+_DUP_FOLDER_ID = None
+
+def _get_duplicates_folder_id(drive):
+    global _DUP_FOLDER_ID
+    if _DUP_FOLDER_ID:
+        return _DUP_FOLDER_ID
+    q = "mimeType='application/vnd.google-apps.folder' and name='Duplicados' and trashed=false"
+    try:
+        res = drive.files().list(q=q, spaces="drive", fields="files(id)").execute()
+        fl = res.get("files", [])
+        if fl:
+            _DUP_FOLDER_ID = fl[0]["id"]
+        else:
+            body = {"name": "Duplicados", "mimeType": "application/vnd.google-apps.folder",
+                    "parents": [DRIVE_FOLDER_ID]}
+            _DUP_FOLDER_ID = drive.files().create(body=body, fields="id").execute()["id"]
+        logger.info(f"Pasta Duplicados: {_DUP_FOLDER_ID}")
+    except Exception as e:
+        logger.warning(f"Falha ao localizar/criar pasta Duplicados: {e}")
+        _DUP_FOLDER_ID = None
+    return _DUP_FOLDER_ID
+
+def _move_to_duplicates(file_id, file_name):
+    try:
+        drive = _get_drive_service()
+        folder_id = _get_duplicates_folder_id(drive)
+        if not folder_id:
+            logger.warning(f"{file_name}: sem pasta Duplicados, nao movendo")
+            return
+        drive.files().update(fileId=file_id, addParents=folder_id,
+                             removeParents="*", fields="id, parents").execute()
+        logger.info(f"{file_name}: movido para Duplicados")
+    except Exception as e:
+        logger.warning(f"{file_name}: falha ao mover para Duplicados: {e}")
+
+
 def _get_sheets_service():
     return build("sheets", "v4", credentials=_get_credentials())
 
@@ -293,6 +329,9 @@ def _list_all_files_recursive(folder_id, drive):
             pageToken=page_token,
         ).execute()
         for sub in response.get("files", []):
+            if sub.get("name", "") == "Duplicados":
+                logger.info(f"  -> Pulando pasta: {sub.get('name','unknown')}")
+                continue
             logger.info(f"  -> Explorando subpasta: {sub.get('name','unknown')}")
             files.extend(_list_all_files_recursive(sub["id"], drive))
         page_token = response.get("nextPageToken")
@@ -1273,6 +1312,7 @@ def _process_single_image(file_id, file_name, existing):
     h = _sha256_bytes(image_bytes)
     if h in existing["hashes"]:
         logger.info(f"{file_name}: hash ja existente, pulando")
+        _move_to_duplicates(file_id, file_name)
         return {"NOME_ARQUIVO": file_name, "STATUS": "DUPLICADO", "ERROS": ""}
     try:
         raw_text, confidence = _ocr_image_from_bytes(image_bytes, mime_type)
