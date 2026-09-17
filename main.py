@@ -716,6 +716,9 @@ def _clean_causa(value: str) -> str:
     v = re.sub(r'^(?:causa\s+imediata|imediata)\s*[: ]*', '', v, flags=re.IGNORECASE).strip()
     v = re.sub(r'^a\s+(?=[A-Z\u00c0-\u00da])', '', v).strip()
     v = re.sub(r'^(?:parte\s+[iv]+)\s*[: ]*', '', v, flags=re.IGNORECASE).strip()
+    v = re.sub(r'^\(?\d{2,3}\)?\s*\d{4,5}-?\d{4}\s*$', '', v).strip()
+    v = re.sub(r'^99\s*[-.]?\s*ignorado(\s*99\s*[-.]?\s*ignorado)?', '', v, flags=re.IGNORECASE).strip()
+    v = re.sub(r'^hoque\s+septico', 'choque septico', v, flags=re.IGNORECASE).strip()
 
     v = re.sub(r'^\(?a doença ou estado mórbido que causou diretamente a morte\)?[: ]*',
                '', v, flags=re.IGNORECASE)
