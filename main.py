@@ -1364,6 +1364,8 @@ def _process_single_image(file_id, file_name, existing):
                         if not _norm2:
                             _norm2 = _excel_serial_to_date(_val2)
                         _val2 = _norm2 or _val2
+                        if _k == "DATA_OBITO":
+                            _val2 = _forcar_ano_obito(_val2) or _val2
                     elif _k == "HORA_OBITO":
                         _val2 = _normalize_hora(_val2) or _val2
                     elif _k == "UF_OBITO":
