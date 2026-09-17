@@ -42,7 +42,7 @@ SERVICE_ACCOUNT_FILE = _find_service_account()
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/drive",
 ]
 SHEET_ID = os.getenv("SHEET_ID", "1ETms0jR61Idqxbfr0nBdTXJGOHeGWFBomQGIZHPUJTM")
 DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID", "1iwc59VnBEhjuYtW-OoOYg-UKioQ81ZfN")
