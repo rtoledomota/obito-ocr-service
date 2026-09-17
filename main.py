@@ -142,8 +142,11 @@ def _move_to_duplicates(file_id, file_name):
         if not folder_id:
             logger.warning(f"{file_name}: sem pasta Duplicados, nao movendo")
             return
-        drive.files().update(fileId=file_id, addParents=folder_id,
-                             removeParents="*", fields="id, parents").execute()
+        parents = drive.files().get(fileId=file_id, fields="parents").execute().get("parents", [])
+        up = {"addParents": folder_id, "fields": "id, parents"}
+        if parents:
+            up["removeParents"] = ",".join(parents)
+        drive.files().update(fileId=file_id, body=up).execute()
         logger.info(f"{file_name}: movido para Duplicados")
     except Exception as e:
         logger.warning(f"{file_name}: falha ao mover para Duplicados: {e}")
