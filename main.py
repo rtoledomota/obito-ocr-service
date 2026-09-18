@@ -238,9 +238,27 @@ def _upsert_rows_to_sheet(rows, name_index=None):
             if key and key in name_index:
                 rownum = name_index[key]
                 end_col = _col_to_letter(len(row) - 1)
+                _rng = f"Auditoria!A{rownum}:{end_col}{rownum}"
+                _ex = sheets.spreadsheets().values().get(
+                    spreadsheetId=SHEET_ID, range=_rng
+                ).execute().get("values", [])
+                _old = _ex[0] if _ex else []
+                def _score(r):
+                    _crit = 0; _tot = 0
+                    for _ci, _cn in enumerate(HEADER):
+                        _v = r[_ci] if _ci < len(r) else ""
+                        if isinstance(_v, str) and _v.strip():
+                            _tot += 1
+                            if _cn in CRITICAL_FIELDS:
+                                _crit += 1
+                    return (_crit, _tot)
+                _sn, _so = _score(row), _score(_old)
+                if _so > _sn:
+                    logger.info(f"{row[b_idx]}: mantendo dado existente (novo incompleto {_sn} vs existente {_so})")
+                    continue
                 last = sheets.spreadsheets().values().update(
                     spreadsheetId=SHEET_ID,
-                    range=f"Auditoria!A{rownum}:{end_col}{rownum}",
+                    range=_rng,
                     valueInputOption="USER_ENTERED",
                     body={"values": [row]},
                 ).execute()
