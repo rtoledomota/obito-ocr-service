@@ -452,10 +452,48 @@ def _salvage_json_text(txt):
         _out[_m.group(1)] = _m.group(2)
     return _out
 
+def _assess_image_quality(image_bytes):
+    """Mede qualidade objetiva da imagem (sem visao humana): nitidez, resolucao, contraste, ocupacao de tinta."""
+    try:
+        from PIL import Image
+        import io as _io
+        img = Image.open(_io.BytesIO(image_bytes)).convert("L")
+        w, h = img.size
+        res = min(w, h)
+        motivos = []
+        score = 0
+        if res >= 1200: score += 40
+        elif res >= 800: score += 25
+        else: motivos.append("baixa resolucao")
+        try:
+            import numpy as _np
+            import cv2 as _cv
+            arr = _np.array(img)
+            lap = _cv.Laplacian(arr, _cv.CV_64F).var()
+            contraste = arr.std()
+            tinta = float((arr < 128).mean()) * 100
+        except Exception:
+            lap = 0; contraste = 0; tinta = 50
+            motivos.append("sem_cv")
+        if lap >= 100: score += 30
+        elif lap >= 40: score += 15
+        else: motivos.append("borrada")
+        if contraste >= 40: score += 20
+        elif contraste >= 20: score += 10
+        else: motivos.append("contraste baixo")
+        if 5 <= tinta <= 60: score += 10
+        else: motivos.append("tinta anormal")
+        return min(score, 100), ", ".join(motivos) if motivos else "OK"
+    except Exception:
+        return None, "erro_medicao"
+
+
 def _extract_structured_from_image(image_bytes, mime_type="image/jpeg"):
     """Extracao estruturada dos campos da DO via modelo (JSON)."""
     import json as _json
     image_bytes = _preprocess_image(image_bytes)
+    _q, _qm = _assess_image_quality(image_bytes)
+    logger.info(f"[QUALIDADE] score={_q}/100 ({_qm})")
     gemini_key = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
     if not gemini_key:
         return {}
