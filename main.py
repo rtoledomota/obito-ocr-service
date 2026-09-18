@@ -1186,6 +1186,14 @@ def _parse_obito_regex(text: str) -> dict:
         if _raw_data_obito:
             break
     structured["DATA_OBITO"] = _forcar_ano_obito(_normalize_date(_normalize_date_ocr(_raw_data_obito)))
+    if not structured.get("DATA_OBITO"):
+        _m2 = re.search(r'Data\s+(?:do|de)\s+\S*?bito[^\n]*\n\s*([\d\s]{8,})', text, flags=re.IGNORECASE)
+        if _m2:
+            _dig2 = re.sub(r'\D', '', _m2.group(1))
+            if re.fullmatch(r'\d{8}', _dig2):
+                _dd, _mm, _yyyy = _dig2[0:2], _dig2[2:4], _dig2[4:8]
+                if 1 <= int(_mm) <= 12 and 1 <= int(_dd) <= 31:
+                    structured["DATA_OBITO"] = _forcar_ano_obito(f"{_dd}/{_mm}/{_yyyy}")
 
     _raw_hora = _find_block_value(text, [
         "Hora do óbito", "Hora do obito", "Hora",
@@ -1377,6 +1385,8 @@ def _process_single_image(file_id, file_name, existing):
                 _v2 = _jf2.get(_k)
                 if isinstance(_v2, str) and _v2.strip():
                     _val2 = _v2.strip()
+                    if _k == "DATA_OBITO" and structured.get("DATA_OBITO"):
+                        continue
                     if _k in ("NASCIMENTO", "DATA_OBITO"):
                         _norm2 = _normalize_date(_normalize_date_ocr(_val2))
                         if not _norm2:
