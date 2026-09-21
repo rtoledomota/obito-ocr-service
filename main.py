@@ -1706,6 +1706,18 @@ def _dedupe_auditoria(sheet_id: str = SHEET_ID) -> dict:
             return 1
         return 0
 
+    def _prio(r):
+        _st = str(r[i_status]).strip().upper() if len(r) > i_status else ""
+        if _st == "OK":
+            return 4
+        if _st == "VERSO":
+            return 3
+        if _st == "REVISAR":
+            return 2
+        if _st == "REJEITADO":
+            return 1
+        return 0
+
     melhores = {}
     for row in data:
         if not row or not any(str(c).strip() for c in row):
