@@ -56,12 +56,13 @@ VISION_KEYS = [k for k in [
 ] if k]
 
 # HEADER REAL da aba Auditoria (A-W)
+ULTIMA_QUALIDADE_IMAGEM = None
 HEADER = [
     "DATA_PROCESSAMENTO", "NOME_ARQUIVO", "STATUS", "QUALIDADE_SCORE",
     "NOME", "NOME_MAE", "NASCIMENTO", "IDADE_ANOS", "DATA_OBITO", "HORA_OBITO",
     "CIDADE_OBITO", "UF_OBITO", "CAUSA_MORTE", "CAUSA_BASICA", "CID_BASICA",
     "TIPO_OBITO", "DO_NUMERO", "MEDICO_ATESTANTE", "CRM_MEDICO",
-    "PARTE_II", "INTERVALO_DOENCA_MORTE", "ERROS", "HASH_ARQUIVO",
+    "PARTE_II", "INTERVALO_DOENCA_MORTE", "ERROS", "HASH_ARQUIVO", "QUALIDADE_IMAGEM"
 ]
 
 FORM_JUNK = [
@@ -259,15 +260,23 @@ def _upsert_rows_to_sheet(rows, name_index=None):
                 if _is_verso:
                     logger.info(f"{row[b_idx]}: VERSO forca sobrescrita (limpa contaminacao de Ressalva)")
                 elif _old_verso:
-                    # VERSO pegajoso: so sai se a nova linha for uma FRENTE real (NOME + DATA_OBITO)
+                    # VERSO pegajoso: so sai se a nova linha for uma FRENTE real.
+                    # Frente real = (NOME + DATA_OBITO) OU (MEDICO_ATESTANTE + CRM_MEDICO + DO_NUMERO)
                     _n_id = HEADER.index("NOME") if "NOME" in HEADER else -1
                     _d_id = HEADER.index("DATA_OBITO") if "DATA_OBITO" in HEADER else -1
-                    _frente_real = (_n_id >= 0 and len(row) > _n_id and str(row[_n_id]).strip()
-                                    and _d_id >= 0 and len(row) > _d_id and str(row[_d_id]).strip())
+                    _m_id = HEADER.index("MEDICO_ATESTANTE") if "MEDICO_ATESTANTE" in HEADER else -1
+                    _c_id = HEADER.index("CRM_MEDICO") if "CRM_MEDICO" in HEADER else -1
+                    _o_id = HEADER.index("DO_NUMERO") if "DO_NUMERO" in HEADER else -1
+                    _nd = (_n_id >= 0 and len(row) > _n_id and str(row[_n_id]).strip()
+                           and _d_id >= 0 and len(row) > _d_id and str(row[_d_id]).strip())
+                    _med = (_m_id >= 0 and len(row) > _m_id and str(row[_m_id]).strip()
+                            and _c_id >= 0 and len(row) > _c_id and str(row[_c_id]).strip()
+                            and _o_id >= 0 and len(row) > _o_id and str(row[_o_id]).strip())
+                    _frente_real = _nd or _med
                     if _frente_real:
                         logger.info(f"{row[b_idx]}: frente real substitui VERSO anterior")
                     else:
-                        logger.info(f"{row[b_idx]}: mantendo VERSO (nova linha sem NOME+DATA_OBITO reais)")
+                        logger.info(f"{row[b_idx]}: mantendo VERSO (nova linha sem dados reais de frente)")
                         last = True
                         continue
                 elif _so > _sn:
@@ -539,6 +548,8 @@ def _extract_structured_from_image(image_bytes, mime_type="image/jpeg"):
     image_bytes = _preprocess_image(image_bytes)
     _q, _qm = _assess_image_quality(image_bytes)
     logger.info(f"[QUALIDADE] score={_q}/100 ({_qm})")
+    global ULTIMA_QUALIDADE_IMAGEM
+    ULTIMA_QUALIDADE_IMAGEM = _q
     gemini_key = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
     if not gemini_key:
         return {}
@@ -1388,6 +1399,7 @@ def validate_obito(structured: dict) -> None:
     missing = [f for f in CRITICAL_FIELDS if not structured.get(f)]
     score = round((len(CRITICAL_FIELDS) - len(missing)) / len(CRITICAL_FIELDS) * 100, 1)
     structured["QUALIDADE_SCORE"] = str(score)
+    structured["QUALIDADE_IMAGEM"] = str(ULTIMA_QUALIDADE_IMAGEM) if ULTIMA_QUALIDADE_IMAGEM is not None else ""
     # --- Ponto 2: regras de consistencia cruzada ---
     _erros_extra = []
     _nome = structured.get("NOME", "")
