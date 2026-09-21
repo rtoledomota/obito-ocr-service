@@ -253,8 +253,13 @@ def _upsert_rows_to_sheet(rows, name_index=None):
                                 _crit += 1
                     return (_crit, _tot)
                 _sn, _so = _score(row), _score(_old)
-                if _so > _sn:
+                _st_id = HEADER.index("STATUS") if "STATUS" in HEADER else -1
+                _is_verso = _st_id >= 0 and len(row) > _st_id and str(row[_st_id]).strip() == "VERSO"
+                if _is_verso:
+                    logger.info(f"{row[b_idx]}: VERSO forca sobrescrita (limpa contaminacao de Ressalva)")
+                elif _so > _sn:
                     logger.info(f"{row[b_idx]}: mantendo dado existente (novo incompleto {_sn} vs existente {_so})")
+                    last = True
                     continue
                 last = sheets.spreadsheets().values().update(
                     spreadsheetId=SHEET_ID,
@@ -489,18 +494,35 @@ def _assess_image_quality(image_bytes):
 
 
 def _is_verso_obito(raw_text):
-    """Detecta se o texto OCR e o VERSO da DO (instrucoes/legislacao/ressalvas), nao a frente preenchida."""
+    """VERSO = verso da DO sem NENHUM dado preenchido da frente.
+    Principio de seguranca: em duvida, NAO e verso (evita perder dados bons)."""
     if not raw_text:
         return False
-    t = raw_text.lower()
-    has_def = "defini" in t
-    has_leg = "legisla" in t
-    has_cap = ("capitulo ix" in t) or ("capitulo ix" in t) or ("art. 77" in t)
-    if has_def and (has_leg or has_cap):
-        return True
-    if has_def and "ressalva" in t:
-        return True
-    return False
+    tl = raw_text.lower()
+    verso_ok = ("defini" in tl and ("legisla" in tl or "capitulo ix" in tl or "art. 77" in tl))
+    if not verso_ok:
+        return False
+    import re as _re
+    # Qualquer sinal de dado REAL da frente -> NAO e verso
+    if _re.search(r"\d{1,2}[/\s.\-]\d{1,2}[/\s.\-]\d{2,4}", raw_text):
+        return False
+    if _re.search(r"crm[^\d]{0,12}\d{3,}", tl):
+        return False
+    if _re.search(r"(?:dr|dra)\.", tl):
+        return False
+    if _re.search(r"[a-d]\)\s*[a-záàâãéêíóôõú]", tl):
+        return False
+    if _re.search(r"do\s*(?:n[ºo]|n[úu]mero|[.#])[:]?\s*\d{4,}", tl) or        _re.search(r"d\.o\.[^\d]{0,15}\d{6,}", tl):
+        return False
+    if "<fields_json>" in tl:
+        try:
+            import json as _j
+            _jf = _j.loads(raw_text.split("<FIELDS_JSON>", 1)[1].strip())
+            if any(isinstance(v, str) and v.strip() for v in _jf.values()):
+                return False
+        except Exception:
+            return False
+    return True
 
 
 def _extract_structured_from_image(image_bytes, mime_type="image/jpeg"):
