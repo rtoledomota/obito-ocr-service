@@ -514,14 +514,9 @@ def _is_verso_obito(raw_text):
         return False
     if _re.search(r"do\s*(?:n[ºo]|n[úu]mero|[.#])[:]?\s*\d{4,}", tl) or        _re.search(r"d\.o\.[^\d]{0,15}\d{6,}", tl):
         return False
-    if "<fields_json>" in tl:
-        try:
-            import json as _j
-            _jf = _j.loads(raw_text.split("<FIELDS_JSON>", 1)[1].strip())
-            if any(isinstance(v, str) and v.strip() for v in _jf.values()):
-                return False
-        except Exception:
-            return False
+    # Decisao de VERSO 100% pelo texto bruto (antes do JSON).
+    # O JSON e gerado pelo modelo a partir do proprio texto e sempre herda a Ressalva,
+    # entao nao pode influenciar a classificacao verso vs frente.
     return True
 
 
