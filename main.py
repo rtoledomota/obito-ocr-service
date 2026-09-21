@@ -255,8 +255,21 @@ def _upsert_rows_to_sheet(rows, name_index=None):
                 _sn, _so = _score(row), _score(_old)
                 _st_id = HEADER.index("STATUS") if "STATUS" in HEADER else -1
                 _is_verso = _st_id >= 0 and len(row) > _st_id and str(row[_st_id]).strip() == "VERSO"
+                _old_verso = _st_id >= 0 and len(_old) > _st_id and str(_old[_st_id]).strip() == "VERSO"
                 if _is_verso:
                     logger.info(f"{row[b_idx]}: VERSO forca sobrescrita (limpa contaminacao de Ressalva)")
+                elif _old_verso:
+                    # VERSO pegajoso: so sai se a nova linha for uma FRENTE real (NOME + DATA_OBITO)
+                    _n_id = HEADER.index("NOME") if "NOME" in HEADER else -1
+                    _d_id = HEADER.index("DATA_OBITO") if "DATA_OBITO" in HEADER else -1
+                    _frente_real = (_n_id >= 0 and len(row) > _n_id and str(row[_n_id]).strip()
+                                    and _d_id >= 0 and len(row) > _d_id and str(row[_d_id]).strip())
+                    if _frente_real:
+                        logger.info(f"{row[b_idx]}: frente real substitui VERSO anterior")
+                    else:
+                        logger.info(f"{row[b_idx]}: mantendo VERSO (nova linha sem NOME+DATA_OBITO reais)")
+                        last = True
+                        continue
                 elif _so > _sn:
                     logger.info(f"{row[b_idx]}: mantendo dado existente (novo incompleto {_sn} vs existente {_so})")
                     last = True
@@ -1681,13 +1694,25 @@ def _dedupe_auditoria(sheet_id: str = SHEET_ID) -> dict:
     def _eh_ok(row):
         return len(row) > i_status and str(row[i_status]).strip().upper() == "OK"
 
+    def _prio(r):
+        _st = str(r[i_status]).strip().upper() if len(r) > i_status else ""
+        if _st == "OK":
+            return 4
+        if _st == "VERSO":
+            return 3
+        if _st == "REVISAR":
+            return 2
+        if _st == "REJEITADO":
+            return 1
+        return 0
+
     melhores = {}
     for row in data:
         if not row or not any(str(c).strip() for c in row):
             continue
         k = _key(row)
         atual = melhores.get(k)
-        if atual is None or (_eh_ok(row), _score(row)) > (_eh_ok(atual), _score(atual)):
+        if atual is None or (_prio(row), _score(row)) > (_prio(atual), _score(atual)):
             melhores[k] = row
     limpos = list(melhores.values())
 
