@@ -488,6 +488,21 @@ def _assess_image_quality(image_bytes):
         return None, "erro_medicao"
 
 
+def _is_verso_obito(raw_text):
+    """Detecta se o texto OCR e o VERSO da DO (instrucoes/legislacao/ressalvas), nao a frente preenchida."""
+    if not raw_text:
+        return False
+    t = raw_text.lower()
+    has_def = "defini" in t
+    has_leg = "legisla" in t
+    has_cap = ("capitulo ix" in t) or ("capitulo ix" in t) or ("art. 77" in t)
+    if has_def and (has_leg or has_cap):
+        return True
+    if has_def and "ressalva" in t:
+        return True
+    return False
+
+
 def _extract_structured_from_image(image_bytes, mime_type="image/jpeg"):
     """Extracao estruturada dos campos da DO via modelo (JSON)."""
     import json as _json
@@ -1392,6 +1407,13 @@ def _process_single_image(file_id, file_name, existing):
             logger.info(f"[OCR RESPONSE] {file_name}: {raw_text[:300]}")
     except Exception as e:
         return {"NOME_ARQUIVO": file_name, "STATUS": "ERRO_OCR", "ERROS": str(e)}
+
+    # --- Deteccao de VERSO (pagina de tras da DO) ---
+    if _is_verso_obito(raw_text):
+        logger.warning(f"{file_name}: verso da DO detectado, STATUS=VERSO (sem campos da frente)")
+        return {"NOME_ARQUIVO": file_name, "STATUS": "VERSO",
+                "ERROS": "Imagem e o verso da DO (instrucoes/legislacao/ressalva)"}
+
     try:
         del image_bytes
     except Exception:
