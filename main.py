@@ -1750,7 +1750,7 @@ def _dedupe_auditoria(sheet_id: str = SHEET_ID) -> dict:
             continue
         k = _key(row)
         atual = melhores.get(k)
-        if atual is None or (_complet(row), _tem_qimg(row), _tem_hash(row), _prio(row), _score(row)) > (_complet(atual), _tem_qimg(atual), _tem_hash(atual), _prio(atual), _score(atual)):
+        if atual is None or (_complet(row), _prio(row), _tem_qimg(row), _tem_hash(row), _score(row)) > (_complet(atual), _prio(atual), _tem_qimg(atual), _tem_hash(atual), _score(atual)):
             melhores[k] = row
     limpos = list(melhores.values())
 
