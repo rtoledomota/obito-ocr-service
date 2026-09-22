@@ -6,7 +6,7 @@ import requests
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
-from fastapi import FastAPI
+from fastapi import FastAPI, Header
 from pydantic import BaseModel
 
 logger = logging.getLogger("uvicorn")
@@ -1964,3 +1964,274 @@ def admin_dedupe():
 @app.get("/app")
 def app_page():
     return HTMLResponse(_HTML_APP)
+
+# ── Patch 25: Dashboard dinamico ───────────────────────────────
+import time as _time
+
+_API_KEY = os.getenv("OCR_API_KEY", "scs2026")
+_DRIVE_LINKS_CACHE = {"ts": 0.0, "map": {}}
+
+def _check_auth(authorization: str = "") -> bool:
+    token = ""
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+    return bool(token) and token == _API_KEY
+
+def _get_drive_link_map() -> dict:
+    now = _time.time()
+    if now - _DRIVE_LINKS_CACHE["ts"] < 300 and _DRIVE_LINKS_CACHE["map"]:
+        return _DRIVE_LINKS_CACHE["map"]
+    mapa = {}
+    try:
+        drive = _get_drive_service()
+        for f in _list_all_files_recursive(DRIVE_FOLDER_ID, drive):
+            mapa[f["name"]] = "https://drive.google.com/file/d/" + f["id"] + "/view"
+        _DRIVE_LINKS_CACHE.update({"ts": now, "map": mapa})
+    except Exception as e:
+        logger.warning("Falha ao resolver links do Drive: %s", e)
+    return mapa
+
+_CAMPOS_CRITICOS = ["NOME", "NOME_MAE", "NASCIMENTO", "DATA_OBITO", "CIDADE_OBITO", "UF_OBITO", "CAUSA_MORTE"]
+
+def _motivo_revisao(row, header):
+    ausentes = []
+    for c in _CAMPOS_CRITICOS:
+        try:
+            i = header.index(c)
+        except ValueError:
+            continue
+        val = str(row[i]).strip() if len(row) > i else ""
+        if not val:
+            ausentes.append(c)
+    if ausentes:
+        return "Campo critico ausente: " + ", ".join(ausentes)
+    return "Revisao manual"
+
+@app.get("/api/auditoria")
+def api_auditoria(authorization: str = Header(default="")):
+    if not _check_auth(authorization):
+        return {"success": False, "message": "Nao autorizado"}
+    try:
+        sheets = _get_sheets_service()
+        result = sheets.spreadsheets().values().get(
+            spreadsheetId=SHEET_ID, range="Auditoria_LIMPA!A1:Z"
+        ).execute()
+        rows = result.get("values", [])
+    except Exception as e:
+        logger.error("Erro ao ler Auditoria_LIMPA: %s", e, exc_info=True)
+        return {"success": False, "message": "Erro ao ler planilha"}
+    if not rows:
+        return {"success": False, "message": "Auditoria_LIMPA vazia"}
+    header = rows[0]
+
+    def v(row, col):
+        try:
+            i = header.index(col)
+        except ValueError:
+            return ""
+        return str(row[i]).strip() if len(row) > i else ""
+
+    links = _get_drive_link_map()
+    contagem = {"OK": 0, "REVISAR": 0, "VERSO": 0, "REJEITADO": 0}
+    registros = []
+    for row in rows[1:]:
+        if not row or not any(str(c).strip() for c in row):
+            continue
+        nome = v(row, "NOME_ARQUIVO")
+        status = (v(row, "STATUS") or "SEM_STATUS").upper()
+        contagem[status] = contagem.get(status, 0) + 1
+        reg = {
+            "arquivo": nome,
+            "status": status,
+            "nome": v(row, "NOME"),
+            "data_obito": v(row, "DATA_OBITO"),
+            "nascimento": v(row, "NASCIMENTO"),
+            "medico": v(row, "MEDICO_ATESTANTE"),
+            "crm": v(row, "CRM_MEDICO"),
+            "do": v(row, "DO_NUMERO"),
+            "causa": v(row, "CAUSA_MORTE"),
+            "qimg": v(row, "QUALIDADE_IMAGEM"),
+            "link": links.get(nome, ""),
+        }
+        if status == "REVISAR":
+            reg["motivo"] = _motivo_revisao(row, header)
+        registros.append(reg)
+
+    return {
+        "success": True,
+        "atualizado_em": _time.strftime("%d/%m/%Y %H:%M:%S"),
+        "total": len(registros),
+        "contagem": contagem,
+        "registros": registros,
+    }
+
+_DASH_HTML = """<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dashboard Auditoria DO - OCR (dinamico)</title>
+<style>
+  :root{--azul:#0e7490;--azul2:#164e63;--ok:#16a34a;--ambar:#d97706;--cinza:#64748b;--borda:#e2e8f0;--fundo:#f1f5f9}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:Segoe UI,system-ui,sans-serif;background:var(--fundo);color:#0f172a;padding:24px;line-height:1.5}
+  .wrap{max-width:1100px;margin:0 auto}
+  h1{font-size:1.4rem;color:var(--azul2)}
+  .sub{color:var(--cinza);font-size:.85rem;margin-bottom:18px}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:18px}
+  .kpi{background:#fff;border:1px solid var(--borda);border-radius:12px;padding:18px;box-shadow:0 1px 3px rgba(0,0,0,.05)}
+  .kpi .num{font-size:1.9rem;font-weight:700}
+  .kpi .lbl{font-size:.8rem;color:var(--cinza);margin-top:4px}
+  .kpi.ok .num{color:var(--ok)} .kpi.rev .num{color:var(--ambar)} .kpi.ver .num{color:var(--cinza)}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px}
+  .card{background:#fff;border:1px solid var(--borda);border-radius:12px;padding:16px}
+  .card h2{font-size:.95rem;color:var(--azul2);margin-bottom:10px}
+  .bar{height:22px;border-radius:6px;margin:6px 0;display:flex;align-items:center;color:#fff;font-size:.75rem;padding:0 8px;font-weight:600}
+  .motivo{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px dashed var(--borda);font-size:.83rem}
+  .motivo b{color:var(--ambar)}
+  table{width:100%;border-collapse:collapse;font-size:.82rem}
+  th,td{padding:8px 10px;border:1px solid var(--borda);text-align:left;vertical-align:top}
+  th{background:#f8fafc;color:var(--azul2)}
+  tr:nth-child(even){background:#f8fafc}
+  a.ver{display:inline-block;padding:4px 10px;border-radius:6px;background:var(--azul);color:#fff;text-decoration:none;font-size:.75rem;font-weight:600}
+  a.ver:hover{background:var(--azul2)}
+  .chip{display:inline-block;margin:4px;padding:6px 12px;border:1px solid var(--borda);border-radius:999px;background:#fff;font-size:.78rem;cursor:pointer;text-decoration:none;color:var(--azul2)}
+  .chip:hover{background:#f0fdfa}
+  .status{font-size:.8rem;color:var(--ambar);margin-top:8px;min-height:1.2em}
+  .status.ok{color:var(--ok)}
+  input[type=password]{padding:8px 10px;border:1px solid var(--borda);border-radius:8px;font-size:.9rem;width:260px}
+  button{padding:8px 16px;border:none;border-radius:8px;font-size:.85rem;font-weight:600;cursor:pointer;background:var(--azul);color:#fff;margin-left:6px}
+  footer{margin-top:18px;font-size:.75rem;color:var(--cinza)}
+  @media(max-width:760px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Dashboard Auditoria de Declaracoes de Obito</h1>
+  <div class="sub">Consolidado em tempo real da aba Auditoria_LIMPA - Sao Caetano do Sul/SP</div>
+  <div style="margin-bottom:14px">
+    <input type="password" id="key" placeholder="Chave da API..." autocomplete="off">
+    <button onclick="entrar()">Carregar</button>
+    <button onclick="atualizar()">Atualizar</button>
+    <span id="upd" class="status" style="display:inline;margin-left:10px"></span>
+  </div>
+
+  <div class="kpis" id="kpis"></div>
+
+  <div class="grid">
+    <div class="card"><h2>Distribuicao por status</h2><div id="barras"></div></div>
+    <div class="card"><h2>Motivos de revisao (mais frequentes)</h2><div id="motivos"></div></div>
+  </div>
+
+  <div class="card" style="margin-bottom:18px">
+    <h2>Fila de revisao manual</h2>
+    <input type="text" id="filtro" placeholder="Filtrar por arquivo/nome..." style="padding:8px;border:1px solid var(--borda);border-radius:8px;width:100%;margin-bottom:10px;font-size:.85rem" oninput="renderTabela()">
+    <div style="overflow-x:auto"><table id="tab" style="min-width:780px"></table></div>
+  </div>
+
+  <div class="card">
+    <h2>Versos identificados (fora da fila)</h2>
+    <div id="versos"></div>
+  </div>
+
+  <footer id="rodape"></footer>
+</div>
+
+<script>
+var CHAVE = "";
+var DADOS = null;
+
+window.addEventListener("load", function(){
+  CHAVE = sessionStorage.getItem("ocr_key") || "";
+  if (CHAVE) { document.getElementById("key").value = CHAVE; atualizar(); }
+});
+
+function entrar(){
+  CHAVE = document.getElementById("key").value.trim();
+  if (!CHAVE) { upd("Informe a chave."); return; }
+  sessionStorage.setItem("ocr_key", CHAVE);
+  atualizar();
+}
+
+function upd(msg, ok){ var el = document.getElementById("upd"); el.textContent = msg; el.className = "status" + (ok ? " ok" : ""); }
+
+async function atualizar(){
+  upd("Carregando dados...");
+  try {
+    var r = await fetch("/api/auditoria", { headers: { "Authorization": "Bearer " + CHAVE } });
+    var d = await r.json();
+  } catch(e) { upd("Falha de rede ao consultar a API."); return; }
+  if (!d || d.success === false) { upd((d && d.message) || "Nao autorizado. Confira a chave."); return; }
+  DADOS = d;
+  renderKpis(d); renderBarras(d); renderMotivos(d); renderTabela(); renderVersos(d);
+  upd("Atualizado em " + d.atualizado_em + " - " + d.total + " registros", true);
+  document.getElementById("rodape").textContent = "Fonte: Auditoria_LIMPA via API do proprio servico. Clique em qualquer imagem para abrir no Google Drive. Chave armazenada apenas no seu navegador.";
+}
+
+function renderKpis(d){
+  var c = d.contagem;
+  var el = document.getElementById("kpis");
+  el.innerHTML = [
+    kpi("total", d.total, "Registros unicos"),
+    kpi("ok", c.OK || 0, "OK (frentes processadas)"),
+    kpi("rev", c.REVISAR || 0, "REVISAR (fila manual)"),
+    kpi("ver", c.VERSO || 0, "VERSO (fora da fila)")
+  ].join("");
+}
+function kpi(tipo, num, lbl){
+  var cls = tipo === "ok" ? "ok" : (tipo === "rev" ? "rev" : (tipo === "ver" ? "ver" : ""));
+  return '<div class="kpi ' + cls + '"><div class="num">' + num + '</div><div class="lbl">' + lbl + '</div></div>';
+}
+
+function renderBarras(d){
+  var c = d.contagem; var total = d.total || 1;
+  var el = document.getElementById("barras"); el.innerHTML = "";
+  [["OK", c.OK || 0, "#16a34a"], ["REVISAR", c.REVISAR || 0, "#d97706"], ["VERSO", c.VERSO || 0, "#64748b"], ["REJEITADO", c.REJEITADO || 0, "#dc2626"]].forEach(function(x){
+    var pct = Math.round(x[1] / total * 100);
+    var div = document.createElement("div");
+    div.className = "bar";
+    div.style.width = Math.max((pct || 2), 2) + "%";
+    div.style.background = x[2]; div.style.minWidth = "80px";
+    div.textContent = x[0] + ": " + x[1] + " (" + pct + "%)";
+    el.appendChild(div);
+  });
+}
+
+function renderMotivos(d){
+  var map = {};
+  (d.registros || []).forEach(function(r){ if (r.status === "REVISAR" && r.motivo) map[r.motivo] = (map[r.motivo] || 0) + 1; });
+  var arr = Object.keys(map).map(function(k){ return { m: k, n: map[k] }; }).sort(function(a,b){ return b.n - a.n; });
+  var el = document.getElementById("motivos");
+  if (!arr.length) { el.innerHTML = '<div style="color:var(--cinza);font-size:.83rem">Nenhum registro em revisao.</div>'; return; }
+  el.innerHTML = arr.map(function(x){ return '<div class="motivo"><span>' + x.m + '</span><b>' + x.n + '</b></div>'; }).join("");
+}
+
+function renderTabela(){
+  var f = (document.getElementById("filtro").value || "").toLowerCase();
+  var rows = (DADOS ? DADOS.registros : []).filter(function(r){ return r.status === "REVISAR"; })
+    .filter(function(r){ return !f || (r.arquivo + " " + r.nome + " " + (r.motivo || "")).toLowerCase().indexOf(f) >= 0; });
+  var t = document.getElementById("tab");
+  var th = "<thead><tr><th>Arquivo</th><th>Motivo</th><th>Nome</th><th>Data obito</th><th>Medico / CRM</th><th>DO</th><th>Imagem</th></tr></thead>";
+  var body = rows.map(function(r){
+    var link = r.link ? '<a class="ver" href="' + r.link + '" target="_blank" rel="noopener">Ver imagem</a>' : '<span style="color:var(--cinza)">sem arquivo</span>';
+    return "<tr><td><b>" + r.arquivo + "</b></td><td>" + (r.motivo || "—") + "</td><td>" + (r.nome || "") + "</td><td>" + (r.data_obito || "") + "</td><td>" + (r.medico || "") + (r.crm ? " / " + r.crm : "") + "</td><td>" + (r.do || "") + "</td><td>" + link + "</td></tr>";
+  }).join("");
+  t.innerHTML = th + "<tbody>" + (body || '<tr><td colspan="7" style="color:var(--cinza)">Nenhum registro em revisao.</td></tr>') + "</tbody>";
+}
+
+function renderVersos(d){
+  var rows = (d.registros || []).filter(function(r){ return r.status === "VERSO"; });
+  var el = document.getElementById("versos");
+  if (!rows.length) { el.innerHTML = '<span style="color:var(--cinza);font-size:.83rem">Nenhum verso identificado.</span>'; return; }
+  el.innerHTML = rows.map(function(r){
+    var inner = r.arquivo;
+    return r.link ? '<a class="chip" href="' + r.link + '" target="_blank" rel="noopener">' + inner + "</a>" : '<span class="chip">' + inner + "</span>";
+  }).join("");
+}
+</script>
+</body>
+</html>"""
+
+@app.get("/dashboard")
+def dashboard_page():
+    return HTMLResponse(_DASH_HTML)
