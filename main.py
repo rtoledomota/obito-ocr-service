@@ -2086,7 +2086,7 @@ _DASH_HTML = """<!DOCTYPE html>
   .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px}
   .card{background:#fff;border:1px solid var(--borda);border-radius:12px;padding:16px}
   .card h2{font-size:.95rem;color:var(--azul2);margin-bottom:10px}
-  .bar{height:22px;border-radius:6px;margin:6px 0;display:flex;align-items:center;color:#fff;font-size:.75rem;padding:0 8px;font-weight:600}
+  .bar-row{display:flex;align-items:center;gap:10px;margin:8px 0}.bar-label{width:90px;font-size:.8rem;font-weight:600;color:var(--azul2)}.bar-track{flex:1;height:20px;background:#e2e8f0;border-radius:6px;overflow:hidden}.bar-fill{height:100%;border-radius:6px;min-width:2px}.bar-val{width:110px;font-size:.8rem;color:var(--cinza);text-align:right}
   .motivo{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px dashed var(--borda);font-size:.83rem}
   .motivo b{color:var(--ambar)}
   table{width:100%;border-collapse:collapse;font-size:.82rem}
@@ -2186,14 +2186,24 @@ function kpi(tipo, num, lbl){
 function renderBarras(d){
   var c = d.contagem; var total = d.total || 1;
   var el = document.getElementById("barras"); el.innerHTML = "";
-  [["OK", c.OK || 0, "#16a34a"], ["REVISAR", c.REVISAR || 0, "#d97706"], ["VERSO", c.VERSO || 0, "#64748b"], ["REJEITADO", c.REJEITADO || 0, "#dc2626"]].forEach(function(x){
+  var itens = [["OK", c.OK || 0, "#16a34a"], ["REVISAR", c.REVISAR || 0, "#d97706"], ["VERSO", c.VERSO || 0, "#64748b"], ["REJEITADO", c.REJEITADO || 0, "#dc2626"]];
+  itens.forEach(function(x){
     var pct = Math.round(x[1] / total * 100);
-    var div = document.createElement("div");
-    div.className = "bar";
-    div.style.width = Math.max((pct || 2), 2) + "%";
-    div.style.background = x[2]; div.style.minWidth = "80px";
-    div.textContent = x[0] + ": " + x[1] + " (" + pct + "%)";
-    el.appendChild(div);
+    var row = document.createElement("div");
+    row.className = "bar-row";
+    var lbl = document.createElement("span");
+    lbl.className = "bar-label"; lbl.textContent = x[0];
+    var track = document.createElement("div");
+    track.className = "bar-track";
+    var fill = document.createElement("div");
+    fill.className = "bar-fill";
+    fill.style.width = (pct || 0) + "%";
+    fill.style.background = x[2];
+    track.appendChild(fill);
+    var val = document.createElement("span");
+    val.className = "bar-val"; val.textContent = x[1] + " (" + pct + "%)";
+    row.appendChild(lbl); row.appendChild(track); row.appendChild(val);
+    el.appendChild(row);
   });
 }
 
