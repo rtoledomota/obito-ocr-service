@@ -1668,12 +1668,19 @@ def _dedupe_auditoria(sheet_id: str = SHEET_ID) -> dict:
     """Remove duplicatas mantendo o melhor registro por NOME_ARQUIVO."""
     sheets = _get_sheets_service()
     result = sheets.spreadsheets().values().get(
-        spreadsheetId=sheet_id, range="Auditoria!A1:W"
+        spreadsheetId=sheet_id, range="Auditoria!A1:Z"
     ).execute()
     rows = result.get("values", [])
     if not rows:
         return {"success": False, "message": "Aba Auditoria vazia"}
     header = rows[0]
+    if "QUALIDADE_IMAGEM" not in header:
+        sheets.spreadsheets().values().update(
+            spreadsheetId=sheet_id, range="Auditoria!A1",
+            valueInputOption="USER_ENTERED",
+            body={"values": [list(HEADER)]},
+        ).execute()
+        header = list(HEADER)
     data = rows[1:]
 
     def _idx(col, padrao):
