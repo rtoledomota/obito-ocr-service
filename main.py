@@ -1713,17 +1713,24 @@ def _dedupe_auditoria(sheet_id: str = SHEET_ID) -> dict:
     def _eh_ok(row):
         return len(row) > i_status and str(row[i_status]).strip().upper() == "OK"
 
-    def _prio(r):
-        _st = str(r[i_status]).strip().upper() if len(r) > i_status else ""
-        if _st == "OK":
-            return 4
-        if _st == "VERSO":
-            return 3
-        if _st == "REVISAR":
-            return 2
-        if _st == "REJEITADO":
-            return 1
-        return 0
+    def _complet(r):
+        _cr = ["NOME", "DATA_OBITO", "NASCIMENTO"]
+        _n = 0
+        for _c in _cr:
+            _j = _idx(_c, -1)
+            if _j >= 0 and len(r) > _j and str(r[_j]).strip():
+                _n += 1
+        return _n
+
+    def _tem_qimg(r):
+        _j = _idx("QUALIDADE_IMAGEM", -1)
+        return 1 if (_j >= 0 and len(r) > _j and str(r[_j]).strip()) else 0
+
+    def _tem_hash(r):
+        _j = _idx("HASH_ARQUIVO", -1)
+        return 1 if (_j >= 0 and len(r) > _j and str(r[_j]).strip()) else 0
+
+
 
     def _prio(r):
         _st = str(r[i_status]).strip().upper() if len(r) > i_status else ""
@@ -1743,7 +1750,7 @@ def _dedupe_auditoria(sheet_id: str = SHEET_ID) -> dict:
             continue
         k = _key(row)
         atual = melhores.get(k)
-        if atual is None or (_prio(row), _score(row)) > (_prio(atual), _score(atual)):
+        if atual is None or (_complet(row), _tem_qimg(row), _tem_hash(row), _prio(row), _score(row)) > (_complet(atual), _tem_qimg(atual), _tem_hash(atual), _prio(atual), _score(atual)):
             melhores[k] = row
     limpos = list(melhores.values())
 
