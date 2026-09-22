@@ -1773,6 +1773,152 @@ def _dedupe_auditoria(sheet_id: str = SHEET_ID) -> dict:
     return {"success": True, "originais": len(data), "unicos": len(limpos),
             "removidos": len(data) - len(limpos), "aba": "Auditoria_LIMPA"}
 
+from fastapi.responses import HTMLResponse
+
+_HTML_APP = r'''<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OCR DO — Processamento</title>
+<style>
+  :root{--azul:#0e7490;--azul2:#164e63;--teal:#14b8a6;--ok:#16a34a;--ambar:#d97706;--cinza:#64748b;--borda:#e2e8f0;--fundo:#f1f5f9}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:Segoe UI,system-ui,sans-serif;background:var(--fundo);color:#0f172a;padding:24px;line-height:1.5}
+  .wrap{max-width:960px;margin:0 auto}
+  h1{font-size:1.4rem;color:var(--azul2)}
+  .sub{color:var(--cinza);font-size:.85rem;margin-bottom:18px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-bottom:18px}
+  .card{background:#fff;border:1px solid var(--borda);border-radius:12px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.05)}
+  .card h2{font-size:.95rem;color:var(--azul2);margin-bottom:10px;display:flex;align-items:center;gap:8px}
+  label{display:block;font-size:.8rem;color:var(--cinza);margin:8px 0 4px}
+  input,select{width:100%;padding:8px 10px;border:1px solid var(--borda);border-radius:8px;font-size:.9rem}
+  input[type=checkbox]{width:auto;margin-right:6px}
+  .row{display:flex;align-items:center;gap:8px}
+  button{margin-top:12px;width:100%;padding:10px;border:none;border-radius:8px;font-size:.9rem;font-weight:600;cursor:pointer;background:var(--azul);color:#fff}
+  button:disabled{opacity:.55;cursor:not-allowed}
+  button.ambar{background:var(--ambar)}
+  button.verde{background:var(--ok)}
+  button.cinza{background:var(--cinza)}
+  pre{background:#0f172a;color:#a5f3fc;border-radius:8px;padding:12px;font-size:.75rem;overflow:auto;max-height:280px;margin-top:10px;white-space:pre-wrap;word-break:break-all}
+  .status{font-size:.8rem;color:var(--ambar);margin-top:8px;min-height:1.2em}
+  .status.ok{color:var(--ok)}
+  .links a{display:block;padding:8px;border:1px solid var(--borda);border-radius:8px;text-decoration:none;color:var(--azul2);font-size:.85rem;margin-bottom:6px}
+  .links a:hover{background:#f0fdfa}
+  footer{margin-top:20px;font-size:.75rem;color:var(--cinza)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>OCR de Declarações de Óbito</h1>
+  <div class="sub">Processamento em lote · São Caetano do Sul/SP · 22/09/2026</div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>&#128272; Sessão</h2>
+      <label>Chave da API (Bearer)</label>
+      <div class="row">
+        <input type="password" id="key" placeholder="Digite a chave..." autocomplete="off">
+        <button style="width:auto;margin-top:0" onclick="salvaChave()">Salvar</button>
+      </div>
+      <div id="keyStatus" class="status"></div>
+    </div>
+
+    <div class="card">
+      <h2>&#9889; Processamento em lote</h2>
+      <label>Quantidade de arquivos (limite)</label>
+      <input type="number" id="limit" value="10" min="1">
+      <label class="row"><input type="checkbox" id="force"> Forçar reprocessamento (ignora já processados)</label>
+      <button id="btnBatch" onclick="processaBatch()">Iniciar processamento</button>
+      <div id="batchStatus" class="status"></div>
+      <pre id="batchRes" style="display:none"></pre>
+    </div>
+
+    <div class="card">
+      <h2>&#128196; Arquivos específicos</h2>
+      <label>Nomes separados por vírgula</label>
+      <input type="text" id="files" placeholder="ex.: img53 (1).jpg,img116.jpg">
+      <button class="ambar" onclick="reprocessaArquivos()">Reprocessar arquivos</button>
+      <div id="filesStatus" class="status"></div>
+      <pre id="filesRes" style="display:none"></pre>
+    </div>
+
+    <div class="card">
+      <h2>&#128269; Dedupe</h2>
+      <p style="font-size:.8rem;color:var(--cinza)">Consolida duplicatas da aba Auditoria e grava a Auditoria_LIMPA.</p>
+      <button class="verde" onclick="dedupe()">Gerar Auditoria_LIMPA</button>
+      <div id="dedupeStatus" class="status"></div>
+      <pre id="dedupeRes" style="display:none"></pre>
+    </div>
+
+    <div class="card links">
+      <h2>&#128279; Links rápidos</h2>
+      <a href="https://skip-artifacts-snapshots.application.production.adapta.tools/user_346erRS8bnjxCWFUtT0nbfMBoHk/pzit7njtpryt3ukvjewd3pg3ca/revisions/d4b19ccc-c507-4d48-bf50-a751ffb66a5a/index.html" target="_blank" rel="noopener">Abrir dashboard de resultados</a>
+      <a href="https://docs.google.com/spreadsheets/d/1ETms0jR61Idqxbfr0nBdTXJGOHeGWFBomQGIZHPUJTM" target="_blank" rel="noopener">Abrir planilha Auditoria_LIMPA</a>
+    </div>
+  </div>
+
+  <footer>Chave armazenada apenas no seu navegador (sessionStorage). Imagens entram pela pasta do Google Drive. Qualidade da imagem (QUALIDADE_IMAGEM) disponível para arquivos novos.</footer>
+</div>
+
+<script>
+  var KEY = "";
+  window.addEventListener("load", function(){ KEY = sessionStorage.getItem("ocr_key") || ""; if(KEY){ document.getElementById("key").value = KEY; document.getElementById("keyStatus").textContent = "Chave ja salva neste navegador."; document.getElementById("keyStatus").classList.add("ok");} });
+  function salvaChave(){ KEY = document.getElementById("key").value.trim(); if(!KEY){ document.getElementById("keyStatus").textContent = "Informe a chave."; return;} sessionStorage.setItem("ocr_key", KEY); document.getElementById("keyStatus").textContent = "Chave salva nesta sessao."; document.getElementById("keyStatus").classList.add("ok"); }
+  function confereChave(){ if(!KEY){ KEY = document.getElementById("key").value.trim(); if(!KEY){ alert("Informe e salve a chave primeiro."); return false;} sessionStorage.setItem("ocr_key", KEY);} return true; }
+  function mostra(el, data){ el.style.display = "block"; el.textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2); }
+  async function posta(url, body){ var r = await fetch(url, { method:"POST", headers:{ "Authorization":"Bearer "+KEY, "Content-Type":"application/json" }, body: body ? JSON.stringify(body) : "{}" }); var t = await r.text(); try { return JSON.parse(t); } catch(e){ return t; } }
+  async function poll(parado, statusEl){
+    var ini = Date.now();
+    return new Promise(function(res){
+      var iv = setInterval(async function(){
+        statusEl.textContent = "Consultando status...";
+        try {
+          var r = await fetch("/batch/status");
+          var d = await r.json();
+          if (d && typeof d === "object") {
+            var proc = d.processed || d.total_processados || d.processados || "";
+            var tot = d.total || d.total_arquivos || "";
+            var fase = d.status || d.etapa || d.message || "";
+            statusEl.textContent = "Processando " + proc + (tot ? " de " + tot : "") + (fase ? " — " + fase : "") + "...";
+          }
+        } catch(e) {}
+        if (parado() || Date.now() - ini > 600000) { clearInterval(iv); res(); }
+      }, 2000);
+    });
+  }
+  async function processaBatch(){
+    if(!confereChave()) return;
+    var btn = document.getElementById("btnBatch"); btn.disabled = true;
+    var lim = parseInt(document.getElementById("limit").value) || 10;
+    var force = document.getElementById("force").checked;
+    var st = document.getElementById("batchStatus"); var pre = document.getElementById("batchRes");
+    st.textContent = "Iniciando lote de " + lim + " arquivo(s)..."; st.classList.remove("ok"); pre.style.display = "none";
+    var done = false;
+    var p = posta("/batch/process", { limit: lim, force_reprocess: force }).then(function(d){ done = true; return d; });
+    await poll(function(){ return done; }, st);
+    var d = await p;
+    st.textContent = "Lote concluido."; st.classList.add("ok"); btn.disabled = false; mostra(pre, d);
+  }
+  async function reprocessaArquivos(){
+    if(!confereChave()) return;
+    var fl = document.getElementById("files").value.trim(); if(!fl){ alert("Informe ao menos um nome."); return; }
+    var st = document.getElementById("filesStatus"); var pre = document.getElementById("filesRes");
+    st.textContent = "Reprocessando arquivos..."; pre.style.display = "none";
+    var d = await posta("/batch/reprocess?files=" + encodeURIComponent(fl), {});
+    st.textContent = "Concluido."; st.classList.add("ok"); mostra(pre, d);
+  }
+  async function dedupe(){
+    if(!confereChave()) return;
+    var st = document.getElementById("dedupeStatus"); var pre = document.getElementById("dedupeRes");
+    st.textContent = "Rodando dedupe..."; pre.style.display = "none";
+    var d = await posta("/admin/dedupe", {});
+    st.textContent = "Dedupe concluido."; st.classList.add("ok"); mostra(pre, d);
+  }
+</script>
+</body>
+</html>'''
+
 app = FastAPI(title="Obito OCR Service", version="3.1")
 
 class BatchRequest(BaseModel):
@@ -1814,3 +1960,7 @@ def admin_dedupe():
         logger.error(f"Erro no dedupe: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 # deploy touch 28/08/2026 09:59:39
+
+@app.get("/app")
+def app_page():
+    return HTMLResponse(_HTML_APP)
