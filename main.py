@@ -251,6 +251,7 @@ def _upsert_rows_to_sheet(rows, name_index=None):
     try:
         sheets = _get_sheets_service()
         b_idx = HEADER.index("NOME_ARQUIVO") if "NOME_ARQUIVO" in HEADER else 1
+        rows = [r + [""] * (len(HEADER) - len(r)) if len(r) < len(HEADER) else r for r in rows]
         to_append, last = [], None
         for row in rows:
             key = _norm_name(row[b_idx]) if len(row) > b_idx else ""
