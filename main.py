@@ -1625,7 +1625,7 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
             ][:limit]
             logger.info(f"Filtro por pasta {folder_norm}: {len(to_process)} novos para processar")
         existing = {"hashes": {}, "names": set()} if reprocess else _get_existing_data()
-        if not reprocess:
+        if not reprocess and not folder:
             _ex_names = {_norm_name(n) for n in existing.get("names", set())}
             to_process = [f for f in all_files if _norm_name(f.get("name", "")) not in _ex_names][:limit]
         _NAME_INDEX = _build_name_index()
