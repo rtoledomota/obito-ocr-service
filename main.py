@@ -63,6 +63,7 @@ HEADER = [
     "CIDADE_OBITO", "UF_OBITO", "CAUSA_MORTE", "CAUSA_BASICA", "CID_BASICA",
     "TIPO_OBITO", "DO_NUMERO", "MEDICO_ATESTANTE", "CRM_MEDICO",
     "PARTE_II", "INTERVALO_DOENCA_MORTE", "ERROS", "HASH_ARQUIVO", "QUALIDADE_IMAGEM"
+    "PASTA_ORIGEM"
 ]
 
 FORM_JUNK = [
@@ -186,6 +187,16 @@ def _ensure_sheet_header():
         vals = result.get("values", [])
         if vals and vals[0] and any(str(v).strip() for v in vals[0] if v):
             logger.info("Cabecalho ja existe na planilha.")
+            try:
+                if "PASTA_ORIGEM" not in [str(c).strip() for c in vals[0]]:
+                    sheets.spreadsheets().values().update(
+                        spreadsheetId=SHEET_ID, range="Auditoria!Y1",
+                        valueInputOption="USER_ENTERED",
+                        body={"values": [["PASTA_ORIGEM"]]},
+                    ).execute()
+                    logger.info("Coluna PASTA_ORIGEM adicionada (Y1).")
+            except Exception as _e:
+                logger.warning(f"Nao foi possivel adicionar PASTA_ORIGEM: {_e}")
             return True
         sheets.spreadsheets().values().update(
             spreadsheetId=SHEET_ID, range="Auditoria!A1",
@@ -201,6 +212,12 @@ def _ensure_sheet_header():
 def _norm_name(name) -> str:
     return " ".join(str(name).strip().lower().split())
 
+def _comp_key(pasta, nome) -> str:
+    pasta = (pasta or "").strip()
+    nome = _norm_name(nome)
+    return (pasta + "|" + nome) if pasta else nome
+
+
 def _col_to_letter(idx: int) -> str:
     s, idx = "", idx + 1
     while idx > 0:
@@ -213,14 +230,15 @@ def _build_name_index() -> dict:
     try:
         sheets = _get_sheets_service()
         result = sheets.spreadsheets().values().get(
-            spreadsheetId=SHEET_ID, range="Auditoria!B2:B"
+            spreadsheetId=SHEET_ID, range="Auditoria!B2:Y"
         ).execute()
         for i, row in enumerate(result.get("values", []), start=2):
             if not row:
                 continue
-            key = _norm_name(row[0])
-            if key:
-                index[key] = i
+            nome = _norm_name(row[0])
+            pasta = str(row[24]).strip() if len(row) > 24 else ""
+            if nome:
+                index[_comp_key(pasta, nome)] = i
     except Exception as e:
         logger.warning(f"Nao foi possivel montar indice de nomes: {e}")
     return index
@@ -236,6 +254,9 @@ def _upsert_rows_to_sheet(rows, name_index=None):
         to_append, last = [], None
         for row in rows:
             key = _norm_name(row[b_idx]) if len(row) > b_idx else ""
+            _pasta_col = HEADER.index("PASTA_ORIGEM") if "PASTA_ORIGEM" in HEADER else -1
+            _pasta_row = str(row[_pasta_col]).strip() if (_pasta_col >= 0 and len(row) > _pasta_col) else ""
+            key = _comp_key(_pasta_row, key)
             if key and key in name_index:
                 rownum = name_index[key]
                 end_col = _col_to_letter(len(row) - 1)
@@ -351,7 +372,7 @@ def _download_image_bytes(file_id):
 
 # â”€â”€ Busca recursiva em subpastas â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-def _list_all_files_recursive(folder_id, drive):
+def _list_all_files_recursive(folder_id, drive, root_name=None):
     files = []
     page_token = None
     query = (f"'{folder_id}' in parents and "
@@ -363,7 +384,9 @@ def _list_all_files_recursive(folder_id, drive):
             fields="nextPageToken, files(id, name, mimeType, createdTime)",
             pageToken=page_token, orderBy="createdTime asc",
         ).execute()
-        files.extend(response.get("files", []))
+        for _f in response.get("files", []):
+            _f["folder"] = root_name or ""
+            files.append(_f)
         page_token = response.get("nextPageToken")
         if not page_token:
             break
@@ -381,13 +404,12 @@ def _list_all_files_recursive(folder_id, drive):
                 logger.info(f"  -> Pulando pasta: {sub.get('name','unknown')}")
                 continue
             logger.info(f"  -> Explorando subpasta: {sub.get('name','unknown')}")
-            files.extend(_list_all_files_recursive(sub["id"], drive))
+            child_root = sub.get("name", "") if root_name is None else root_name
+            files.extend(_list_all_files_recursive(sub["id"], drive, child_root))
         page_token = response.get("nextPageToken")
         if not page_token:
             break
     return files
-
-# â”€â”€ Hash â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -1550,7 +1572,7 @@ STOP_REQUESTED = False
 _BATCH_INFO = {"active": False, "current": "", "processed": 0, "duplicates": 0,
                "rejected": 0, "failed": 0, "total": 0, "stop_pending": False}
 
-def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, files: str = None) -> dict:
+def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, files: str = None, folder: str = None) -> dict:
     logger.info(f"Iniciando {'reprocessamento' if reprocess else 'batch'} com limit={limit}")
     try:
         drive = _get_drive_service()
@@ -1593,6 +1615,15 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
                 to_process = all_files[:limit]
         else:
             to_process = all_files[:limit]
+        if folder:
+            folder_norm = str(folder).strip().upper()
+            _idx_comp = _build_name_index()
+            to_process = [
+                f for f in all_files
+                if (f.get("folder") or "").strip().upper() == folder_norm
+                and _comp_key(f.get("folder", ""), f.get("name", "")) not in _idx_comp
+            ][:limit]
+            logger.info(f"Filtro por pasta {folder_norm}: {len(to_process)} novos para processar")
         existing = {"hashes": {}, "names": set()} if reprocess else _get_existing_data()
         if not reprocess:
             _ex_names = {_norm_name(n) for n in existing.get("names", set())}
@@ -1612,6 +1643,7 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
             _BATCH_INFO["current"] = img.get("name", "unknown")
             time.sleep(1)
             row = _process_single_image(img["id"], img.get("name", "unknown"), existing)
+            row["PASTA_ORIGEM"] = img.get("folder", "")
             gc.collect()
             status = row.get("STATUS", "")
             if status == "DUPLICADO":
@@ -1693,6 +1725,7 @@ def _dedupe_auditoria(sheet_id: str = SHEET_ID) -> dict:
     i_status = _idx("STATUS", 2)
     i_score = _idx("QUALIDADE_SCORE", 3)
     i_hash = _idx("HASH_ARQUIVO", -1)
+    i_pasta = _idx("PASTA_ORIGEM", -1)
 
     def _score(row):
         if len(row) <= i_score:
@@ -1704,8 +1737,9 @@ def _dedupe_auditoria(sheet_id: str = SHEET_ID) -> dict:
 
     def _key(row):
         nome = _norm_name(row[i_name]) if len(row) > i_name else ""
+        pasta = str(row[i_pasta]).strip() if (i_pasta >= 0 and len(row) > i_pasta) else ""
         if nome:
-            return nome
+            return _comp_key(pasta, nome)
         if i_hash >= 0 and len(row) > i_hash and str(row[i_hash]).strip():
             return "hash:" + str(row[i_hash]).strip()
         return "row:" + "|".join(str(c) for c in row[:3])
@@ -1925,6 +1959,7 @@ class BatchRequest(BaseModel):
     limit: int = 10
     reprocess: bool = False
     force_reprocess: bool = False
+    folder: str = None
 
 @app.get("/")
 def root():
@@ -1945,7 +1980,7 @@ def batch_stop():
 @app.post("/batch/process")
 def batch_process(request: BatchRequest):
     reprocess = request.reprocess or request.force_reprocess
-    return _run_batch(limit=request.limit, reprocess=reprocess)
+    return _run_batch(limit=request.limit, reprocess=reprocess, folder=request.folder)
 
 @app.post("/batch/reprocess")
 def batch_reprocess(limit: int = 10, min_score: float = None, files: str = None):
