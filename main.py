@@ -1989,6 +1989,49 @@ def batch_process(request: BatchRequest):
 def batch_reprocess(limit: int = 10, min_score: float = None, files: str = None):
     return _run_batch(limit=limit, reprocess=True, min_score=min_score, files=files)
 
+
+
+@app.post("/admin/tag_pasta")
+def admin_tag_pasta(folder: str = "AGOSTO", desde: str = "2026-09-19", dry_run: bool = True, excluir: str = ""):
+    """Etiqueta retroativamente PASTA_ORIGEM nas linhas do lote mensal (coluna Y vazia)."""
+    from datetime import datetime
+    base = datetime(1899, 12, 30)
+    try:
+        serial_min = (datetime.strptime(desde, "%Y-%m-%d") - base).days
+    except Exception:
+        return {"success": False, "error": "desde deve estar em YYYY-MM-DD"}
+    excls = {x.strip() for x in excluir.split(",") if x.strip()}
+    try:
+        sheets = _get_sheets_service()
+        res = sheets.spreadsheets().values().get(spreadsheetId=SHEET_ID, range="Auditoria!A2:Y").execute()
+        rows = res.get("values", [])
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+    alvos = []
+    for i, r in enumerate(rows, start=2):
+        if len(r) < 25:
+            continue
+        if str(r[24]).strip():
+            continue
+        try:
+            ts = float(r[0])
+        except Exception:
+            continue
+        if ts < serial_min:
+            continue
+        nome = str(r[1]).strip()
+        if not nome or nome in excls:
+            continue
+        alvos.append((i, nome))
+    if dry_run:
+        return {"success": True, "dry_run": True, "candidatas": len(alvos),
+                "exemplos": [f"row {i}: {n}" for i, n in alvos[:30]]}
+    updates = [{"range": f"Auditoria!Y{i}", "values": [[folder]]} for i, _ in alvos]
+    for k in range(0, len(updates), 100):
+        body = {"valueInputOption": "USER_ENTERED", "data": updates[k:k + 100]}
+        sheets.spreadsheets().values().batchUpdate(spreadsheetId=SHEET_ID, body=body).execute()
+    return {"success": True, "etiquetadas": len(alvos)}
+
 @app.post("/admin/dedupe")
 def admin_dedupe():
     """Remove duplicatas da aba Auditoria e grava em Auditoria_LIMPA."""
