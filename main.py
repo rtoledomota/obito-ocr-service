@@ -2009,9 +2009,7 @@ def admin_tag_pasta(folder: str = "AGOSTO", desde: str = "2026-09-19", dry_run: 
         return {"success": False, "error": str(e)}
     alvos = []
     for i, r in enumerate(rows, start=2):
-        if len(r) < 25:
-            continue
-        if str(r[24]).strip():
+        if len(r) >= 25 and str(r[24]).strip():
             continue
         try:
             ts = float(r[0])
