@@ -1649,6 +1649,33 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
             row["PASTA_ORIGEM"] = img.get("folder", "")
             if not str(row.get("IDADE_ANOS", "") or "").strip():
                 try:
+                    import datetime as _dt
+                    _n = row.get("NASCIMENTO")
+                    _d = row.get("DATA_OBITO") or row.get("DATA_PROCESSAMENTO")
+                    _base = _dt.date(1899, 12, 30)
+                    def _serial(v):
+                        if isinstance(v, (int, float)) and v:
+                            return float(v)
+                        if isinstance(v, str) and v.strip():
+                            m = re.match(r'^(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})$', v.strip())
+                            if m:
+                                dd, mm, yyyy = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                                try:
+                                    d = _dt.date(yyyy, mm, dd)
+                                    return (d - _base).days
+                                except Exception:
+                                    return None
+                        return None
+                    _ns = _serial(_n)
+                    _ds = _serial(_d)
+                    if _ns and _ds:
+                        _anos = int((_ds - _ns) / 365.25)
+                        if 0 <= _anos <= 120:
+                            row["IDADE_ANOS"] = _anos
+                except Exception:
+                    pass
+            if not str(row.get("IDADE_ANOS", "") or "").strip():
+                try:
                     _n = row.get("NASCIMENTO")
                     _d = row.get("DATA_OBITO") or row.get("DATA_PROCESSAMENTO")
                     if isinstance(_n, (int, float)) and isinstance(_d, (int, float)) and _n and _d:
