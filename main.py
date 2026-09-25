@@ -1647,6 +1647,16 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
             time.sleep(1)
             row = _process_single_image(img["id"], img.get("name", "unknown"), existing)
             row["PASTA_ORIGEM"] = img.get("folder", "")
+            if not str(row.get("IDADE_ANOS", "") or "").strip():
+                try:
+                    _n = row.get("NASCIMENTO")
+                    _d = row.get("DATA_OBITO") or row.get("DATA_PROCESSAMENTO")
+                    if isinstance(_n, (int, float)) and isinstance(_d, (int, float)) and _n and _d:
+                        _anos = int((_d - _n) / 365.25)
+                        if 0 <= _anos <= 120:
+                            row["IDADE_ANOS"] = _anos
+                except Exception:
+                    pass
             gc.collect()
             status = row.get("STATUS", "")
             if status == "DUPLICADO":
