@@ -238,7 +238,7 @@ def _build_name_index() -> dict:
             if not row:
                 continue
             nome = _norm_name(row[0])
-            pasta = str(row[24]).strip() if len(row) > 24 else ""
+            pasta = str(row[23]).strip() if len(row) > 23 else ""
             if nome:
                 index[_comp_key(pasta, nome)] = i
     except Exception as e:
