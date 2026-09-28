@@ -1646,6 +1646,24 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
             _BATCH_INFO["current"] = img.get("name", "unknown")
             time.sleep(1)
             row = _process_single_image(img["id"], img.get("name", "unknown"), existing)
+            if not str(row.get("CID_BASICA", "") or "").strip():
+                try:
+                    import re as _re30
+                    _txt_c = " ".join(str(row.get(f, "") or "") for f in ("CAUSA_MORTE", "CAUSA_BASICA", "PARTE_II", "INTERVALO_DOENCA_MORTE"))
+                    if not _re30.search(r"[A-TV-Z][0-9]{2}(\.[0-9]{1,2})?", _txt_c, _re30.I):
+                        _u = _re30.sub(r"[^a-z0-9 ]", " ", _txt_c.lower())
+                        _corr = {"hoque":"choque","chaque":"choque","sipse":"sepse","sipsis":"sepsis","sepsie":"sepse","sepsse":"sepse","septicemia":"sepse","sipsis":"sepse","aquexia":"caquexia","arcinomatose":"carcinomatose","olangite":"colangite","or pulmonale":"cor pulmonale","noxia":"anoxia","encerfalopatia":"encefalopatia","encelalopatia":"encefalopatia","bronconeumonia":"broncopneumonia","roncopneumonia":"broncopneumonia","ronconeumonia":"broncopneumonia","paroda":"parada","abdomen":"abdome","abdomem":"abdome","bdome":"abdome","cidose":"acidose","infeccao":"infeccao"}
+                        _norm = " ".join(_corr.get(w, w) for w in _u.split())
+                        _tab = {
+                            "choque septico":"R57.2","sepse":"A41.9","sipsis nao especificada":"A41.9","choque hipovolemico":"R57.1","choque hemorragico":"R57.1","choque cardiogenico":"R57.0","choque distributivo":"R57.8","insuficiencia respiratoria":"J96.0","parada cardiorrespiratoria":"I46.9","pneumonia bacteriana":"J15.9","pneumonia viral":"J12.9","pneumonia broncoaspirativa":"J69.0","pneumonia":"J18.9","broncopneumonia":"J18.0","pneumonia adquirida na comunidade":"J18.9","pneumonia nosocomial":"J18.9","infeccao do trato urinario":"N39.0","infeccao trato urinario":"N39.0","infeccao urinaria":"N39.0","insuficiencia renal aguda":"N17.9","insuficiencia renal":"N19","doenca renal cronica":"N18.9","lesao renal aguda":"N17.9","dpoc":"J44.9","doenca pulmonar obstrutiva cronica":"J44.9","insuficiencia cardiaca congestiva":"I50.9","insuficiencia cardiaca":"I50.9","infarto agudo do miocardio":"I21.9","iam":"I21.9","acidente vascular encefalico":"I64","avc":"I64","abdome agudo obstrutivo":"K56.9","abdome agudo vascular":"K55.0","abdome agudo perfurativo":"K65.9","abdome agudo":"R10.0","hemorragia digestiva alta":"K92.2","cirrose hepatica":"K74.6","insuficiencia hepatica":"K72.9","pancreatite aguda":"K85.9","colangite":"K83.0","edema agudo de pulmao":"J81","tromboembolismo pulmonar":"I26.9","te p":"I26.9","caquexia":"R64","demencia vascular":"F01.9","demencia":"F03.9","sindrome da fragilidade do idoso":"R54","sindrome da imobilidade":"R54","alzheimer":"G30.9","parkinson":"G20","diabetes mellitus":"E14.9","hipertensao arterial sistemica":"I10","has":"I10","fibrilacao atrial":"I48","cardiopatia isquemica":"I25.9","sepse neonatal":"P36.9","prematuridade":"P07.3","anoxia ao feto":"P20.9","anoxia cerebral":"G93.1","encefalopatia hepatica":"K72.9","bacteremia":"A49.9","peritonite":"K65.9","neoplasia maligna da mama":"C50.9","neoplasia de mama":"C50.9","neoplasia maligna de pulmao":"C34.9","neoplasia de pulmao":"C34.9","cancer de pulmao":"C34.9","metastase pulmonar":"C78.0","neoplasia de prostata":"C61","carcinoma de esofago":"C15.9","adenocarcinoma gastrico":"C16.9","neoplasia gastrica":"C16.9","carcinoma hepatocelular":"C22.0","neoplasia maligna da bexiga":"C67.9","neoplasia colon sigmoide":"C18.7","neoplasia maligna do colon":"C18.9","neoplasia de colon":"C18.9","adenocarcinoma ductal pancreatico":"C25.9","neoplasia maligna de rim":"C64","neoplasia maligna de ovario":"C56","neoplasia maligna do estomago":"C16.9","neoplasia maligna da orofaringe":"C10.9","neoplasia maligna de glote":"C32.0","mieloma multiplo":"C90.0","leucemia linfoide cronica":"C91.1","neoplasia maligna":"C80.9","neoplasia":"C80.9","septicemia":"A41.9"
+                        }
+                        for _k, _v in _tab.items():
+                            if _k in _norm:
+                                row["CID_BASICA"] = _v
+                                row["CID_AUTOMATICO"] = "SIM"
+                                break
+                except Exception:
+                    pass
             row["PASTA_ORIGEM"] = img.get("folder", "")
             if not str(row.get("CID_BASICA", "") or "").strip():
                 try:
