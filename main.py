@@ -1647,6 +1647,20 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
             time.sleep(1)
             row = _process_single_image(img["id"], img.get("name", "unknown"), existing)
             row["PASTA_ORIGEM"] = img.get("folder", "")
+            if not str(row.get("CID_BASICA", "") or "").strip():
+                try:
+                    import re as _re
+                    _cid_pat = _re.compile(r"([A-TV-Z][0-9]{2}(\.[0-9]{1,2})?)", _re.I)
+                    _cands = []
+                    for _f in ("CAUSA_MORTE", "CAUSA_BASICA", "PARTE_II", "INTERVALO_DOENCA_MORTE", "NOME"):
+                        _txt = str(row.get(_f, "") or "")
+                        _m = _cid_pat.search(_txt)
+                        if _m:
+                            _cands.append(_m.group(1).upper())
+                    if _cands:
+                        row["CID_BASICA"] = _cands[0]
+                except Exception:
+                    pass
             if not str(row.get("IDADE_ANOS", "") or "").strip():
                 try:
                     import datetime as _dt
