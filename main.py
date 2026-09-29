@@ -218,7 +218,7 @@ def _norm_name(name) -> str:
 def _comp_key(pasta, nome) -> str:
     pasta = (pasta or "").strip()
     nome = _norm_name(nome)
-    return (pasta + "|" + nome) if pasta else nome
+    return (nome) if pasta else nome
 
 
 def _col_to_letter(idx: int) -> str:
