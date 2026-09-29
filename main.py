@@ -228,6 +228,10 @@ def _col_to_letter(idx: int) -> str:
         s = chr(65 + rem) + s
     return s
 
+def _norm_do(do: str) -> str:
+    import re as _re
+    return _re.sub(r"[^A-Za-z0-9]", "", do.upper())
+
 def _build_name_index() -> dict:
     index = {}
     try:
