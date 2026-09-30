@@ -1572,7 +1572,31 @@ def _process_single_image(file_id, file_name, existing):
     validate_obito(structured)
     structured["DATA_PROCESSAMENTO"] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     structured["NOME_ARQUIVO"] = file_name
-    return structured
+    
+    # [VALIDACAO_DATA_FUTURA] Marca REVISAR se DATA_OBITO for futura/invalida
+    try:
+        _do = structured.get("DATA_OBITO", "")
+        _futuro = False
+        if isinstance(_do, (int, float)) and _do:
+            from datetime import timedelta
+            _dt_obito = _dt(1899, 12, 30) + timedelta(days=float(_do))
+            _futuro = _dt_obito.date() > _dt.now().date()
+        elif isinstance(_do, str) and _do.strip():
+            for _fmt in ("%d/%m/%Y", "%Y-%m-%d", "%Y/%m/%d"):
+                try:
+                    _dt_obito = _dt.strptime(_do.strip(), _fmt)
+                    _futuro = _dt_obito.date() > _dt.now().date()
+                    break
+                except Exception:
+                    continue
+        if _futuro:
+            structured["STATUS"] = "REVISAR"
+            _erros = structured.get("ERROS", "") or ""
+            _novo = "Data de obito futura/invalida"
+            structured["ERROS"] = (_erros + " | " + _novo).strip(" |") if _erros else _novo
+    except Exception:
+        pass
+return structured
 
 # â”€â”€ Batch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
