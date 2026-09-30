@@ -2160,21 +2160,7 @@ def _motivo_revisao(row, header):
         return "Campo critico ausente: " + ", ".join(ausentes)
     return "Revisao manual"
 
-@app.get("/api/auditoria")
-def api_auditoria(authorization: str = Header(default="")):
-    if not _check_auth(authorization):
-        return {"success": False, "message": "Nao autorizado"}
-    try:
-        sheets = _get_sheets_service()
-        result = sheets.spreadsheets().values().get(
-            spreadsheetId=SHEET_ID, range="Auditoria_LIMPA!A1:Z"
-        ).execute()
-        rows = result.get("values", [])
-    except Exception as e:
-        logger.error("Erro ao ler Auditoria_LIMPA: %s", e, exc_info=True)
-        return {"success": False, "message": "Erro ao ler planilha"}
-    if not rows:
-        return {"success": False, "message": "Auditoria_LIMPA vazia"}
+# [LIMPEZA] endpoint /api/auditoria antigo removido - vigora o CENTRAL VIVA (Auditoria_Unica)
     header = rows[0]
 
     def v(row, col):
