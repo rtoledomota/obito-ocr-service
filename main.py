@@ -2412,10 +2412,26 @@ def _central_le_planilha(nome_aba):
     return _resp.get("values", [])
 
 def _central_parse_data(s):
-    m = _re.match(r"^(\d{2})/(\d{2})/(\d{4})$", str(s or "").strip())
-    if not m:
+    # 1) Serial do Excel (ex.: 46273) -> yyyy-mm
+    if isinstance(s, (int, float)):
+        try:
+            from datetime import timedelta
+            base = _dt(1899, 12, 30) + timedelta(days=float(s))
+            return base.strftime("%Y-%m")
+        except Exception:
+            return None
+    t = str(s or "").strip()
+    if not t:
         return None
-    return "%s-%s" % (m.group(3), m.group(2))
+    # 2) dd/mm/yyyy
+    m = _re.match(r"^(\d{2})/(\d{2})/(\d{4})$", t)
+    if m:
+        return "%s-%s" % (m.group(3), m.group(2))
+    # 3) yyyy/mm/dd ou yyyy-mm-dd
+    m = _re.match(r"^(\d{4})[-/](\d{2})[-/](\d{2})", t)
+    if m:
+        return "%s-%s" % (m.group(1), m.group(2))
+    return None
 
 def _central_score(r):
     try:
