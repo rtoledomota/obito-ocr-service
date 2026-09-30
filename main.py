@@ -2398,3 +2398,83 @@ function renderVersos(d){
 @app.get("/dashboard")
 def dashboard_page():
     return HTMLResponse(_DASH_HTML)
+
+# ============================================================
+# [CENTRAL VIVA] Endpoint JSON de auditoria (patch automacao)
+# ============================================================
+import json as _json
+import re as _re
+from datetime import datetime as _dt
+from fastapi import Header as _Hdr, HTTPException as _HTTPExc
+from fastapi.middleware.cors import CORSMiddleware as _CORS
+
+app.add_middleware(_CORS, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+def _central_le_planilha(nome_aba):
+    from google.oauth2 import service_account as _sa
+    from googleapiclient.discovery import build as _build
+    _info = _json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or os.getenv("DRIVE_SERVICE_ACCOUNT_JSON") or "{}")
+    if not _info:
+        return []
+    _creds = _sa.Credentials.from_service_account_info(
+        _info, scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    )
+    _svc = _build("sheets", "v4", credentials=_creds, cache_discovery=False)
+    _resp = _svc.spreadsheets().values().get(
+        spreadsheetId=SHEET_ID, range=nome_aba
+    ).execute()
+    return _resp.get("values", [])
+
+def _central_parse_data(s):
+    m = _re.match(r"^(\d{2})/(\d{2})/(\d{4})$", str(s or "").strip())
+    if not m:
+        return None
+    return "%s-%s" % (m.group(3), m.group(2))
+
+def _central_score(r):
+    try:
+        return float((r.get("QUALIDADE_SCORE") or 0) or 0)
+    except Exception:
+        return 0.0
+
+@app.get("/api/auditoria")
+def api_auditoria(authorization: str = _Hdr(default="")):
+    esperado = os.getenv("ENDPOINT_AUTH_TOKEN", "")
+    if not esperado or authorization != "Bearer %s" % esperado:
+        raise _HTTPExc(status_code=401, detail="Nao autorizado")
+    try:
+        values = _central_le_planilha("Auditoria_Unica")
+    except Exception as e:
+        raise _HTTPExc(status_code=500, detail="Erro ao ler planilha: %s" % e)
+    if not values:
+        return {"atualizado_em": None, "total": 0, "resumo": {}, "cid_automatico": 0,
+                "score_medio": 0, "por_mes": [], "registros": []}
+    header = values[0]
+    registros = []
+    for row in values[1:]:
+        d = {}
+        for idx, col in enumerate(header):
+            d[col] = row[idx] if idx < len(row) else ""
+        registros.append(d)
+    status_counts = {}
+    cid_auto = 0
+    mes_counts = {}
+    for r in registros:
+        st = (r.get("STATUS") or "").strip() or "(vazio)"
+        status_counts[st] = status_counts.get(st, 0) + 1
+        if (r.get("CID_AUTOMATICO") or "").strip() == "SIM":
+            cid_auto += 1
+        mes = _central_parse_data(r.get("DATA_OBITO"))
+        if mes:
+            mes_counts[mes] = mes_counts.get(mes, 0) + 1
+    por_mes = [{"mes": k, "total": v} for k, v in sorted(mes_counts.items())]
+    return {
+        "atualizado_em": _dt.now().strftime("%d/%m/%Y %H:%M"),
+        "total": len(registros),
+        "resumo": status_counts,
+        "cid_automatico": cid_auto,
+        "score_medio": round(sum(_central_score(r) for r in registros) / len(registros), 1) if registros else 0,
+        "por_mes": por_mes,
+        "registros": registros,
+    }
+# ============================================================
