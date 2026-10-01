@@ -2481,3 +2481,137 @@ def api_auditoria(authorization: str = _Hdr(default="")):
         "registros": registros,
     }
 # ============================================================
+
+# ============================================================
+# [SANEAMENTO] Endpoint /api/sanear - revalida REVISAR e deriva NASCIMENTO
+# ============================================================
+import json as _json
+import re as _re
+
+_CAMPOS_CRITICOS = ["NOME", "NOME_MAE", "NASCIMENTO", "DATA_OBITO", "CIDADE_OBITO", "UF_OBITO", "CAUSA_MORTE"]
+
+def _central_campo_preenchido(v):
+    if v is None:
+        return False
+    s = str(v).strip()
+    if not s:
+        return False
+    if s.lower() in ("nao informado", "n/a", "-", "—"):
+        return False
+    return True
+
+def _central_col_letra(idx):
+    s = ""
+    while idx > 0:
+        idx, r = divmod(idx - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+def _central_deriva_nascimento(r):
+    from datetime import datetime as _d, timedelta as _t
+    if _central_campo_preenchido(r.get("NASCIMENTO")):
+        return None, False
+    if not _central_campo_preenchido(r.get("DATA_OBITO")) or not _central_campo_preenchido(r.get("IDADE_ANOS")):
+        return None, False
+    try:
+        idade = float(r.get("IDADE_ANOS"))
+    except Exception:
+        return None, False
+    dob = None
+    try:
+        num = float(r.get("DATA_OBITO"))
+        if num > 1000:
+            dob = _d(1899, 12, 30) + _t(days=num)
+    except Exception:
+        pass
+    if dob is None:
+        try:
+            m = _re.match(r"^(\d{2})/(\d{2})/(\d{4})$", str(r.get("DATA_OBITO")).strip())
+            if m:
+                dob = _d(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        except Exception:
+            dob = None
+    if dob is None:
+        return None, False
+    try:
+        nasc = dob - _t(days=int(round(idade * 365.25)))
+        return nasc.strftime("%d/%m/%Y"), True
+    except Exception:
+        return None, False
+
+def _central_escreve_celulas(updates):
+    from google.oauth2 import service_account as _sa
+    from googleapiclient.discovery import build as _build
+    _info = _json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or os.getenv("DRIVE_SERVICE_ACCOUNT_JSON") or "{}")
+    if not _info:
+        return 0
+    _creds = _sa.Credentials.from_service_account_info(_info, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+    _svc = _build("sheets", "v4", credentials=_creds, cache_discovery=False)
+    data = [{"range": "Auditoria_Unica!%s%d" % (_central_col_letra(col), linha), "values": [[val]]} for linha, col, val in updates]
+    resp = _svc.spreadsheets().values().batchUpdate(
+        spreadsheetId=SHEET_ID,
+        body={"valueInputOption": "USER_ENTERED", "data": data}
+    ).execute()
+    return resp.get("totalUpdatedCells", 0)
+
+@app.post("/api/sanear")
+def api_sanear(authorization: str = _Hdr(default=""), dry_run: bool = False):
+    esperado = os.getenv("ENDPOINT_AUTH_TOKEN", "")
+    if not esperado or authorization != "Bearer %s" % esperado:
+        raise _HTTPExc(status_code=401, detail="Nao autorizado")
+    try:
+        values = _central_le_planilha("Auditoria_Unica")
+    except Exception as e:
+        raise _HTTPExc(status_code=500, detail="Erro ao ler planilha: %s" % e)
+    if not values:
+        return {"sucesso": True, "mensagem": "Planilha vazia", "dry_run": dry_run, "detalhes": []}
+    header = values[0]
+    updates = []
+    detalhes = []
+    revisar_antes = 0
+    convertidos_ok = 0
+    nasc_deriv = 0
+    for i, row in enumerate(values[1:], start=2):
+        d = {}
+        for idx, col in enumerate(header):
+            d[col] = row[idx] if idx < len(row) else ""
+        if (d.get("STATUS") or "").strip() != "REVISAR":
+            continue
+        revisar_antes += 1
+        nasc, derivou = _central_deriva_nascimento(d)
+        if derivou and nasc:
+            nasc_deriv += 1
+            d["NASCIMENTO"] = nasc
+            updates.append((i, header.index("NASCIMENTO") + 1, nasc))
+        faltando = [c for c in _CAMPOS_CRITICOS if not _central_campo_preenchido(d.get(c))]
+        novo_status = "REVISAR"
+        if not faltando:
+            convertidos_ok += 1
+            novo_status = "OK"
+            updates.append((i, header.index("STATUS") + 1, "OK"))
+            updates.append((i, header.index("ERROS") + 1, ""))
+            updates.append((i, header.index("QUALIDADE_SCORE") + 1, 100))
+        detalhes.append({
+            "linha": i,
+            "arquivo": d.get("NOME_ARQUIVO"),
+            "nome": d.get("NOME"),
+            "nascimento_derivado": bool(derivou),
+            "status_novo": novo_status,
+            "faltando_apos": faltando,
+        })
+    celulas = 0
+    if not dry_run and updates:
+        try:
+            celulas = _central_escreve_celulas(updates)
+        except Exception as e:
+            raise _HTTPExc(status_code=500, detail="Erro ao gravar: %s" % e)
+    return {
+        "sucesso": True,
+        "dry_run": dry_run,
+        "revisar_antes": revisar_antes,
+        "convertidos_ok": convertidos_ok,
+        "nascimentos_derivados": nasc_deriv,
+        "celulas_gravadas": celulas,
+        "detalhes": detalhes,
+    }
+# ============================================================
