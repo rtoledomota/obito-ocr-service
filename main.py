@@ -2389,6 +2389,7 @@ def dashboard_page():
 # [CENTRAL VIVA] Endpoint JSON de auditoria (patch automacao)
 # ============================================================
 import json as _json
+import datetime as _dtmod
 import re as _re
 from datetime import datetime as _dt
 from fastapi import Header as _Hdr, HTTPException as _HTTPExc
@@ -2471,7 +2472,7 @@ def api_auditoria(authorization: str = _Hdr(default="")):
             mes_counts[mes] = mes_counts.get(mes, 0) + 1
     por_mes = [{"mes": k, "total": v} for k, v in sorted(mes_counts.items())]
     return {
-        "atualizado_em": _dt.now(_dt.timezone(_dt.timedelta(hours=-3))).strftime("%d/%m/%Y %H:%M"),
+        "atualizado_em": _dt.now(_dtmod.timezone(_dtmod.timedelta(hours=-3))).strftime("%d/%m/%Y %H:%M"),
         "total": len(registros),
         "resumo": status_counts,
         "cid_automatico": cid_auto,
