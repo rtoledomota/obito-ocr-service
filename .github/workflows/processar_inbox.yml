@@ -1,0 +1,17 @@
+name: Processar INBOX DOs
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+jobs:
+  processar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Chamar batch/process
+        run: |
+          curl -sS -X POST "https://obito-ocr-service.onrender.com/batch/process" \
+            -H "Authorization: Bearer ${{ secrets.ENDPOINT_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"force_reprocess": false}'
