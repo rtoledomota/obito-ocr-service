@@ -2471,7 +2471,7 @@ def api_auditoria(authorization: str = _Hdr(default="")):
             mes_counts[mes] = mes_counts.get(mes, 0) + 1
     por_mes = [{"mes": k, "total": v} for k, v in sorted(mes_counts.items())]
     return {
-        "atualizado_em": _dt.now().strftime("%d/%m/%Y %H:%M"),
+        "atualizado_em": _dt.now(_dt.timezone(_dt.timedelta(hours=-3))).strftime("%d/%m/%Y %H:%M"),
         "total": len(registros),
         "resumo": status_counts,
         "cid_automatico": cid_auto,
