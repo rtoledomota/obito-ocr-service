@@ -2922,3 +2922,76 @@ def api_recuperar(authorization: str = _Hdr(default=""), dry_run: bool = False,
             "recuperados": sum(1 for x in detalhes if x.get("status") == "recuperado"),
             "celulas_gravadas": celulas, "detalhes": detalhes}
 # ============================================================
+
+# ============================================================
+# [DIAGNOSTICO] Endpoint /api/diagnostico_ocr - mostra o texto cru do OCR por REVISAR
+# ============================================================
+@app.post("/api/diagnostico_ocr")
+def api_diagnostico_ocr(authorization: str = _Hdr(default=""), limite: int = 5, arquivo: str = ""):
+    esperado = os.getenv("ENDPOINT_AUTH_TOKEN", "")
+    if not esperado or authorization != "Bearer %s" % esperado:
+        raise _HTTPExc(status_code=401, detail="Nao autorizado")
+    limite = min(max(int(limite), 1), 20)
+    if arquivo:
+        limite = 1
+    try:
+        values = _central_le_planilha("Auditoria_Unica")
+    except Exception as e:
+        raise _HTTPExc(status_code=500, detail="Erro ao ler planilha: %s" % e)
+    if not values:
+        return {"sucesso": True, "mensagem": "Planilha vazia", "detalhes": []}
+    header = values[0]
+    drive = None
+    detalhes = []
+    processados = 0
+    for i, row in enumerate(values[1:], start=2):
+        if processados >= limite:
+            break
+        d = {}
+        for idx, col in enumerate(header):
+            d[col] = row[idx] if idx < len(row) else ""
+        if (d.get("STATUS") or "").strip() != "REVISAR":
+            continue
+        if arquivo and (d.get("NOME_ARQUIVO") or "").strip() != arquivo:
+            continue
+        faltando = [c for c in ["NOME","NOME_MAE","NASCIMENTO","DATA_OBITO","CIDADE_OBITO","UF_OBITO","CAUSA_MORTE"] if not _central_campo_preenchido(d.get(c))]
+        if not faltando:
+            continue
+        processados += 1
+        raw = ""
+        try:
+            if drive is None:
+                drive = _get_drive_service()
+            item = _central_acha_arquivo(drive, d.get("NOME_ARQUIVO"), _PASTA_IMAGENS_ID)
+            if item is None:
+                item = _central_acha_arquivo(drive, d.get("NOME_ARQUIVO"), _PASTA_INBOX_ID)
+            if item is None:
+                detalhes.append({"linha": i, "arquivo": d.get("NOME_ARQUIVO"), "status": "arquivo_nao_encontrado"})
+                continue
+            fbytes = _download_image_bytes(_central_id_de(item))
+            try:
+                raw = str(_ocr_image_from_bytes(fbytes, mime_type="image/jpeg") or "")
+            except Exception:
+                try:
+                    raw = str(_ocr_tiled(fbytes, mime_type="image/jpeg") or "")
+                except Exception:
+                    raw = ""
+        except Exception as e:
+            detalhes.append({"linha": i, "arquivo": d.get("NOME_ARQUIVO"), "status": "erro", "mensagem": str(e)[:120]})
+            continue
+        import re as _re2
+        datas = sorted(set(_re2.findall(r"\b\d{1,2}[\/\.]\d{1,2}[\/\.]\d{4}\b", raw)))
+        tem_causas = bool(_re2.search(r"CAUSA|Parte\s*I|Imediata|Doença ou estado|Condi[çc]õe", raw, _re2.IGNORECASE))
+        tem_nome = bool(_re2.search(r"Nome\s*[:\d]|Falecid|Falecimento", raw, _re2.IGNORECASE))
+        detalhes.append({
+            "linha": i,
+            "arquivo": d.get("NOME_ARQUIVO"),
+            "faltando": faltando,
+            "status": "ok" if raw else "ocr_vazio",
+            "datas_detectadas": datas[:5],
+            "tem_secao_causas": tem_causas,
+            "tem_bloco_nome": tem_nome,
+            "ocr_preview": raw[:900],
+        })
+    return {"sucesso": True, "processados": processados, "detalhes": detalhes}
+# ============================================================
