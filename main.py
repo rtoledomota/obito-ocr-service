@@ -2615,3 +2615,118 @@ def api_sanear(authorization: str = _Hdr(default=""), dry_run: bool = False):
         "detalhes": detalhes,
     }
 # ============================================================
+
+# ============================================================
+# [NOME-LIXO] Endpoint /api/sanear_nomelixo - recupera dados de campos NOME com lixo de OCR
+# ============================================================
+
+def _central_parse_nome_lixo(valor):
+    import datetime as _dtm
+    s = str(valor or "").strip()
+    if not s:
+        return None
+    m = _re.match(r'^(\d{8}-\d{1})$', s)
+    if m:
+        return ("DO", m.group(1))
+    m = _re.match(r'^(\d{1,2})[^\d]{0,2}(\d{1,2})[^\d]{0,2}(20\d{2}|\d{2})(?:[^\d]{0,2}(\d{1,2}))?(?:[:.](\d{2}))?$', s)
+    if m:
+        dia_s, mes_s, ano_s, hor_s, min_s = m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)
+        dia, mes = int(dia_s), int(mes_s)
+        ano = int(ano_s)
+        if ano < 100:
+            ano += 2000
+        if not (1 <= dia <= 31 and 1 <= mes <= 12 and 1900 <= ano <= 2100):
+            return ("LIXO", None)
+        try:
+            _dtm.datetime(ano, mes, dia)
+        except Exception:
+            return ("LIXO", None)
+        hora = None
+        if hor_s and min_s:
+            try:
+                h, mn = int(hor_s), int(min_s)
+                if 0 <= h <= 23 and 0 <= mn <= 59:
+                    hora = round((h * 3600 + mn * 60) / 86400.0, 8)
+            except Exception:
+                hora = None
+        if hora is None and hor_s and not min_s:
+            try:
+                h = int(hor_s)
+                if 0 <= h <= 23:
+                    hora = round(h / 24.0, 8)
+            except Exception:
+                hora = None
+        return ("DATA", "%02d/%02d/%04d" % (dia, mes, ano), hora)
+    if _re.match(r'^[\d\W_]+$', s):
+        return ("LIXO", None)
+    return None
+
+@app.post("/api/sanear_nomelixo")
+def api_sanear_nomelixo(authorization: str = _Hdr(default=""), dry_run: bool = False):
+    esperado = os.getenv("ENDPOINT_AUTH_TOKEN", "")
+    if not esperado or authorization != "Bearer %s" % esperado:
+        raise _HTTPExc(status_code=401, detail="Nao autorizado")
+    try:
+        values = _central_le_planilha("Auditoria_Unica")
+    except Exception as e:
+        raise _HTTPExc(status_code=500, detail="Erro ao ler planilha: %s" % e)
+    if not values:
+        return {"sucesso": True, "mensagem": "Planilha vazia", "dry_run": dry_run, "detalhes": []}
+    header = values[0]
+    updates = []
+    detalhes = []
+    for i, row in enumerate(values[1:], start=2):
+        d = {}
+        for idx, col in enumerate(header):
+            d[col] = row[idx] if idx < len(row) else ""
+        if (d.get("STATUS") or "").strip() != "REVISAR":
+            continue
+        nome = (d.get("NOME") or "").strip()
+        if not nome:
+            continue
+        acao = []
+        parsed = _central_parse_nome_lixo(nome)
+        if parsed is None:
+            continue
+        if parsed[0] == "DO":
+            if not _central_campo_preenchido(d.get("DO_NUMERO")):
+                updates.append((i, header.index("DO_NUMERO") + 1, parsed[1]))
+                acao.append("DO_NUMERO movido do NOME")
+            updates.append((i, header.index("NOME") + 1, ""))
+            acao.append("NOME limpo (era numero de DO)")
+            updates.append((i, header.index("ERROS") + 1, "NOME continha numero de DO — movido para DO_NUMERO. Conferir imagem para recuperar o nome real."))
+        elif parsed[0] == "DATA":
+            data, hora = parsed[1], parsed[2]
+            if not _central_campo_preenchido(d.get("DATA_OBITO")):
+                updates.append((i, header.index("DATA_OBITO") + 1, data))
+                acao.append("DATA_OBITO preenchida: " + data)
+            if hora is not None and not _central_campo_preenchido(d.get("HORA_OBITO")):
+                updates.append((i, header.index("HORA_OBITO") + 1, hora))
+                acao.append("HORA_OBITO preenchida")
+            updates.append((i, header.index("NOME") + 1, ""))
+            acao.append("NOME limpo (era data/hora)")
+            updates.append((i, header.index("ERROS") + 1, "NOME continha data/hora de obito — movido para DATA_OBITO. Conferir imagem para recuperar o nome real."))
+        else:
+            updates.append((i, header.index("ERROS") + 1, "NOME contem valor nao-nome (provalvel inversao de leitura). Conferir imagem."))
+            acao.append("NOME marcado como nao-nome")
+        if acao:
+            detalhes.append({
+                "linha": i,
+                "arquivo": d.get("NOME_ARQUIVO"),
+                "nome_original": nome,
+                "acao": " | ".join(acao),
+            })
+    celulas = 0
+    if not dry_run and updates:
+        try:
+            celulas = _central_escreve_celulas(updates)
+        except Exception as e:
+            raise _HTTPExc(status_code=500, detail="Erro ao gravar: %s" % e)
+    return {
+        "sucesso": True,
+        "dry_run": dry_run,
+        "registros_tocados": len(detalhes),
+        "celulas_gravadas": celulas,
+        "detalhes": detalhes,
+    }
+# ============================================================
