@@ -2730,3 +2730,195 @@ def api_sanear_nomelixo(authorization: str = _Hdr(default=""), dry_run: bool = F
         "detalhes": detalhes,
     }
 # ============================================================
+
+# ============================================================
+# [RECUPERAR] Endpoint /api/recuperar - 2a passada OCR com variantes de pre-processamento
+# ============================================================
+
+_CAMPOS_RECUPERAVEIS = ["NASCIMENTO", "DATA_OBITO", "HORA_OBITO", "CIDADE_OBITO", "UF_OBITO",
+                        "CAUSA_MORTE", "CAUSA_BASICA", "CID_BASICA", "NOME", "NOME_MAE", "DO_NUMERO"]
+_PASTA_IMAGENS_ID = "1iwc59VnBEhjuYtW-OoOYg-UKioQ81ZfN"
+_PASTA_INBOX_ID   = "1R0ULeLVTvE67kONQLOawmb1zLyRK0X-j"
+
+def _central_valor_util(campo, txt):
+    if not txt:
+        return False
+    if len(txt) > 120:
+        return False
+    baixo = txt.lower().strip()
+    if baixo in ("lugar", "número", "numero", "anos completos", "do pai", "não informado", "nao informado", "none", "n/a", "-", "—"):
+        return False
+    if baixo.startswith("campo critico"):
+        return False
+    if baixo.startswith("assinatura"):
+        return False
+    return True
+
+def _central_nome_de(item):
+    if item is None:
+        return ""
+    if isinstance(item, dict):
+        return str(item.get("name") or item.get("title") or "")
+    return str(getattr(item, "name", "") or getattr(item, "title", "") or "")
+
+def _central_id_de(item):
+    if item is None:
+        return None
+    if isinstance(item, dict):
+        return item.get("id")
+    return getattr(item, "id", None)
+
+def _central_acha_arquivo(drive, nome_alvo, folder_id):
+    if not nome_alvo:
+        return None
+    try:
+        itens = _list_all_files_recursive(folder_id, drive, root_name=None)
+    except Exception:
+        return None
+    alvo = str(nome_alvo).strip().lower()
+    for it in (itens or []):
+        if _central_nome_de(it).strip().lower() == alvo:
+            return it
+    return None
+
+def _central_variantes_imagem(image_bytes):
+    import io as _io
+    import numpy as _np
+    import cv2 as _cv2
+    from PIL import Image as _PIL, ImageEnhance as _Enh, ImageOps as _Ops
+    variantes = {}
+    try:
+        img = _PIL.open(_io.BytesIO(image_bytes)).convert("RGB")
+    except Exception:
+        return {"original": image_bytes}
+    variantes["original"] = image_bytes
+    try:
+        arr = _np.array(img)
+        lab = _cv2.cvtColor(arr, _cv2.COLOR_RGB2LAB)
+        l, a, b = _cv2.split(lab)
+        l2 = _cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8)).apply(l)
+        lab2 = _cv2.merge((l2, a, b))
+        arr2 = _cv2.cvtColor(lab2, _cv2.COLOR_LAB2RGB)
+        ok, buf = _cv2.imencode(".jpg", _cv2.cvtColor(arr2, _cv2.COLOR_RGB2BGR))
+        if ok:
+            variantes["clahe"] = buf.tobytes()
+    except Exception:
+        pass
+    try:
+        gray = _np.array(img.convert("L"))
+        _, th = _cv2.threshold(gray, 0, 255, _cv2.THRESH_BINARY + _cv2.THRESH_OTSU)
+        ok, buf = _cv2.imencode(".jpg", th)
+        if ok:
+            variantes["otsu"] = buf.tobytes()
+    except Exception:
+        pass
+    try:
+        en = _Enh.Contrast(_Enh.Brightness(img).enhance(1.08)).enhance(1.35)
+        buf = _io.BytesIO()
+        en.save(buf, format="JPEG", quality=92)
+        variantes["brilho"] = buf.getvalue()
+    except Exception:
+        pass
+    return variantes
+
+def _central_tenta_recuperar(image_bytes):
+    campos = {}
+    variantes = _central_variantes_imagem(image_bytes)
+    for nome_var, bytes_var in variantes.items():
+        struct = None
+        try:
+            struct = _extract_structured_from_image(bytes_var, mime_type="image/jpeg")
+        except Exception:
+            pass
+        if not isinstance(struct, dict):
+            try:
+                struct = _ocr_image_retry(bytes_var, mime_type="image/jpeg")
+            except Exception:
+                struct = None
+        if not isinstance(struct, dict):
+            continue
+        for campo in _CAMPOS_RECUPERAVEIS:
+            val = struct.get(campo)
+            if val is None:
+                continue
+            txt = str(val).strip()
+            if not _central_valor_util(campo, txt):
+                continue
+            if campo not in campos:
+                campos[campo] = txt
+    return campos
+
+@app.post("/api/recuperar")
+def api_recuperar(authorization: str = _Hdr(default=""), dry_run: bool = False,
+                  limite: int = 50, arquivo: str = ""):
+    esperado = os.getenv("ENDPOINT_AUTH_TOKEN", "")
+    if not esperado or authorization != "Bearer %s" % esperado:
+        raise _HTTPExc(status_code=401, detail="Nao autorizado")
+    limite = min(max(int(limite), 1), 100)
+    if arquivo:
+        limite = 1
+    try:
+        values = _central_le_planilha("Auditoria_Unica")
+    except Exception as e:
+        raise _HTTPExc(status_code=500, detail="Erro ao ler planilha: %s" % e)
+    if not values:
+        return {"sucesso": True, "mensagem": "Planilha vazia", "dry_run": dry_run, "detalhes": []}
+    header = values[0]
+    drive = None
+    updates = []
+    detalhes = []
+    processados = 0
+    for i, row in enumerate(values[1:], start=2):
+        if processados >= limite:
+            break
+        d = {}
+        for idx, col in enumerate(header):
+            d[col] = row[idx] if idx < len(row) else ""
+        if (d.get("STATUS") or "").strip() != "REVISAR":
+            continue
+        if arquivo and (d.get("NOME_ARQUIVO") or "").strip() != arquivo:
+            continue
+        faltando = [c for c in ["NOME","NOME_MAE","NASCIMENTO","DATA_OBITO","CIDADE_OBITO","UF_OBITO","CAUSA_MORTE"] if not _central_campo_preenchido(d.get(c))]
+        if not faltando:
+            continue
+        processados += 1
+        try:
+            if drive is None:
+                drive = _get_drive_service()
+            item = _central_acha_arquivo(drive, d.get("NOME_ARQUIVO"), _PASTA_IMAGENS_ID)
+            if item is None:
+                item = _central_acha_arquivo(drive, d.get("NOME_ARQUIVO"), _PASTA_INBOX_ID)
+            if item is None:
+                detalhes.append({"linha": i, "arquivo": d.get("NOME_ARQUIVO"), "status": "arquivo_nao_encontrado"})
+                continue
+            fbytes = _download_image_bytes(_central_id_de(item))
+            campos = _central_tenta_recuperar(fbytes)
+            acoes = []
+            for campo in _CAMPOS_RECUPERAVEIS:
+                if campo not in campos:
+                    continue
+                if _central_campo_preenchido(d.get(campo)):
+                    continue
+                if campo not in header:
+                    continue
+                updates.append((i, header.index(campo) + 1, campos[campo]))
+                d[campo] = campos[campo]
+                acoes.append("%s=%s" % (campo, campos[campo][:40]))
+            if acoes:
+                detalhes.append({"linha": i, "arquivo": d.get("NOME_ARQUIVO"), "status": "recuperado",
+                                 "campos": acoes, "score_antes": d.get("QUALIDADE_SCORE")})
+            else:
+                detalhes.append({"linha": i, "arquivo": d.get("NOME_ARQUIVO"), "status": "sem_melhora"})
+        except Exception as e:
+            detalhes.append({"linha": i, "arquivo": d.get("NOME_ARQUIVO"), "status": "erro",
+                             "mensagem": str(e)[:120]})
+    celulas = 0
+    if not dry_run and updates:
+        try:
+            celulas = _central_escreve_celulas(updates)
+        except Exception as e:
+            raise _HTTPExc(status_code=500, detail="Erro ao gravar: %s" % e)
+    return {"sucesso": True, "dry_run": dry_run, "processados": processados,
+            "recuperados": sum(1 for x in detalhes if x.get("status") == "recuperado"),
+            "celulas_gravadas": celulas, "detalhes": detalhes}
+# ============================================================
