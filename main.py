@@ -3037,7 +3037,8 @@ def api_sanear_ano(authorization: str = _Hdr(default=""), dry_run: bool = False,
                 try:
                     dt = _d.date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
                 except Exception:
-                    dt = None        if dt is None:
+                    dt = None
+        if dt is None:
             m2 = _re.match(r"^(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})$", raw)
             if m2:
                 try:
