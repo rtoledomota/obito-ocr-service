@@ -2467,8 +2467,30 @@ def api_auditoria(authorization: str = _Hdr(default="")):
         status_counts[st] = status_counts.get(st, 0) + 1
         if (r.get("CID_AUTOMATICO") or "").strip() == "SIM":
             cid_auto += 1
+        raw_obito = (r.get("DATA_OBITO") or "").strip()
+        dt_obito = None
+        for _s in ("/", "-"):
+            if _s in raw_obito:
+                _p = raw_obito.split(_s)
+                if len(_p) == 3:
+                    try:
+                        if len(_p[0]) == 4:
+                            dt_obito = _dtmod.date(int(_p[0]), int(_p[1]), int(_p[2]))
+                        else:
+                            dt_obito = _dtmod.date(int(_p[2]), int(_p[1]), int(_p[0]))
+                    except Exception:
+                        dt_obito = None
+                    break
+        if dt_obito is None:
+            try:
+                _n = float(raw_obito)
+                if _n > 1000:
+                    dt_obito = (_dtmod.datetime(1899, 12, 30) + _dtmod.timedelta(days=_n)).date()
+            except Exception:
+                pass
+        hoje_br = _dtmod.datetime.now(_dtmod.timezone(_dtmod.timedelta(hours=-3))).date()
         mes = _central_parse_data(r.get("DATA_OBITO"))
-        if mes:
+        if mes and dt_obito is not None and dt_obito.year == 2026 and dt_obito <= hoje_br:
             mes_counts[mes] = mes_counts.get(mes, 0) + 1
     por_mes = [{"mes": k, "total": v} for k, v in sorted(mes_counts.items())]
     return {
