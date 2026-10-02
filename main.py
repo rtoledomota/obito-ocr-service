@@ -2995,3 +2995,79 @@ def api_diagnostico_ocr(authorization: str = _Hdr(default=""), limite: int = 5, 
         })
     return {"sucesso": True, "processados": processados, "detalhes": detalhes}
 # ============================================================
+
+# ============================================================
+# [ANO] Endpoint /api/sanear_ano - sinaliza DATA_OBITO fora do ano auditado (2026) ou futura
+# ============================================================
+@app.post("/api/sanear_ano")
+def api_sanear_ano(authorization: str = _Hdr(default=""), dry_run: bool = False,
+                   ano: int = 2026):
+    import datetime as _d
+    esperado = os.getenv("ENDPOINT_AUTH_TOKEN", "")
+    if not esperado or authorization != "Bearer %s" % esperado:
+        raise _HTTPExc(status_code=401, detail="Nao autorizado")
+    ano = int(ano)
+    try:
+        values = _central_le_planilha("Auditoria_Unica")
+    except Exception as e:
+        raise _HTTPExc(status_code=500, detail="Erro ao ler planilha: %s" % e)
+    if not values:
+        return {"sucesso": True, "mensagem": "Planilha vazia", "dry_run": dry_run, "detalhes": []}
+    header = values[0]
+    hoje = _d.datetime.now().date()
+    updates = []
+    detalhes = []
+    for i, row in enumerate(values[1:], start=2):
+        d = {}
+        for idx, col in enumerate(header):
+            d[col] = row[idx] if idx < len(row) else ""
+        raw = (d.get("DATA_OBITO") or "").strip()
+        if not raw:
+            continue
+        dt = None
+        try:
+            num = float(raw)
+            if num > 1000:
+                dt = (_d.datetime(1899, 12, 30) + _d.timedelta(days=num)).date()
+        except Exception:
+            pass
+        if dt is None:
+            m = _re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", raw)
+            if m:
+                try:
+                    dt = _d.date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+                except Exception:
+                    dt = None
+        if dt is None:
+            continue
+        motivo = None
+        if dt.year != ano:
+            motivo = "DATA_OBITO ano %d (fora de %d)" % (dt.year, ano)
+        elif dt > hoje:
+            motivo = "DATA_OBITO futura %s" % dt.isoformat()
+        if not motivo:
+            continue
+        acoes = []
+        if (d.get("STATUS") or "").strip() == "OK":
+            updates.append((i, header.index("STATUS") + 1, "REVISAR"))
+            acoes.append("STATUS OK->REVISAR")
+        notas = (d.get("ERROS") or "").strip()
+        nova_nota = "Sinalizado: %s - conferir imagem e corrigir data." % motivo
+        if notas and nova_nota not in notas:
+            nova_nota = notas + " | " + nova_nota
+        updates.append((i, header.index("ERROS") + 1, nova_nota))
+        acoes.append("ERROS atualizado")
+        detalhes.append({"linha": i, "arquivo": d.get("NOME_ARQUIVO"),
+                         "nome": d.get("NOME"), "data_original": raw,
+                         "data_parseada": dt.isoformat(), "motivo": motivo,
+                         "acoes": acoes})
+    celulas = 0
+    if not dry_run and updates:
+        try:
+            celulas = _central_escreve_celulas(updates)
+        except Exception as e:
+            raise _HTTPExc(status_code=500, detail="Erro ao gravar: %s" % e)
+    return {"sucesso": True, "dry_run": dry_run, "ano": ano,
+            "sinalizados": len(detalhes), "celulas_gravadas": celulas,
+            "detalhes": detalhes}
+# ============================================================
