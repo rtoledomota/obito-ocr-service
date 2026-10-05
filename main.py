@@ -2561,7 +2561,7 @@ def _central_deriva_nascimento(r):
     except Exception:
         return None, False
 
-def _central_escreve_celulas(updates):
+def _central_escreve_celulas(updates, aba="Auditoria_Unica"):
     from google.oauth2 import service_account as _sa
     from googleapiclient.discovery import build as _build
     _info = _json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or os.getenv("DRIVE_SERVICE_ACCOUNT_JSON") or "{}")
@@ -2569,7 +2569,7 @@ def _central_escreve_celulas(updates):
         return 0
     _creds = _sa.Credentials.from_service_account_info(_info, scopes=["https://www.googleapis.com/auth/spreadsheets"])
     _svc = _build("sheets", "v4", credentials=_creds, cache_discovery=False)
-    data = [{"range": "Auditoria_Unica!%s%d" % (_central_col_letra(col), linha), "values": [[val]]} for linha, col, val in updates]
+    data = [{"range": "%s!%s%d" % (aba, _central_col_letra(col), linha), "values": [[val]]} for linha, col, val in updates]
     resp = _svc.spreadsheets().values().batchUpdate(
         spreadsheetId=SHEET_ID,
         body={"valueInputOption": "USER_ENTERED", "data": data}
@@ -3096,7 +3096,165 @@ def api_sanear_ano(authorization: str = _Hdr(default=""), dry_run: bool = False,
             celulas = _central_escreve_celulas(updates)
         except Exception as e:
             raise _HTTPExc(status_code=500, detail="Erro ao gravar: %s" % e)
+    celulas_hist = 0
+    if not dry_run and detalhes:
+        try:
+            hist_values = _central_le_planilha("Auditoria")
+            if hist_values:
+                _hdr = hist_values[0]
+                _i_st = _hdr.index("STATUS") if "STATUS" in _hdr else -1
+                _i_er = _hdr.index("ERROS") if "ERROS" in _hdr else -1
+                _i_nm = _hdr.index("NOME_ARQUIVO") if "NOME_ARQUIVO" in _hdr else -1
+                _por_nome = {}
+                for _r, _row in enumerate(hist_values[1:], start=2):
+                    _nome = str(_row[_i_nm]).strip() if (_i_nm >= 0 and len(_row) > _i_nm) else ""
+                    if _nome:
+                        _por_nome.setdefault(_nome, []).append(_r)
+                _upd_hist = []
+                for _det in detalhes:
+                    _nome_alvo = (_det.get("arquivo") or "").strip()
+                    if not _nome_alvo or _nome_alvo not in _por_nome:
+                        continue
+                    _nota_h = "Sinalizado: %s - conferir imagem e corrigir data." % (_det.get("motivo") or "")
+                    for _r in _por_nome[_nome_alvo]:
+                        _row_h = hist_values[_r - 1]
+                        if _i_st >= 0:
+                            _val_st = str(_row_h[_i_st]).strip() if len(_row_h) > _i_st else ""
+                            if _val_st == "OK":
+                                _upd_hist.append((_r, _i_st + 1, "REVISAR"))
+                        if _i_er >= 0:
+                            _val_er = str(_row_h[_i_er]).strip() if len(_row_h) > _i_er else ""
+                            _nova = _nota_h
+                            if _val_er and _nova not in _val_er:
+                                _nova = _val_er + " | " + _nova
+                            _upd_hist.append((_r, _i_er + 1, _nova))
+                if _upd_hist:
+                    celulas_hist = _central_escreve_celulas(_upd_hist, aba="Auditoria")
+        except Exception as e:
+            logger.warning("api_sanear_ano: falha ao replicar no historico: %s" % e, exc_info=True)
     return {"sucesso": True, "dry_run": dry_run, "ano": ano,
             "sinalizados": len(detalhes), "celulas_gravadas": celulas,
-            "detalhes": detalhes}
+            "celulas_gravadas_historico": celulas_hist, "detalhes": detalhes}
 # ============================================================
+
+# ============================================================
+# Patch 40: Upload de DO pela Central (/api/upload)
+# Salva a imagem na INBOX do Drive e dispara o OCR imediato.
+# ============================================================
+from fastapi import UploadFile as _UpFile
+from fastapi import File as _FUp
+from googleapiclient.http import MediaIoBaseUpload as _MediaUp
+import io as _iou
+
+_UPLOAD_EXT_MIME = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".gif": "image/gif", ".bmp": "image/bmp", ".webp": "image/webp",
+    ".tif": "image/tiff", ".tiff": "image/tiff", ".pdf": "application/pdf",
+}
+_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
+
+@app.post("/api/upload")
+def api_upload(authorization: str = _Hdr(default=""), processar: bool = True,
+               file: _UpFile = _FUp(...)):
+    esperado = os.getenv("ENDPOINT_AUTH_TOKEN", "")
+    if not esperado or authorization != "Bearer %s" % esperado:
+        raise _HTTPExc(status_code=401, detail="Nao autorizado")
+    nome = os.path.basename((file.filename or "arquivo")).strip()
+    ext = os.path.splitext(nome)[1].lower()
+    if ext not in _UPLOAD_EXT_MIME:
+        raise _HTTPExc(status_code=415, detail="Formato nao suportado (%s). Use imagem ou PDF." % ext)
+    dados = file.file.read()
+    if not dados:
+        raise _HTTPExc(status_code=400, detail="Arquivo vazio")
+    if len(dados) > _UPLOAD_MAX_BYTES:
+        raise _HTTPExc(status_code=413, detail="Arquivo grande demais (max 20MB)")
+    drive = _get_drive_service()
+    _q = "name='%s' and '%s' in parents and trashed=false" % (nome.replace("'", "\'"), _PASTA_INBOX_ID)
+    _exist = drive.files().list(q=_q, spaces="drive", fields="files(id, name)", pageSize=5).execute()
+    if _exist.get("files"):
+        return {"sucesso": False,
+                "mensagem": "Ja existe arquivo com esse nome na INBOX. Nada alterado.",
+                "existente": [{"id": f["id"], "name": f["name"]} for f in _exist["files"]]}
+    media = _MediaUp(_iou.BytesIO(dados), mimetype=_UPLOAD_EXT_MIME[ext], resumable=False)
+    corpo = {"name": nome, "parents": [_PASTA_INBOX_ID]}
+    criado = drive.files().create(body=corpo, media_body=media, fields="id, name, size").execute()
+    id_arquivo = criado.get("id")
+    logger.info("Upload OK: %s (%s) -> INBOX" % (nome, id_arquivo))
+    resumo = {"sucesso": True, "arquivo": nome, "id_drive": id_arquivo,
+              "salvo_em": "INBOX - DOs Novas", "processado_agora": False, "detalhe": ""}
+    if processar:
+        try:
+            r = _run_batch(limit=1, reprocess=True, files=nome)
+            resumo["processado_agora"] = bool(r.get("processed", 0))
+            for _k in ("processed", "duplicates", "rejected", "failed", "duplicated_files", "failed_files"):
+                if _k in r:
+                    resumo[_k] = r[_k]
+            if r.get("success") is False and r.get("message"):
+                resumo["detalhe"] = r["message"]
+            elif not resumo["processado_agora"]:
+                resumo["detalhe"] = "Arquivo salvo na INBOX; sera processado na proxima varredura automatica."
+        except Exception as _eu:
+            logger.warning("Upload: processamento imediato falhou: %s" % _eu, exc_info=True)
+            resumo["detalhe"] = "Arquivo salvo na INBOX; processamento imediato falhou, aguarde a varredura automatica."
+    return resumo
+
+# ============================================================
+# Patch 40: Upload de DO pela Central (/api/upload)
+# Salva a imagem na INBOX do Drive e dispara o OCR imediato.
+# ============================================================
+from fastapi import UploadFile as _UpFile
+from fastapi import File as _FUp
+from googleapiclient.http import MediaIoBaseUpload as _MediaUp
+import io as _iou
+
+_UPLOAD_EXT_MIME = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".gif": "image/gif", ".bmp": "image/bmp", ".webp": "image/webp",
+    ".tif": "image/tiff", ".tiff": "image/tiff", ".pdf": "application/pdf",
+}
+_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
+
+@app.post("/api/upload")
+def api_upload(authorization: str = _Hdr(default=""), processar: bool = True,
+               file: _UpFile = _FUp(...)):
+    esperado = os.getenv("ENDPOINT_AUTH_TOKEN", "")
+    if not esperado or authorization != "Bearer %s" % esperado:
+        raise _HTTPExc(status_code=401, detail="Nao autorizado")
+    nome = os.path.basename((file.filename or "arquivo")).strip()
+    ext = os.path.splitext(nome)[1].lower()
+    if ext not in _UPLOAD_EXT_MIME:
+        raise _HTTPExc(status_code=415, detail="Formato nao suportado (%s). Use imagem ou PDF." % ext)
+    dados = file.file.read()
+    if not dados:
+        raise _HTTPExc(status_code=400, detail="Arquivo vazio")
+    if len(dados) > _UPLOAD_MAX_BYTES:
+        raise _HTTPExc(status_code=413, detail="Arquivo grande demais (max 20MB)")
+    drive = _get_drive_service()
+    _q = "name='%s' and '%s' in parents and trashed=false" % (nome.replace("'", "\'"), _PASTA_INBOX_ID)
+    _exist = drive.files().list(q=_q, spaces="drive", fields="files(id, name)", pageSize=5).execute()
+    if _exist.get("files"):
+        return {"sucesso": False,
+                "mensagem": "Ja existe arquivo com esse nome na INBOX. Nada alterado.",
+                "existente": [{"id": f["id"], "name": f["name"]} for f in _exist["files"]]}
+    media = _MediaUp(_iou.BytesIO(dados), mimetype=_UPLOAD_EXT_MIME[ext], resumable=False)
+    corpo = {"name": nome, "parents": [_PASTA_INBOX_ID]}
+    criado = drive.files().create(body=corpo, media_body=media, fields="id, name, size").execute()
+    id_arquivo = criado.get("id")
+    logger.info("Upload OK: %s (%s) -> INBOX" % (nome, id_arquivo))
+    resumo = {"sucesso": True, "arquivo": nome, "id_drive": id_arquivo,
+              "salvo_em": "INBOX - DOs Novas", "processado_agora": False, "detalhe": ""}
+    if processar:
+        try:
+            r = _run_batch(limit=1, reprocess=True, files=nome)
+            resumo["processado_agora"] = bool(r.get("processed", 0))
+            for _k in ("processed", "duplicates", "rejected", "failed", "duplicated_files", "failed_files"):
+                if _k in r:
+                    resumo[_k] = r[_k]
+            if r.get("success") is False and r.get("message"):
+                resumo["detalhe"] = r["message"]
+            elif not resumo["processado_agora"]:
+                resumo["detalhe"] = "Arquivo salvo na INBOX; sera processado na proxima varredura automatica."
+        except Exception as _eu:
+            logger.warning("Upload: processamento imediato falhou: %s" % _eu, exc_info=True)
+            resumo["detalhe"] = "Arquivo salvo na INBOX; processamento imediato falhou, aguarde a varredura automatica."
+    return resumo
