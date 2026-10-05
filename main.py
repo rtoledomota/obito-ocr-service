@@ -1773,7 +1773,7 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
 
 # â”€â”€ Dedupe da aba Auditoria â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-def _dedupe_auditoria(sheet_id: str = SHEET_ID) -> dict:
+def _dedupe_auditoria(sheet_id: str = SHEET_ID, destino: str = "Auditoria_LIMPA") -> dict:
     """Remove duplicatas mantendo o melhor registro por NOME_ARQUIVO."""
     sheets = _get_sheets_service()
     result = sheets.spreadsheets().values().get(
@@ -1864,25 +1864,61 @@ def _dedupe_auditoria(sheet_id: str = SHEET_ID) -> dict:
         if atual is None or (_complet(row), _prio(row), _tem_qimg(row), _tem_hash(row), _score(row)) > (_complet(atual), _prio(atual), _tem_qimg(atual), _tem_hash(atual), _score(atual)):
             melhores[k] = row
     limpos = list(melhores.values())
+    # --- Preserva colunas extras do destino (ex.: CAPITULO_CID/GRUPO) por chave ---
+    try:
+        _dst = sheets.spreadsheets().values().get(
+            spreadsheetId=sheet_id, range=destino + "!A1:AB"
+        ).execute()
+        _dst_rows = _dst.get("values", [])
+    except Exception:
+        _dst_rows = []
+    _extra = []
+    if _dst_rows:
+        _hdr_dst = _dst_rows[0]
+        if len(_hdr_dst) > len(header):
+            _extra = _hdr_dst[len(header):]
+    _map_extra = {}
+    if _extra:
+        for _r in _dst_rows[1:]:
+            if not _r or not any(str(c).strip() for c in _r):
+                continue
+            try:
+                _k = _key(_r)
+            except Exception:
+                _k = None
+            if _k:
+                _map_extra.setdefault(_k, {})
+                for _j, _c in enumerate(_extra):
+                    _map_extra[_k][_c] = _r[len(header) + _j] if len(_r) > len(header) + _j else ""
+    if _extra:
+        _novas = []
+        for _r in limpos:
+            _k2 = _key(_r)
+            _vals = []
+            for _c in _extra:
+                _vals.append((_map_extra.get(_k2) or {}).get(_c, ""))
+            _novas.append(_r + _vals)
+        limpos = _novas
+        header = header + _extra
 
     try:
         sheets.spreadsheets().batchUpdate(
             spreadsheetId=sheet_id,
-            body={"requests": [{"addSheet": {"properties": {"title": "Auditoria_LIMPA"}}}]},
+            body={"requests": [{"addSheet": {"properties": {"title": destino}}}]},
         ).execute()
     except Exception:
         pass
 
     sheets.spreadsheets().values().clear(
-        spreadsheetId=sheet_id, range="Auditoria_LIMPA",
+        spreadsheetId=sheet_id, range=destino,
     ).execute()
     sheets.spreadsheets().values().update(
-        spreadsheetId=sheet_id, range="Auditoria_LIMPA!A1",
+        spreadsheetId=sheet_id, range=destino + "!A1",
         valueInputOption="USER_ENTERED",
         body={"values": [header] + limpos},
     ).execute()
     return {"success": True, "originais": len(data), "unicos": len(limpos),
-            "removidos": len(data) - len(limpos), "aba": "Auditoria_LIMPA"}
+            "removidos": len(data) - len(limpos), "aba": destino}
 
 from fastapi.responses import HTMLResponse
 
@@ -2105,10 +2141,10 @@ def admin_tag_pasta(folder: str = "AGOSTO", desde: str = "2026-09-19", dry_run: 
     return {"success": True, "etiquetadas": len(alvos)}
 
 @app.post("/admin/dedupe")
-def admin_dedupe():
-    """Remove duplicatas da aba Auditoria e grava em Auditoria_LIMPA."""
+def admin_dedupe(aba: str = "Auditoria_LIMPA"):
+    """Remove duplicatas da aba Auditoria e grava na aba indicada."""
     try:
-        return _dedupe_auditoria()
+        return _dedupe_auditoria(destino=aba)
     except Exception as e:
         logger.error(f"Erro no dedupe: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
