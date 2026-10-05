@@ -3181,6 +3181,24 @@ from fastapi import UploadFile as _UpFile
 from fastapi import File as _FUp
 from googleapiclient.http import MediaIoBaseUpload as _MediaUp
 import io as _iou
+def _get_drive_owner_service():
+    from google.oauth2.credentials import Credentials as _Creds
+    from googleapiclient.discovery import build as _Build
+    _cid = os.getenv("DRIVE_OWNER_CLIENT_ID") or ""
+    _csec = os.getenv("DRIVE_OWNER_CLIENT_SECRET") or ""
+    _rt = os.getenv("DRIVE_OWNER_REFRESH_TOKEN") or ""
+    if not (_cid and _csec and _rt):
+        raise RuntimeError("Faltam DRIVE_OWNER_* no ambiente")
+    _cred = _Creds(token_uri="https://oauth2.googleapis.com/token",
+                   refresh_token=_rt, client_id=_cid, client_secret=_csec)
+    return _Build("drive", "v3", credentials=_cred, cache_discovery=False)
+
+def _drive_create_fallback(drive, corpo, media):
+    try:
+        return drive.files().create(body=corpo, media_body=media, fields="id, name, size").execute()
+    except Exception as _ec:
+        logger.warning("Upload: SA sem quota, tentando OAuth do dono: %s" % _ec)
+        return _get_drive_owner_service().files().create(body=corpo, media_body=media, fields="id, name, size").execute()
 
 _UPLOAD_EXT_MIME = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
@@ -3213,7 +3231,7 @@ def api_upload(authorization: str = _Hdr(default=""), processar: bool = True,
                 "existente": [{"id": f["id"], "name": f["name"]} for f in _exist["files"]]}
     media = _MediaUp(_iou.BytesIO(dados), mimetype=_UPLOAD_EXT_MIME[ext], resumable=False)
     corpo = {"name": nome, "parents": [_PASTA_INBOX_ID]}
-    criado = drive.files().create(body=corpo, media_body=media, fields="id, name, size").execute()
+    criado = _drive_create_fallback(drive, corpo, media)
     id_arquivo = criado.get("id")
     logger.info("Upload OK: %s (%s) -> INBOX" % (nome, id_arquivo))
     resumo = {"sucesso": True, "arquivo": nome, "id_drive": id_arquivo,
@@ -3274,7 +3292,7 @@ def api_upload(authorization: str = _Hdr(default=""), processar: bool = True,
                 "existente": [{"id": f["id"], "name": f["name"]} for f in _exist["files"]]}
     media = _MediaUp(_iou.BytesIO(dados), mimetype=_UPLOAD_EXT_MIME[ext], resumable=False)
     corpo = {"name": nome, "parents": [_PASTA_INBOX_ID]}
-    criado = drive.files().create(body=corpo, media_body=media, fields="id, name, size").execute()
+    criado = _drive_create_fallback(drive, corpo, media)
     id_arquivo = criado.get("id")
     logger.info("Upload OK: %s (%s) -> INBOX" % (nome, id_arquivo))
     resumo = {"sucesso": True, "arquivo": nome, "id_drive": id_arquivo,
