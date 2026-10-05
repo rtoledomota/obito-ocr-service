@@ -3189,7 +3189,7 @@ def _get_drive_owner_service():
     _rt = os.getenv("DRIVE_OWNER_REFRESH_TOKEN") or ""
     if not (_cid and _csec and _rt):
         raise RuntimeError("Faltam DRIVE_OWNER_* no ambiente")
-    _cred = _Creds(token_uri="https://oauth2.googleapis.com/token",
+    _cred = _Creds(token=None, token_uri="https://oauth2.googleapis.com/token",
                    refresh_token=_rt, client_id=_cid, client_secret=_csec)
     return _Build("drive", "v3", credentials=_cred, cache_discovery=False)
 
