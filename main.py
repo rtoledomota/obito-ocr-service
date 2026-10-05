@@ -3223,12 +3223,18 @@ def api_upload(authorization: str = _Hdr(default=""), processar: bool = True,
     if len(dados) > _UPLOAD_MAX_BYTES:
         raise _HTTPExc(status_code=413, detail="Arquivo grande demais (max 20MB)")
     drive = _get_drive_service()
-    _q = "name='%s' and '%s' in parents and trashed=false" % (nome.replace("'", "\'"), _PASTA_INBOX_ID)
-    _exist = drive.files().list(q=_q, spaces="drive", fields="files(id, name)", pageSize=5).execute()
-    if _exist.get("files"):
-        return {"sucesso": False,
-                "mensagem": "Ja existe arquivo com esse nome na INBOX. Nada alterado.",
-                "existente": [{"id": f["id"], "name": f["name"]} for f in _exist["files"]]}
+    nome_original = nome
+    stem, _, ex = nome.rpartition(".")
+    idx = 0
+    while True:
+        _q = "name='%s' and '%s' in parents and trashed=false" % (nome.replace("'", "\'"), _PASTA_INBOX_ID)
+        _exist = drive.files().list(q=_q, spaces="drive", fields="files(id, name)", pageSize=5).execute()
+        if not _exist.get("files"):
+            break
+        idx += 1
+        nome = "%s (%d).%s" % (stem, idx, ex)
+    if idx:
+        logger.info("Upload: '%s' ja existia na INBOX; usando '%s'" % (nome_original, nome))
     media = _MediaUp(_iou.BytesIO(dados), mimetype=_UPLOAD_EXT_MIME[ext], resumable=False)
     corpo = {"name": nome, "parents": [_PASTA_INBOX_ID]}
     criado = _drive_create_fallback(drive, corpo, media)
@@ -3236,6 +3242,9 @@ def api_upload(authorization: str = _Hdr(default=""), processar: bool = True,
     logger.info("Upload OK: %s (%s) -> INBOX" % (nome, id_arquivo))
     resumo = {"sucesso": True, "arquivo": nome, "id_drive": id_arquivo,
               "salvo_em": "INBOX - DOs Novas", "processado_agora": False, "detalhe": ""}
+    if idx:
+        resumo["nome_original"] = nome_original
+        resumo["renomeado"] = True
     if processar:
         try:
             r = _run_batch(limit=1, reprocess=True, files=nome)
@@ -3284,12 +3293,18 @@ def api_upload(authorization: str = _Hdr(default=""), processar: bool = True,
     if len(dados) > _UPLOAD_MAX_BYTES:
         raise _HTTPExc(status_code=413, detail="Arquivo grande demais (max 20MB)")
     drive = _get_drive_service()
-    _q = "name='%s' and '%s' in parents and trashed=false" % (nome.replace("'", "\'"), _PASTA_INBOX_ID)
-    _exist = drive.files().list(q=_q, spaces="drive", fields="files(id, name)", pageSize=5).execute()
-    if _exist.get("files"):
-        return {"sucesso": False,
-                "mensagem": "Ja existe arquivo com esse nome na INBOX. Nada alterado.",
-                "existente": [{"id": f["id"], "name": f["name"]} for f in _exist["files"]]}
+    nome_original = nome
+    stem, _, ex = nome.rpartition(".")
+    idx = 0
+    while True:
+        _q = "name='%s' and '%s' in parents and trashed=false" % (nome.replace("'", "\'"), _PASTA_INBOX_ID)
+        _exist = drive.files().list(q=_q, spaces="drive", fields="files(id, name)", pageSize=5).execute()
+        if not _exist.get("files"):
+            break
+        idx += 1
+        nome = "%s (%d).%s" % (stem, idx, ex)
+    if idx:
+        logger.info("Upload: '%s' ja existia na INBOX; usando '%s'" % (nome_original, nome))
     media = _MediaUp(_iou.BytesIO(dados), mimetype=_UPLOAD_EXT_MIME[ext], resumable=False)
     corpo = {"name": nome, "parents": [_PASTA_INBOX_ID]}
     criado = _drive_create_fallback(drive, corpo, media)
@@ -3297,6 +3312,9 @@ def api_upload(authorization: str = _Hdr(default=""), processar: bool = True,
     logger.info("Upload OK: %s (%s) -> INBOX" % (nome, id_arquivo))
     resumo = {"sucesso": True, "arquivo": nome, "id_drive": id_arquivo,
               "salvo_em": "INBOX - DOs Novas", "processado_agora": False, "detalhe": ""}
+    if idx:
+        resumo["nome_original"] = nome_original
+        resumo["renomeado"] = True
     if processar:
         try:
             r = _run_batch(limit=1, reprocess=True, files=nome)
