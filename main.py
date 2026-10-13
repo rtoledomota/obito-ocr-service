@@ -3692,3 +3692,76 @@ def _get_drive_owner_service():
     if _get_drive_owner_service_original is not None:
         return _get_drive_owner_service_original()
     raise RuntimeError("Patch 42: nenhuma credencial de Drive disponivel")
+# ============================================================
+# Patch 44 - Proxy Apps Script para Drive (upload e renomeio)
+# Prioriza o Web App (APPS_SCRIPT_PROXY_URL) para criar arquivos
+# no Drive, eliminando a dependencia do refresh token OAuth
+# (DRIVE_OWNER_*) que expirava (invalid_grant). Usa somente a
+# biblioteca padrao (urllib).
+# ============================================================
+import urllib.request as _ur, urllib.parse as _up, json as _json_p, os as _os_p
+
+class _KeepPostRedirect(_ur.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None:
+            new.data = req.data
+            for _k in ("Content-Type", "Content-Length"):
+                if req.has_header(_k):
+                    new.add_unredirected_header(_k, req.headers.get(_k))
+        return new
+
+def _proxy_url():
+    return _os_p.getenv("APPS_SCRIPT_PROXY_URL", "").strip()
+
+def _proxy_post(payload_bytes, params, mime="application/octet-stream", timeout=120):
+    url = _proxy_url()
+    if not url:
+        raise RuntimeError("APPS_SCRIPT_PROXY_URL nao configurada")
+    if _os_p.getenv("APPS_SCRIPT_PROXY_TOKEN", "").strip():
+        params = dict(params)
+        params["token"] = _os_p.getenv("APPS_SCRIPT_PROXY_TOKEN", "").strip()
+    sep = "&" if "?" in url else "?"
+    full = url + sep + _up.urlencode(params)
+    req = _ur.Request(full, data=payload_bytes, method="POST")
+    req.add_header("Content-Type", mime)
+    req.add_header("Expect", "")
+    opener = _ur.build_opener(_KeepPostRedirect)
+    with opener.open(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8")
+    payload = _json_p.loads(raw)
+    if not payload.get("success"):
+        raise RuntimeError("Proxy Apps Script: %s" % payload.get("error", "erro desconhecido"))
+    return payload
+
+def _read_media_bytes(media):
+    stream = None
+    if hasattr(media, "stream"):
+        stream = media.stream()
+    elif hasattr(media, "_fd"):
+        stream = media._fd
+    if stream is not None and hasattr(stream, "read"):
+        return stream.read()
+    return media
+
+def _drive_create_fallback(drive, corpo, media):
+    """Patch 44: usa o Proxy Apps Script quando configurado; senao cai no fluxo original."""
+    if _proxy_url():
+        nome = corpo.get("name") or "arquivo.jpg"
+        mime = media.mimetype() if hasattr(media, "mimetype") else corpo.get("mimeType", "application/octet-stream")
+        pasta = corpo.get("parents") or corpo.get("parent")
+        folder_id = ""
+        if isinstance(pasta, (list, tuple)):
+            folder_id = pasta[0] or ""
+        elif isinstance(pasta, str):
+            folder_id = pasta
+        data = _read_media_bytes(media)
+        result = _proxy_post(data, {"action": "create", "filename": nome, "folderId": folder_id}, mime=mime)
+        return {"id": result.get("id"), "name": result.get("name"), "size": result.get("size")}
+    svc = _get_drive_owner_service()
+    return svc.files().create(body=corpo, media_body=media, fields="id, name, size").execute()
+
+def _rename_via_proxy(file_id, filename):
+    """Helper pronto: renomear arquivo no Drive via Proxy (action=rename)."""
+    result = _proxy_post(b"", {"action": "rename", "fileId": file_id, "filename": filename})
+    return result.get("id")
