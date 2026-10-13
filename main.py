@@ -3634,3 +3634,61 @@ def api_upload_pdf(authorization: str = _Hdr(default=""), processar: bool = True
             logger.warning("upload_pdf: processamento/renomeio falhou: %s" % _eu, exc_info=True)
             resumo["detalhe"] = "Arquivos salvos; processamento/renomeio falhou, aguarde varredura."
     return resumo
+# ============================================================
+# Patch 42 - Caminho 2: Migracao para Service Account no Drive
+# Corrige 'invalid_grant: Token has been expired or revoked'
+# usando a Service Account (DRIVE_SERVICE_ACCOUNT_JSON) em vez
+# do OAuth (DRIVE_OWNER_*) expirado, ao criar arquivos no Drive.
+# ============================================================
+import json as _json
+try:
+    from google.oauth2 import service_account as _sa
+    from googleapiclient.discovery import build as _build_drive
+    _HAS_SA = True
+except Exception:
+    _HAS_SA = False
+
+# Preserva a implementacao original do OAuth para fallback
+if "_get_drive_owner_service_original" not in globals():
+    try:
+        _get_drive_owner_service_original = _get_drive_owner_service
+    except NameError:
+        _get_drive_owner_service_original = None
+
+def _carregar_service_account_json():
+    import base64 as _b64
+    for var in ("DRIVE_SERVICE_ACCOUNT_JSON", "GOOGLE_SERVICE_ACCOUNT_JSON"):
+        raw = os.getenv(var, "")
+        if not raw:
+            continue
+        try:
+            return _json.loads(raw)
+        except Exception:
+            pass
+        try:
+            return _json.loads(_b64.b64decode(raw).decode("utf-8"))
+        except Exception:
+            continue
+    caminho = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+    if caminho and os.path.exists(caminho):
+        try:
+            with open(caminho, "r", encoding="utf-8") as _f:
+                return _json.load(_f)
+        except Exception:
+            pass
+    return None
+
+def _get_drive_owner_service():
+    """Sobrescrita: prioriza Service Account; fallback OAuth."""
+    if _HAS_SA:
+        info = _carregar_service_account_json()
+        if info:
+            try:
+                _creds = _sa.Credentials.from_service_account_info(
+                    info, scopes=["https://www.googleapis.com/auth/drive"])
+                return _build_drive("drive", "v3", credentials=_creds, cache_discovery=False)
+            except Exception as _e:
+                logger.warning("Patch 42: Service Account falhou, usando OAuth: %s" % _e)
+    if _get_drive_owner_service_original is not None:
+        return _get_drive_owner_service_original()
+    raise RuntimeError("Patch 42: nenhuma credencial de Drive disponivel")
