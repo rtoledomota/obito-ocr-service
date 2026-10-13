@@ -390,7 +390,7 @@ def _list_all_files_recursive(folder_id, drive, root_name=None):
         response = drive.files().list(
             q=query, spaces="drive",
             fields="nextPageToken, files(id, name, mimeType, createdTime)",
-            pageToken=page_token, orderBy="createdTime asc",
+            pageToken=page_token, orderBy="createdTime desc",
         ).execute()
         for _f in response.get("files", []):
             _f["folder"] = root_name or ""
@@ -3329,4 +3329,308 @@ def api_upload(authorization: str = _Hdr(default=""), processar: bool = True,
         except Exception as _eu:
             logger.warning("Upload: processamento imediato falhou: %s" % _eu, exc_info=True)
             resumo["detalhe"] = "Arquivo salvo na INBOX; processamento imediato falhou, aguarde a varredura automatica."
+    return resumo
+# ============================================================
+# Patch 41: Split de PDF em paginas reais + upload (/api/upload_pdf)
+# ============================================================
+try:
+    import fitz  # PyMuPDF
+    _HAS_FITZ = True
+except Exception:
+    _HAS_FITZ = False
+
+import re as _re
+
+def _sanitizar_nome(nome):
+    nome = _re.sub(r'[\\/:*?"<>|]+', '', nome or "")
+    nome = _re.sub(r'\s+', ' ', nome).strip()
+    return nome
+
+def _split_pdf_para_imagens(dados_pdf, dpi=300):
+    if not _HAS_FITZ:
+        raise RuntimeError("PyMuPDF (fitz) nao instalado no servidor")
+    doc = fitz.open(stream=dados_pdf, filetype="pdf")
+    if doc.needs_pass:
+        doc.close()
+        raise RuntimeError("PDF protegido por senha")
+    paginas = []
+    try:
+        for page in doc:
+            mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            paginas.append(pix.tobytes("jpeg", jpg_quality=90))
+    finally:
+        doc.close()
+    return paginas
+
+def _buscar_nome_na_auditoria(nome_arquivo):
+    """Busca o NOME extraido na aba Auditoria para o arquivo."""
+    try:
+        ss = _get_sheets_service()
+        resp = ss.spreadsheets().values().get(
+            spreadsheetId=_SPREADSHEET_ID,
+            range="Auditoria!A1:Z"
+        ).execute()
+        valores = resp.get("values", [])
+        if not valores:
+            return ""
+        cab = valores[0]
+        idx_nome = cab.index("NOME") if "NOME" in cab else 4
+        idx_arq = cab.index("NOME_ARQUIVO") if "NOME_ARQUIVO" in cab else 1
+        for linha in valores[1:]:
+            if len(linha) > idx_arq and linha[idx_arq] == nome_arquivo:
+                if len(linha) > idx_nome:
+                    return linha[idx_nome]
+        return ""
+    except Exception as e:
+        logger.warning("buscar_nome_na_auditoria falhou: %s" % e)
+        return ""
+
+def _atualizar_nome_arquivo_na_planilha(nome_antigo, nome_novo):
+    """Atualiza NOME_ARQUIVO na Auditoria e Auditoria_Unica apos renomeio."""
+    try:
+        ss = _get_sheets_service()
+        for aba in ("Auditoria", "Auditoria_Unica"):
+            resp = ss.spreadsheets().values().get(
+                spreadsheetId=_SPREADSHEET_ID, range="%s!A1:Z" % aba
+            ).execute()
+            valores = resp.get("values", [])
+            if not valores:
+                continue
+            cab = valores[0]
+            idx_arq = cab.index("NOME_ARQUIVO") if "NOME_ARQUIVO" in cab else 1
+            for i, linha in enumerate(valores[1:], start=2):
+                if len(linha) > idx_arq and linha[idx_arq] == nome_antigo:
+                    col = chr(65 + idx_arq)
+                    ss.spreadsheets().values().update(
+                        spreadsheetId=_SPREADSHEET_ID,
+                        range="%s!%s%d" % (aba, col, i),
+                        valueInputOption="RAW",
+                        body={"values": [[nome_novo]]}
+                    ).execute()
+    except Exception as e:
+        logger.warning("atualizar_nome_arquivo_na_planilha falhou: %s" % e)
+
+def _renomear_por_nome_apos_ocr(drive, id_arquivo, nome_atual, data_prefixo, pag_idx):
+    nome_paciente = _buscar_nome_na_auditoria(nome_atual)
+    if not nome_paciente or nome_paciente.startswith("["):
+        return nome_atual
+    base = _sanitizar_nome(nome_paciente)
+    novo = "DO_%s_%s_pag%d.jpg" % (data_prefixo, base, pag_idx)
+    idx = 1
+    while True:
+        _q = "name='%s' and '%s' in parents and trashed=false" % (novo.replace("'", "\\'"), _PASTA_INBOX_ID)
+        _exist = drive.files().list(q=_q, spaces="drive", fields="files(id)", pageSize=5).execute()
+        if not _exist.get("files"):
+            break
+        stem, _, ex = novo.rpartition(".")
+        novo = "%s_%d.%s" % (stem, idx, ex)
+        idx += 1
+    drive.files().update(fileId=id_arquivo, body={"name": novo}).execute()
+    _atualizar_nome_arquivo_na_planilha(nome_atual, novo)
+    return novo
+
+@app.post("/api/upload_pdf")
+def api_upload_pdf(authorization: str = _Hdr(default=""), processar: bool = True,
+                   file: _UpFile = _FUp(...)):
+    esperado = os.getenv("ENDPOINT_AUTH_TOKEN", "")
+    if not esperado or authorization != "Bearer %s" % esperado:
+        raise _HTTPExc(status_code=401, detail="Nao autorizado")
+    nome = os.path.basename((file.filename or "arquivo.pdf")).strip()
+    ext = os.path.splitext(nome)[1].lower()
+    if ext != ".pdf":
+        raise _HTTPExc(status_code=415, detail="Formato nao suportado. Envie um PDF.")
+    dados = file.file.read()
+    if not dados:
+        raise _HTTPExc(status_code=400, detail="Arquivo vazio")
+    if len(dados) > _UPLOAD_MAX_BYTES:
+        raise _HTTPExc(status_code=413, detail="Arquivo grande demais (max 20MB)")
+    try:
+        paginas = _split_pdf_para_imagens(dados)
+    except Exception as e:
+        raise _HTTPExc(status_code=400, detail="Falha ao ler PDF: %s" % e)
+    if not paginas:
+        raise _HTTPExc(status_code=400, detail="PDF sem paginas")
+    drive = _get_drive_service()
+    data_prefixo = datetime.now().strftime("%Y-%m-%d")
+    nomes_gerados = []
+    for i, jpg in enumerate(paginas, start=1):
+        out_name = "DO_%s_pag%d.jpg" % (data_prefixo, i)
+        media = _MediaUp(_iou.BytesIO(jpg), mimetype="image/jpeg", resumable=False)
+        corpo = {"name": out_name, "parents": [_PASTA_INBOX_ID]}
+        criado = _drive_create_fallback(drive, corpo, media)
+        nomes_gerados.append({"nome": out_name, "id": criado.get("id")})
+    resumo = {"sucesso": True, "pdf": nome, "paginas": len(paginas),
+              "arquivos": nomes_gerados, "processado_agora": False, "detalhe": ""}
+    if processar:
+        try:
+            r = _run_batch(limit=len(paginas), reprocess=True,
+                           files=[n["nome"] for n in nomes_gerados])
+            resumo["processado_agora"] = bool(r.get("processed", 0))
+            for _k in ("processed", "duplicates", "rejected", "failed",
+                       "duplicated_files", "failed_files"):
+                if _k in r:
+                    resumo[_k] = r[_k]
+            renomeados = []
+            for i, n in enumerate(nomes_gerados, start=1):
+                novo_nome = _renomear_por_nome_apos_ocr(
+                    drive, n["id"], n["nome"], data_prefixo, i)
+                if novo_nome != n["nome"]:
+                    renomeados.append({"de": n["nome"], "para": novo_nome})
+            resumo["renomeados"] = renomeados
+        except Exception as _eu:
+            logger.warning("upload_pdf: processamento/renomeio falhou: %s" % _eu, exc_info=True)
+            resumo["detalhe"] = "Arquivos salvos; processamento/renomeio falhou, aguarde varredura."
+    return resumo
+# ============================================================
+# Patch 41: Split de PDF em paginas reais + upload (/api/upload_pdf)
+# ============================================================
+try:
+    import fitz  # PyMuPDF
+    _HAS_FITZ = True
+except Exception:
+    _HAS_FITZ = False
+
+import re as _re
+
+def _sanitizar_nome(nome):
+    nome = _re.sub(r'[\\/:*?"<>|]+', '', nome or "")
+    nome = _re.sub(r'\s+', ' ', nome).strip()
+    return nome
+
+def _split_pdf_para_imagens(dados_pdf, dpi=300):
+    if not _HAS_FITZ:
+        raise RuntimeError("PyMuPDF (fitz) nao instalado no servidor")
+    doc = fitz.open(stream=dados_pdf, filetype="pdf")
+    if doc.needs_pass:
+        doc.close()
+        raise RuntimeError("PDF protegido por senha")
+    paginas = []
+    try:
+        for page in doc:
+            mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            paginas.append(pix.tobytes("jpeg", jpg_quality=90))
+    finally:
+        doc.close()
+    return paginas
+
+def _buscar_nome_na_auditoria(nome_arquivo):
+    """Busca o NOME extraido na aba Auditoria para o arquivo."""
+    try:
+        ss = _get_sheets_service()
+        resp = ss.spreadsheets().values().get(
+            spreadsheetId=_SPREADSHEET_ID,
+            range="Auditoria!A1:Z"
+        ).execute()
+        valores = resp.get("values", [])
+        if not valores:
+            return ""
+        cab = valores[0]
+        idx_nome = cab.index("NOME") if "NOME" in cab else 4
+        idx_arq = cab.index("NOME_ARQUIVO") if "NOME_ARQUIVO" in cab else 1
+        for linha in valores[1:]:
+            if len(linha) > idx_arq and linha[idx_arq] == nome_arquivo:
+                if len(linha) > idx_nome:
+                    return linha[idx_nome]
+        return ""
+    except Exception as e:
+        logger.warning("buscar_nome_na_auditoria falhou: %s" % e)
+        return ""
+
+def _atualizar_nome_arquivo_na_planilha(nome_antigo, nome_novo):
+    """Atualiza NOME_ARQUIVO na Auditoria e Auditoria_Unica apos renomeio."""
+    try:
+        ss = _get_sheets_service()
+        for aba in ("Auditoria", "Auditoria_Unica"):
+            resp = ss.spreadsheets().values().get(
+                spreadsheetId=_SPREADSHEET_ID, range="%s!A1:Z" % aba
+            ).execute()
+            valores = resp.get("values", [])
+            if not valores:
+                continue
+            cab = valores[0]
+            idx_arq = cab.index("NOME_ARQUIVO") if "NOME_ARQUIVO" in cab else 1
+            for i, linha in enumerate(valores[1:], start=2):
+                if len(linha) > idx_arq and linha[idx_arq] == nome_antigo:
+                    col = chr(65 + idx_arq)
+                    ss.spreadsheets().values().update(
+                        spreadsheetId=_SPREADSHEET_ID,
+                        range="%s!%s%d" % (aba, col, i),
+                        valueInputOption="RAW",
+                        body={"values": [[nome_novo]]}
+                    ).execute()
+    except Exception as e:
+        logger.warning("atualizar_nome_arquivo_na_planilha falhou: %s" % e)
+
+def _renomear_por_nome_apos_ocr(drive, id_arquivo, nome_atual, data_prefixo, pag_idx):
+    nome_paciente = _buscar_nome_na_auditoria(nome_atual)
+    if not nome_paciente or nome_paciente.startswith("["):
+        return nome_atual
+    base = _sanitizar_nome(nome_paciente)
+    novo = "DO_%s_%s_pag%d.jpg" % (data_prefixo, base, pag_idx)
+    idx = 1
+    while True:
+        _q = "name='%s' and '%s' in parents and trashed=false" % (novo.replace("'", "\\'"), _PASTA_INBOX_ID)
+        _exist = drive.files().list(q=_q, spaces="drive", fields="files(id)", pageSize=5).execute()
+        if not _exist.get("files"):
+            break
+        stem, _, ex = novo.rpartition(".")
+        novo = "%s_%d.%s" % (stem, idx, ex)
+        idx += 1
+    drive.files().update(fileId=id_arquivo, body={"name": novo}).execute()
+    _atualizar_nome_arquivo_na_planilha(nome_atual, novo)
+    return novo
+
+@app.post("/api/upload_pdf")
+def api_upload_pdf(authorization: str = _Hdr(default=""), processar: bool = True,
+                   file: _UpFile = _FUp(...)):
+    esperado = os.getenv("ENDPOINT_AUTH_TOKEN", "")
+    if not esperado or authorization != "Bearer %s" % esperado:
+        raise _HTTPExc(status_code=401, detail="Nao autorizado")
+    nome = os.path.basename((file.filename or "arquivo.pdf")).strip()
+    ext = os.path.splitext(nome)[1].lower()
+    if ext != ".pdf":
+        raise _HTTPExc(status_code=415, detail="Formato nao suportado. Envie um PDF.")
+    dados = file.file.read()
+    if not dados:
+        raise _HTTPExc(status_code=400, detail="Arquivo vazio")
+    if len(dados) > _UPLOAD_MAX_BYTES:
+        raise _HTTPExc(status_code=413, detail="Arquivo grande demais (max 20MB)")
+    try:
+        paginas = _split_pdf_para_imagens(dados)
+    except Exception as e:
+        raise _HTTPExc(status_code=400, detail="Falha ao ler PDF: %s" % e)
+    if not paginas:
+        raise _HTTPExc(status_code=400, detail="PDF sem paginas")
+    drive = _get_drive_service()
+    data_prefixo = datetime.now().strftime("%Y-%m-%d")
+    nomes_gerados = []
+    for i, jpg in enumerate(paginas, start=1):
+        out_name = "DO_%s_pag%d.jpg" % (data_prefixo, i)
+        media = _MediaUp(_iou.BytesIO(jpg), mimetype="image/jpeg", resumable=False)
+        corpo = {"name": out_name, "parents": [_PASTA_INBOX_ID]}
+        criado = _drive_create_fallback(drive, corpo, media)
+        nomes_gerados.append({"nome": out_name, "id": criado.get("id")})
+    resumo = {"sucesso": True, "pdf": nome, "paginas": len(paginas),
+              "arquivos": nomes_gerados, "processado_agora": False, "detalhe": ""}
+    if processar:
+        try:
+            r = _run_batch(limit=len(paginas), reprocess=True,
+                           files=[n["nome"] for n in nomes_gerados])
+            resumo["processado_agora"] = bool(r.get("processed", 0))
+            for _k in ("processed", "duplicates", "rejected", "failed",
+                       "duplicated_files", "failed_files"):
+                if _k in r:
+                    resumo[_k] = r[_k]
+            renomeados = []
+            for i, n in enumerate(nomes_gerados, start=1):
+                novo_nome = _renomear_por_nome_apos_ocr(
+                    drive, n["id"], n["nome"], data_prefixo, i)
+                if novo_nome != n["nome"]:
+                    renomeados.append({"de": n["nome"], "para": novo_nome})
+            resumo["renomeados"] = renomeados
+        except Exception as _eu:
+            logger.warning("upload_pdf: processamento/renomeio falhou: %s" % _eu, exc_info=True)
+            resumo["detalhe"] = "Arquivos salvos; processamento/renomeio falhou, aguarde varredura."
     return resumo
