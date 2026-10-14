@@ -1610,7 +1610,11 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
                 except Exception as e:
                     logger.warning(f"Falha ao ler scores da planilha: {e}")
             if files:
-                for f in files.split(","):
+                if isinstance(files, str):
+                    _lista = files.split(",")
+                else:
+                    _lista = files
+                for f in _lista:
                     f = f.strip()
                     if f:
                         low_names.add(f)
@@ -3368,7 +3372,7 @@ def _buscar_nome_na_auditoria(nome_arquivo):
     try:
         ss = _get_sheets_service()
         resp = ss.spreadsheets().values().get(
-            spreadsheetId=_SPREADSHEET_ID,
+            spreadsheetId=SHEET_ID,
             range="Auditoria!A1:Z"
         ).execute()
         valores = resp.get("values", [])
@@ -3392,7 +3396,7 @@ def _atualizar_nome_arquivo_na_planilha(nome_antigo, nome_novo):
         ss = _get_sheets_service()
         for aba in ("Auditoria", "Auditoria_Unica"):
             resp = ss.spreadsheets().values().get(
-                spreadsheetId=_SPREADSHEET_ID, range="%s!A1:Z" % aba
+                spreadsheetId=SHEET_ID, range="%s!A1:Z" % aba
             ).execute()
             valores = resp.get("values", [])
             if not valores:
@@ -3403,7 +3407,7 @@ def _atualizar_nome_arquivo_na_planilha(nome_antigo, nome_novo):
                 if len(linha) > idx_arq and linha[idx_arq] == nome_antigo:
                     col = chr(65 + idx_arq)
                     ss.spreadsheets().values().update(
-                        spreadsheetId=_SPREADSHEET_ID,
+                        spreadsheetId=SHEET_ID,
                         range="%s!%s%d" % (aba, col, i),
                         valueInputOption="RAW",
                         body={"values": [[nome_novo]]}
@@ -3520,7 +3524,7 @@ def _buscar_nome_na_auditoria(nome_arquivo):
     try:
         ss = _get_sheets_service()
         resp = ss.spreadsheets().values().get(
-            spreadsheetId=_SPREADSHEET_ID,
+            spreadsheetId=SHEET_ID,
             range="Auditoria!A1:Z"
         ).execute()
         valores = resp.get("values", [])
@@ -3544,7 +3548,7 @@ def _atualizar_nome_arquivo_na_planilha(nome_antigo, nome_novo):
         ss = _get_sheets_service()
         for aba in ("Auditoria", "Auditoria_Unica"):
             resp = ss.spreadsheets().values().get(
-                spreadsheetId=_SPREADSHEET_ID, range="%s!A1:Z" % aba
+                spreadsheetId=SHEET_ID, range="%s!A1:Z" % aba
             ).execute()
             valores = resp.get("values", [])
             if not valores:
@@ -3555,7 +3559,7 @@ def _atualizar_nome_arquivo_na_planilha(nome_antigo, nome_novo):
                 if len(linha) > idx_arq and linha[idx_arq] == nome_antigo:
                     col = chr(65 + idx_arq)
                     ss.spreadsheets().values().update(
-                        spreadsheetId=_SPREADSHEET_ID,
+                        spreadsheetId=SHEET_ID,
                         range="%s!%s%d" % (aba, col, i),
                         valueInputOption="RAW",
                         body={"values": [[nome_novo]]}
