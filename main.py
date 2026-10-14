@@ -3839,7 +3839,7 @@ def _read_media_bytes(media):
         raise RuntimeError("media vazio apos leitura (stream consumido?)")
     return data
 
-class _NoRedirectSM(urllib.request.HTTPRedirectHandler):
+class _NoRedirectSM(_ur.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
