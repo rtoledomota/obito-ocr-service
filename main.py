@@ -3426,7 +3426,7 @@ def _renomear_por_nome_apos_ocr(drive, id_arquivo, nome_atual, data_prefixo, pag
         stem, _, ex = novo.rpartition(".")
         novo = "%s_%d.%s" % (stem, idx, ex)
         idx += 1
-    drive.files().update(fileId=id_arquivo, body={"name": novo}).execute()
+    _rename_drive_file(id_arquivo, novo)
     _atualizar_nome_arquivo_na_planilha(nome_atual, novo)
     return novo
 
@@ -3578,7 +3578,7 @@ def _renomear_por_nome_apos_ocr(drive, id_arquivo, nome_atual, data_prefixo, pag
         stem, _, ex = novo.rpartition(".")
         novo = "%s_%d.%s" % (stem, idx, ex)
         idx += 1
-    drive.files().update(fileId=id_arquivo, body={"name": novo}).execute()
+    _rename_drive_file(id_arquivo, novo)
     _atualizar_nome_arquivo_na_planilha(nome_atual, novo)
     return novo
 
@@ -3704,11 +3704,8 @@ import urllib.request as _ur, urllib.parse as _up, json as _json_p, os as _os_p
 class _KeepPostRedirect(_ur.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         new = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if new is not None:
-            new.data = req.data
-            for _k in ("Content-Type", "Content-Length"):
-                if req.has_header(_k):
-                    new.add_unredirected_header(_k, req.headers.get(_k))
+        # Apps Script responde 302 e entrega o JSON no GET do "echo":
+        # seguir o redirect como POST gera 405/411 no Google.
         return new
 
 def _proxy_url():
@@ -3765,3 +3762,150 @@ def _rename_via_proxy(file_id, filename):
     """Helper pronto: renomear arquivo no Drive via Proxy (action=rename)."""
     result = _proxy_post(b"", {"action": "rename", "fileId": file_id, "filename": filename})
     return result.get("id")
+
+# ============================================================
+# Patch 45 - Renomeio via Proxy Apps Script (fallback OAuth)
+# ============================================================
+def _rename_drive_file(file_id, novo):
+    """Renomeia via Proxy quando configurado; senao usa o fluxo original."""
+    if _proxy_url():
+        try:
+            return _rename_via_proxy(file_id, novo)
+        except Exception as _e:
+            logger.warning("Patch 45: proxy rename falhou, usando OAuth: %s" % _e)
+    svc = _get_drive_owner_service()
+    return svc.files().update(fileId=file_id, body={"name": novo}).execute()# ============================================================
+# Patch 47 - Proxy Apps Script via base64 (texto puro)
+# Corrige POST binario que o front-end do Google recusava
+# (411 e pagina "Nao foi possivel abrir o arquivo"). Codifica
+# os bytes em base64 antes de enviar; o Apps Script decodifica.
+# ============================================================
+def _proxy_post(payload_bytes, params, mime="application/octet-stream", timeout=120):
+    import base64 as _b64
+    url = _proxy_url()
+    if not url:
+        raise RuntimeError("APPS_SCRIPT_PROXY_URL nao configurada")
+    final = dict(params)
+    final["mime"] = mime
+    body = b""
+    if payload_bytes:
+        final["encoding"] = "base64"
+        body = _b64.b64encode(payload_bytes)
+    if _os_p.getenv("APPS_SCRIPT_PROXY_TOKEN", "").strip():
+        final["token"] = _os_p.getenv("APPS_SCRIPT_PROXY_TOKEN", "").strip()
+    sep = "&" if "?" in url else "?"
+    full = url + sep + _up.urlencode(final)
+    req = _ur.Request(full, data=body, method="POST")
+    req.add_header("Content-Type", "text/plain; charset=utf-8")
+    req.add_header("Expect", "")
+    opener = _ur.build_opener(_KeepPostRedirect)
+    with opener.open(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8")
+    payload = _json_p.loads(raw)
+    if not payload.get("success"):
+        raise RuntimeError("Proxy Apps Script: %s" % payload.get("error", "erro desconhecido"))
+    return payload
+
+# ============================================================
+# Patch 50 - Transporte confiavel para o Proxy Apps Script
+# 1) Leitura robusta dos bytes (seek 0; aceita UploadFile,
+#    MediaFileUpload, caminho de arquivo ou bytes)
+# 2) POST que segue redirects reenviando o CORPO (Apps Script:
+#    /exec -> 302 -> /usercallback exige POST com body)
+# ============================================================
+def _read_media_bytes(media):
+    if isinstance(media, (bytes, bytearray)):
+        return bytes(media)
+    if isinstance(media, str):
+        with open(media, "rb") as fh:
+            return fh.read()
+    f = None
+    if hasattr(media, "file") and hasattr(media.file, "read"):
+        f = media.file
+    elif hasattr(media, "stream"):
+        f = media.stream()
+    elif hasattr(media, "read"):
+        f = media
+    if f is None:
+        raise RuntimeError("media sem leitura (tipo: %s)" % type(media).__name__)
+    try:
+        f.seek(0)
+    except Exception:
+        pass
+    data = f.read()
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    if not data:
+        raise RuntimeError("media vazio apos leitura (stream consumido?)")
+    return data
+
+class _NoRedirectSM(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+def _proxy_post(payload_bytes, params, mime="application/octet-stream", timeout=120):
+    import base64 as _b64
+    url = _proxy_url()
+    if not url:
+        raise RuntimeError("APPS_SCRIPT_PROXY_URL nao configurada")
+    final = dict(params)
+    final["mime"] = mime
+    body = b""
+    if payload_bytes:
+        final["encoding"] = "base64"
+        body = _b64.b64encode(payload_bytes)
+    if _os_p.getenv("APPS_SCRIPT_PROXY_TOKEN", "").strip():
+        final["token"] = _os_p.getenv("APPS_SCRIPT_PROXY_TOKEN", "").strip()
+    sep = "&" if "?" in url else "?"
+    current = url + sep + _up.urlencode(final)
+    opener = _ur.build_opener(_NoRedirectSM)
+    jumps = []
+    for hop in range(6):
+        req = _ur.Request(current, data=body, method="POST")
+        req.add_header("Content-Type", "text/plain; charset=utf-8")
+        try:
+            with opener.open(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8")
+            payload = _json_p.loads(raw)
+            if not payload.get("success"):
+                raise RuntimeError("Proxy Apps Script: %s" % payload.get("error", "erro desconhecido"))
+            return payload
+        except _ur.HTTPError as e:
+            if e.code in (301, 302, 303, 307, 308):
+                loc = e.headers.get("Location")
+                if not loc:
+                    raise
+                current = _up.urljoin(current, loc)
+                jumps.append("%s->%s" % (e.code, loc[:70]))
+                continue
+            raise RuntimeError("Proxy HTTP %s em %s" % (e.code, current))
+    raise RuntimeError("Proxy: muitos redirects: %s" % "; ".join(jumps))
+
+# ============================================================
+# Patch 51 - Proxy Apps Script: form-urlencoded + redirect padrao
+# Envia o base64 no campo "data" (application/x-www-form-urlencoded)
+# e segue o 302 do /exec como GET (sem corpo), como o Google exige.
+# ============================================================
+def _proxy_post(payload_bytes, params, mime="application/octet-stream", timeout=120):
+    import base64 as _b64
+    url = _proxy_url()
+    if not url:
+        raise RuntimeError("APPS_SCRIPT_PROXY_URL nao configurada")
+    final = dict(params)
+    final["mime"] = mime
+    if payload_bytes:
+        final["data"] = _b64.b64encode(payload_bytes).decode("ascii")
+    if _os_p.getenv("APPS_SCRIPT_PROXY_TOKEN", "").strip():
+        final["token"] = _os_p.getenv("APPS_SCRIPT_PROXY_TOKEN", "").strip()
+    body = _up.urlencode(final).encode("utf-8")
+    req = _ur.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    req.add_header("Accept", "application/json")
+    req.add_header("Expect", "")
+    opener = _ur.build_opener()
+    with opener.open(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8")
+    payload = _json_p.loads(raw)
+    if not payload.get("success"):
+        raise RuntimeError("Proxy Apps Script: %s" % payload.get("error", "erro desconhecido"))
+    return payload
