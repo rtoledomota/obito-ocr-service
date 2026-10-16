@@ -3338,7 +3338,7 @@ def api_upload(authorization: str = _Hdr(default=""), processar: bool = True,
 # Patch 41: Split de PDF em paginas reais + upload (/api/upload_pdf)
 # ============================================================
 try:
-    import fitz  # PyMuPDF
+    import pymupdf
     _HAS_FITZ = True
 except Exception:
     _HAS_FITZ = False
@@ -3361,7 +3361,7 @@ def _split_pdf_para_imagens(pdf_bytes: bytes, nome_base: str):
     from PIL import Image
 
     resultados = []
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     try:
         total = doc.page_count
         for i in range(total):
