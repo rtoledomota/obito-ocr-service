@@ -3350,22 +3350,51 @@ def _sanitizar_nome(nome):
     nome = _re.sub(r'\s+', ' ', nome).strip()
     return nome
 
-def _split_pdf_para_imagens(dados_pdf, dpi=300):
-    if not _HAS_FITZ:
-        raise RuntimeError("PyMuPDF (fitz) nao instalado no servidor")
-    doc = fitz.open(stream=dados_pdf, filetype="pdf")
-    if doc.needs_pass:
-        doc.close()
-        raise RuntimeError("PDF protegido por senha")
-    paginas = []
+def _split_pdf_para_imagens(pdf_bytes: bytes, nome_base: str):
+    """
+    Divide o PDF em páginas JPEG com memória controlada:
+    renderiza UMA página por vez (150 dpi), sobe imediatamente ao Drive
+    e libera a memória antes de processar a próxima.
+    Retorna apenas metadados (nome + id), nunca as imagens.
+    """
+    import fitz, io, gc
+    from PIL import Image
+
+    resultados = []
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     try:
-        for page in doc:
-            mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
-            pix = page.get_pixmap(matrix=mat, alpha=False)
-            paginas.append(pix.tobytes("jpeg", jpg_quality=90))
+        total = doc.page_count
+        for i in range(total):
+            pagina = doc.load_page(i)
+
+            # 150 dpi é suficiente para OCR de DO (300 dpi = 4x a memória)
+            pix = pagina.get_pixmap(dpi=150)
+            img_bytes = pix.tobytes("jpeg", jpg_quality=80)
+            pix = None          # libera o pixmap JÁ
+
+            nome = f"{nome_base}_pag{i+1}.jpg"
+
+            # >>> INTEGRAÇÃO: use aqui a MESMA rotina de upload que o seu
+            # código já usa no endpoint /api/upload_pdf (Drive direto ou
+            # proxy Apps Script). Exemplo com o fallback existente:
+            id_drive = _drive_create_fallback(
+                nome_arquivo=nome,
+                conteudo=img_bytes,
+                mime_type="image/jpeg",
+                pasta_destino_id=DRIVE_FOLDER_ID,
+            )
+
+            resultados.append({"nome": nome, "id": id_drive})
+
+            img_bytes = None    # libera os bytes JÁ
+            pagina = None
+            gc.collect()        # devolve memória ao sistema após CADA página
+
+            print(f"[PDF] Página {i+1}/{total} enviada: {nome}", flush=True)
     finally:
         doc.close()
-    return paginas
+        gc.collect()
+    return resultados
 
 def _buscar_nome_na_auditoria(nome_arquivo):
     """Busca o NOME extraido na aba Auditoria para o arquivo."""
