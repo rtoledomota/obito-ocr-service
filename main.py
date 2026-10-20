@@ -3338,7 +3338,7 @@ def api_upload(authorization: str = _Hdr(default=""), processar: bool = True,
 # Patch 41: Split de PDF em paginas reais + upload (/api/upload_pdf)
 # ============================================================
 try:
-    import pymupdf
+    import fitz  # PyMuPDF
     _HAS_FITZ = True
 except Exception:
     _HAS_FITZ = False
@@ -3350,51 +3350,22 @@ def _sanitizar_nome(nome):
     nome = _re.sub(r'\s+', ' ', nome).strip()
     return nome
 
-def _split_pdf_para_imagens(pdf_bytes: bytes, nome_base: str):
-    """
-    Divide o PDF em páginas JPEG com memória controlada:
-    renderiza UMA página por vez (150 dpi), sobe imediatamente ao Drive
-    e libera a memória antes de processar a próxima.
-    Retorna apenas metadados (nome + id), nunca as imagens.
-    """
-    import fitz, io, gc
-    from PIL import Image
-
-    resultados = []
-    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+def _split_pdf_para_imagens(dados_pdf, dpi=300):
+    if not _HAS_FITZ:
+        raise RuntimeError("PyMuPDF (fitz) nao instalado no servidor")
+    doc = fitz.open(stream=dados_pdf, filetype="pdf")
+    if doc.needs_pass:
+        doc.close()
+        raise RuntimeError("PDF protegido por senha")
+    paginas = []
     try:
-        total = doc.page_count
-        for i in range(total):
-            pagina = doc.load_page(i)
-
-            # 150 dpi é suficiente para OCR de DO (300 dpi = 4x a memória)
-            pix = pagina.get_pixmap(dpi=150)
-            img_bytes = pix.tobytes("jpeg", jpg_quality=80)
-            pix = None          # libera o pixmap JÁ
-
-            nome = f"{nome_base}_pag{i+1}.jpg"
-
-            # >>> INTEGRAÇÃO: use aqui a MESMA rotina de upload que o seu
-            # código já usa no endpoint /api/upload_pdf (Drive direto ou
-            # proxy Apps Script). Exemplo com o fallback existente:
-            id_drive = _drive_create_fallback(
-                nome_arquivo=nome,
-                conteudo=img_bytes,
-                mime_type="image/jpeg",
-                pasta_destino_id=DRIVE_FOLDER_ID,
-            )
-
-            resultados.append({"nome": nome, "id": id_drive})
-
-            img_bytes = None    # libera os bytes JÁ
-            pagina = None
-            gc.collect()        # devolve memória ao sistema após CADA página
-
-            print(f"[PDF] Página {i+1}/{total} enviada: {nome}", flush=True)
+        for page in doc:
+            mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            paginas.append(pix.tobytes("jpeg", jpg_quality=90))
     finally:
         doc.close()
-        gc.collect()
-    return resultados
+    return paginas
 
 def _buscar_nome_na_auditoria(nome_arquivo):
     """Busca o NOME extraido na aba Auditoria para o arquivo."""
@@ -3941,4 +3912,55 @@ def _proxy_post(payload_bytes, params, mime="application/octet-stream", timeout=
     payload = _json_p.loads(raw)
     if not payload.get("success"):
         raise RuntimeError("Proxy Apps Script: %s" % payload.get("error", "erro desconhecido"))
-    return payload
+    return payload# ─────────────────────────────────────────────────────────────────────────────
+# Patch 52 — Filtro anti-VERSO: verso da DO não é mais registrado como caso
+# Intercepta a gravação na planilha e descarta linhas STATUS = "VERSO".
+# Não altera nenhuma função existente — apenas envolve (wrap) as funções de
+# gravação. Reversível removendo este bloco.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _patch52_filtrar_verso(rows):
+    """Remove linhas VERSO de uma lista de linhas (dicts ou listas na ordem HEADER)."""
+    if not rows:
+        return rows
+    if isinstance(rows[0], dict):
+        filtradas = [r for r in rows if str(r.get("STATUS", "")).strip().upper() != "VERSO"]
+    else:
+        try:
+            i_status = HEADER.index("STATUS")
+        except (ValueError, AttributeError, NameError):
+            return rows
+        filtradas = [
+            r for r in rows
+            if not isinstance(r, (list, tuple)) or len(r) <= i_status
+            or str(r[i_status]).strip().upper() != "VERSO"
+        ]
+    removidas = len(rows) - len(filtradas)
+    if removidas > 0:
+        print(f"[PATCH52] Filtro anti-VERSO: {removidas} linha(s) de verso nao registrada(s) como caso.", flush=True)
+    return filtradas
+
+
+_orig_upsert_rows_to_sheet = _upsert_rows_to_sheet
+def _upsert_rows_to_sheet(*args, **kwargs):
+    rows = args[0] if args else kwargs.get("rows")
+    filtradas = _patch52_filtrar_verso(rows)
+    if args:
+        args = (filtradas,) + args[1:]
+    else:
+        kwargs["rows"] = filtradas
+    return _orig_upsert_rows_to_sheet(*args, **kwargs)
+
+
+_orig_append_rows_to_sheet = _append_rows_to_sheet
+def _append_rows_to_sheet(*args, **kwargs):
+    rows = args[0] if args else kwargs.get("rows")
+    filtradas = _patch52_filtrar_verso(rows)
+    if args:
+        args = (filtradas,) + args[1:]
+    else:
+        kwargs["rows"] = filtradas
+    return _orig_append_rows_to_sheet(*args, **kwargs)
+
+print("[PATCH52] Filtro anti-VERSO ativo: versos nao serao registrados como casos.", flush=True)
+# ───────────────────────────────── fim do Patch 52 ──────────────────────────
