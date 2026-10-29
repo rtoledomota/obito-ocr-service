@@ -3964,3 +3964,148 @@ def _append_rows_to_sheet(*args, **kwargs):
 
 print("[PATCH52] Filtro anti-VERSO ativo: versos nao serao registrados como casos.", flush=True)
 # ───────────────────────────────── fim do Patch 52 ──────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Patch 53 — Edição de campos da DO pela Central da Auditoria
+# Endpoint POST /api/atualizar_campo: atualiza um campo da linha da DO na aba
+# Auditoria_Unica e registra trilha de auditoria (EDITADO_POR, EDITADO_EM,
+# VALOR_ORIGINAL). Campos editáveis controlados por lista fixa.
+# ─────────────────────────────────────────────────────────────────────────────
+
+from fastapi import Request
+from fastapi.responses import JSONResponse
+import datetime as _dt53
+
+_PATCH53_CAMPOS = {
+    "NOME": ["NOME", "NOME_FALECIDO", "FALECIDO"],
+    "MAE": ["MAE", "NOME_MAE", "MAE_DO_FALECIDO"],
+    "CID": ["CID", "CID10", "CID_10"],
+    "CAUSA_BASICA": ["CAUSA_BASICA", "CAUSA"],
+    "DATA_OBITO": ["DATA_OBITO", "DATA_HORA_OBITO", "DATA_E_HORA_OBITO"],
+    "MEDICO_ATESTANTE": ["MEDICO_ATESTANTE", "ATESTANTE"],
+    "CRM": ["CRM", "CRM_ATESTANTE"],
+    "IDADE": ["IDADE"],
+    "CIDADE": ["CIDADE", "CIDADE_OBITO"],
+}
+
+
+def _patch53_col_letter(n):
+    s = ""
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+@app.post("/api/atualizar_campo")
+async def api_atualizar_campo(req: Request):
+    auth = req.headers.get("authorization", "")
+    if auth != "Bearer scs2026":
+        return JSONResponse(status_code=401, content={"ok": False, "erro": "Nao autorizado."})
+    try:
+        dados = await req.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"ok": False, "erro": "JSON invalido."})
+
+    nome_arquivo = str(dados.get("arquivo", "")).strip()
+    campo = str(dados.get("campo", "")).strip().upper()
+    novo_valor = str(dados.get("novo_valor", "")).strip()
+    editado_por = str(dados.get("editado_por", "Coordenacao")).strip() or "Coordenacao"
+
+    if not nome_arquivo or not campo or not novo_valor:
+        return JSONResponse(status_code=400, content={"ok": False, "erro": "Informe arquivo, campo e novo_valor."})
+    if campo not in _PATCH53_CAMPOS:
+        return JSONResponse(status_code=400, content={"ok": False, "erro": "Campo nao editavel. Editaveis: " + ", ".join(_PATCH53_CAMPOS)})
+
+    try:
+        svc = _get_sheets_service()
+        sh = svc.spreadsheets()
+        meta = sh.get(spreadsheetId=SHEET_ID).execute()
+        aba_title = None
+        for s in meta.get("sheets", []):
+            t = s["properties"]["title"]
+            if t.strip().upper().replace(" ", "_") in ("AUDITORIA_UNICA", "AUDITORIAUNICA"):
+                aba_title = t
+                break
+        if aba_title is None:
+            return JSONResponse(status_code=404, content={"ok": False, "erro": "Aba Auditoria_Unica nao encontrada."})
+
+        valores = sh.values().get(spreadsheetId=SHEET_ID, range=aba_title + "!A1:ZZ").execute().get("values", [])
+        if not valores:
+            return JSONResponse(status_code=404, content={"ok": False, "erro": "Planilha vazia."})
+
+        header = [str(h).strip().upper() for h in valores[0]]
+
+        def _idx(alias_list):
+            for a in alias_list:
+                if a in header:
+                    return header.index(a)
+            return None
+
+        col_idx = _idx(_PATCH53_CAMPOS[campo])
+        arq_idx = _idx(["ARQUIVO", "ARQUIVO_NOME", "NOME_ARQUIVO"])
+        if col_idx is None:
+            return JSONResponse(status_code=404, content={"ok": False, "erro": "Coluna de '" + campo + "' nao encontrada no cabecalho."})
+        if arq_idx is None:
+            return JSONResponse(status_code=404, content={"ok": False, "erro": "Coluna ARQUIVO nao encontrada."})
+
+        row_idx = None
+        valor_original = ""
+        for i, row in enumerate(valores[1:], start=2):
+            if len(row) > arq_idx and str(row[arq_idx]).strip() == nome_arquivo:
+                row_idx = i
+                valor_original = str(row[col_idx]) if len(row) > col_idx else ""
+                break
+        if row_idx is None:
+            return JSONResponse(status_code=404, content={"ok": False, "erro": "Arquivo '" + nome_arquivo + "' nao encontrado na planilha."})
+
+        # Garante colunas de auditoria (EDITADO_POR, EDITADO_EM, VALOR_ORIGINAL)
+        audit_map = {}
+        precisa_expandir = False
+        for nome_col in ("EDITADO_POR", "EDITADO_EM", "VALOR_ORIGINAL"):
+            if nome_col in header:
+                audit_map[nome_col] = header.index(nome_col)
+            else:
+                audit_map[nome_col] = len(header)
+                header.append(nome_col)
+                precisa_expandir = True
+        if precisa_expandir:
+            nova_ultima = _patch53_col_letter(len(header))
+            sh.values().update(
+                spreadsheetId=SHEET_ID,
+                range=aba_title + "!A1:" + nova_ultima + "1",
+                valueInputOption="RAW",
+                body={"values": [header]},
+            ).execute()
+
+        # Grava o novo valor
+        sh.values().update(
+            spreadsheetId=SHEET_ID,
+            range=aba_title + "!" + _patch53_col_letter(col_idx + 1) + str(row_idx),
+            valueInputOption="USER_ENTERED",
+            body={"values": [[novo_valor]]},
+        ).execute()
+
+        # Grava a trilha de auditoria
+        timestamp = _dt53.datetime.now().strftime("%d/%m/%Y %H:%M")
+        historico = valor_original
+        vo_idx = audit_map["VALOR_ORIGINAL"]
+        if len(valores) > row_idx - 1 and len(valores[row_idx - 1]) > vo_idx and valores[row_idx - 1][vo_idx]:
+            historico = str(valores[row_idx - 1][vo_idx]) + " | " + valor_original
+        for nome_col, valor in (("EDITADO_POR", editado_por), ("EDITADO_EM", timestamp), ("VALOR_ORIGINAL", historico)):
+            sh.values().update(
+                spreadsheetId=SHEET_ID,
+                range=aba_title + "!" + _patch53_col_letter(audit_map[nome_col] + 1) + str(row_idx),
+                valueInputOption="RAW",
+                body={"values": [[valor]]},
+            ).execute()
+
+        print("[PATCH53] Campo '" + campo + "' da DO " + nome_arquivo + " atualizado por " + editado_por + " (original: " + valor_original + ")", flush=True)
+        return {"ok": True, "arquivo": nome_arquivo, "campo": campo, "valor_anterior": valor_original, "novo_valor": novo_valor, "editado_por": editado_por, "editado_em": timestamp}
+    except JSONResponse:
+        raise
+    except Exception as e:
+        print("[PATCH53] ERRO: " + repr(e), flush=True)
+        return JSONResponse(status_code=500, content={"ok": False, "erro": repr(e)})
+
+print("[PATCH53] Endpoint /api/atualizar_campo ativo: edicao de campos da DO com trilha de auditoria.", flush=True)
+# ───────────────────────────────── fim do Patch 53 ──────────────────────────
