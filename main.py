@@ -12,7 +12,7 @@ from pydantic import BaseModel
 logger = logging.getLogger("uvicorn")
 logger.setLevel(logging.INFO)
 
-# â”€â”€ Service account: suporta JSON inline via env var â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Ã¢â€â‚¬Ã¢â€â‚¬ Service account: suporta JSON inline via env var Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 _SERVICE_ACCOUNT_JSON_ENV = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 if _SERVICE_ACCOUNT_JSON_ENV and _SERVICE_ACCOUNT_JSON_ENV.strip().startswith("{"):
     _sa_path = "/tmp/service-account.json"
@@ -70,36 +70,36 @@ if "PASTA_ORIGEM" not in HEADER:
     HEADER.append("PASTA_ORIGEM")
 
 FORM_JUNK = [
-    "nome do falecido", "data de nascimento", "data do óbito", "data do obito",
-    "endereço do local do acidente", "descrição sumária do evento",
-    "complexo hospitalar de clínicas", "identificação", "cartório",
-    "município de residência", "município de ocorrência", "local de ocorrência",
-    "nome do médico", "situação conjugal", "raça/cor", "ocupação habitual",
-    "logradouro (rua", "bairro/distrito", "nome do pai", "nome da mãe",
-    "data do atestado", "assistência médica", "parte ii", "causas da morte",
-    "condições e causas", "causas externas", "fetal ou menor",
+    "nome do falecido", "data de nascimento", "data do Ã³bito", "data do obito",
+    "endereÃ§o do local do acidente", "descriÃ§Ã£o sumÃ¡ria do evento",
+    "complexo hospitalar de clÃ­nicas", "identificaÃ§Ã£o", "cartÃ³rio",
+    "municÃ­pio de residÃªncia", "municÃ­pio de ocorrÃªncia", "local de ocorrÃªncia",
+    "nome do mÃ©dico", "situaÃ§Ã£o conjugal", "raÃ§a/cor", "ocupaÃ§Ã£o habitual",
+    "logradouro (rua", "bairro/distrito", "nome do pai", "nome da mÃ£e",
+    "data do atestado", "assistÃªncia mÃ©dica", "parte ii", "causas da morte",
+    "condiÃ§Ãµes e causas", "causas externas", "fetal ou menor",
     "preenchimento exclusivo", "republica federativa", "ministerio da saude",
-    "declaracao de obito", "declaração de óbito", "seqüência de causas",
+    "declaracao de obito", "declaraÃ§Ã£o de Ã³bito", "seqÃ¼Ãªncia de causas",
     "sequencia de causas", "preencha o estado", "anote a cadeia",
-    "anote somente", "devido ou como consequência", "tempo aproximado entre",
-    "que contribuíram", "outras condições significativas",
-    "nascidos vivos", "número de filhos", "tipo de gravidez", "tipo de parto",
-    "peso ao nascer", "cartão sus", "naturalidade", "escolaridade",
-    "meio de contato", "morte em relação", "óbito de mulher",
+    "anote somente", "devido ou como consequÃªncia", "tempo aproximado entre",
+    "que contribuÃ­ram", "outras condiÃ§Ãµes significativas",
+    "nascidos vivos", "nÃºmero de filhos", "tipo de gravidez", "tipo de parto",
+    "peso ao nascer", "cartÃ£o sus", "naturalidade", "escolaridade",
+    "meio de contato", "morte em relaÃ§Ã£o", "Ã³bito de mulher",
 ]
 
 CITY_OCR_FIX = {
-    "são cantando do sul": "São Caetano do Sul",
-    "são cenário do sul": "São Caetano do Sul",
-    "são caetano sul": "São Caetano do Sul",
-    "caetano do sul": "São Caetano do Sul",
-    "são carlos do sul": "São Caetano do Sul",
-    "são gabriel do sul": "São Caetano do Sul",
-    "são bernardo do sul": "São Caetano do Sul",
-    "são lourenço do sul": "São Caetano do Sul",
-    "santo antônio do sul": "São Caetano do Sul",
-    "santa paula": "São Caetano do Sul",
-    "são paulo - sp": "São Paulo",
+    "sÃ£o cantando do sul": "SÃ£o Caetano do Sul",
+    "sÃ£o cenÃ¡rio do sul": "SÃ£o Caetano do Sul",
+    "sÃ£o caetano sul": "SÃ£o Caetano do Sul",
+    "caetano do sul": "SÃ£o Caetano do Sul",
+    "sÃ£o carlos do sul": "SÃ£o Caetano do Sul",
+    "sÃ£o gabriel do sul": "SÃ£o Caetano do Sul",
+    "sÃ£o bernardo do sul": "SÃ£o Caetano do Sul",
+    "sÃ£o lourenÃ§o do sul": "SÃ£o Caetano do Sul",
+    "santo antÃ´nio do sul": "SÃ£o Caetano do Sul",
+    "santa paula": "SÃ£o Caetano do Sul",
+    "sÃ£o paulo - sp": "SÃ£o Paulo",
 }
 
 VALID_UFS = {"AC","AL","AP","AM","BA","CE","DF","ES","GO","MA","MT","MS","MG",
@@ -108,7 +108,7 @@ VALID_UFS = {"AC","AL","AP","AM","BA","CE","DF","ES","GO","MA","MT","MS","MG",
 CRITICAL_FIELDS = ["NOME", "NOME_MAE", "NASCIMENTO", "DATA_OBITO",
                    "CIDADE_OBITO", "UF_OBITO", "CAUSA_MORTE"]
 
-# â”€â”€ Google API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Ã¢â€â‚¬Ã¢â€â‚¬ Google API Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 def _get_credentials():
     return service_account.Credentials.from_service_account_file(
@@ -378,7 +378,7 @@ def _download_image_bytes(file_id):
     except Exception:
         return fh.getvalue(), metadata.get("mimeType", "image/jpeg")
 
-# â”€â”€ Busca recursiva em subpastas â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Ã¢â€â‚¬Ã¢â€â‚¬ Busca recursiva em subpastas Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 def _list_all_files_recursive(folder_id, drive, root_name=None):
     files = []
@@ -497,7 +497,7 @@ def _downscale_image(image_bytes, max_dim=2600):
         logger.warning(f"[DOWNSCALE] nao aplicado: {e}")
         return image_bytes
 
-# â”€â”€ OCR via Google Cloud Vision REST API (multi-chave) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Ã¢â€â‚¬Ã¢â€â‚¬ OCR via Google Cloud Vision REST API (multi-chave) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 
 
@@ -562,9 +562,9 @@ def _is_verso_obito(raw_text):
         return False
     if _re.search(r"(?:dr|dra)\.", tl):
         return False
-    if _re.search(r"[a-d]\)\s*[a-záàâãéêíóôõú]", tl):
+    if _re.search(r"[a-d]\)\s*[a-zÃ¡Ã Ã¢Ã£Ã©ÃªÃ­Ã³Ã´ÃµÃº]", tl):
         return False
-    if _re.search(r"do\s*(?:n[ºo]|n[úu]mero|[.#])[:]?\s*\d{4,}", tl) or        _re.search(r"d\.o\.[^\d]{0,15}\d{6,}", tl):
+    if _re.search(r"do\s*(?:n[Âºo]|n[Ãºu]mero|[.#])[:]?\s*\d{4,}", tl) or        _re.search(r"d\.o\.[^\d]{0,15}\d{6,}", tl):
         return False
     # Decisao de VERSO 100% pelo texto bruto (antes do JSON).
     # O JSON e gerado pelo modelo a partir do proprio texto e sempre herda a Ressalva,
@@ -800,14 +800,14 @@ def _is_valid_obito(ocr_text: str) -> bool:
     if not ocr_text or len(ocr_text.strip()) < 50:
         return False
     t = ocr_text.lower()
-    if ("definiÃƒ§Ãƒµes" in t or "definicoes" in t) and ("cid-10" in t or "nascimento vivo" in t):
+    if ("definiÃƒÆ’Â§ÃƒÆ’Âµes" in t or "definicoes" in t) and ("cid-10" in t or "nascimento vivo" in t):
         return False
-    strong = ["declaração de óbito", "declaracao de obito", "atestado de óbito",
-              "nome do falecido", "causas da morte", "tipo de óbito",
+    strong = ["declaraÃ§Ã£o de Ã³bito", "declaracao de obito", "atestado de Ã³bito",
+              "nome do falecido", "causas da morte", "tipo de Ã³bito",
               "tipo de obito", "parte i", "parte ii"]
     if any(k in t for k in strong):
         return True
-    if len(ocr_text.strip()) > 400 and ("óbito" in t or "obito" in t):
+    if len(ocr_text.strip()) > 400 and ("Ã³bito" in t or "obito" in t):
         return True
     return False
 
@@ -825,20 +825,20 @@ def _collapse_repeats(text: str) -> str:
     prev = None
     while prev != text:
         prev = text
-        text = re.sub(r'\b([A-ZÁÃ‰ÍÃ“ÃšÃ‚ÃŠÃ”ÃƒÃ•Ã‡][A-Za-zÁÃ‰ÍÃ“ÃšÃ‚ÃŠÃ”ÃƒÃ•Ã‡]{8,})\s+\1\b', r'\1', text)
+        text = re.sub(r'\b([A-ZÃÃƒâ€°ÃÃƒâ€œÃƒÅ¡Ãƒâ€šÃƒÅ Ãƒâ€ÃƒÆ’Ãƒâ€¢Ãƒâ€¡][A-Za-zÃÃƒâ€°ÃÃƒâ€œÃƒÅ¡Ãƒâ€šÃƒÅ Ãƒâ€ÃƒÆ’Ãƒâ€¢Ãƒâ€¡]{8,})\s+\1\b', r'\1', text)
     return text
 
 def _sanitize_person_name(value: str) -> str:
     if not value:
         return ""
     v = str(value).strip().rstrip("|.,;:")
-    v = re.sub(r'\s*Munic[ií]pio\s*/\s*UF\s*\(se\s+estrangeiro\s+informar\s+Pa[ií]s\)[:.\s]*$', '', v, flags=re.IGNORECASE)
-    v = re.sub(r'^Munic[ií]pio\s*/\s*UF\s*\(se\s+estrangeiro\s+informar\s+Pa[ií]s\)[:.\s]*', '', v, flags=re.IGNORECASE)
+    v = re.sub(r'\s*Munic[iÃ­]pio\s*/\s*UF\s*\(se\s+estrangeiro\s+informar\s+Pa[iÃ­]s\)[:.\s]*$', '', v, flags=re.IGNORECASE)
+    v = re.sub(r'^Munic[iÃ­]pio\s*/\s*UF\s*\(se\s+estrangeiro\s+informar\s+Pa[iÃ­]s\)[:.\s]*', '', v, flags=re.IGNORECASE)
     v = re.sub(r'^(nome do falecido|nome do\(a\)|falecido|nome|data de nascimento'
-               r'|nome do pai|nome da mae|nome da mãe)\s*[:\-]?\s*', '', v, flags=re.IGNORECASE)
-    if re.match(r'^\d{1,2}\s+[A-Za-zÃ€-ÿ]', v):
+               r'|nome do pai|nome da mae|nome da mÃ£e)\s*[:\-]?\s*', '', v, flags=re.IGNORECASE)
+    if re.match(r'^\d{1,2}\s+[A-Za-zÃƒâ‚¬-Ã¿]', v):
         v = re.sub(r'^\d{1,2}\s+', '', v)
-    v = re.sub(r'\s+(Identificação|Cartório|Médico|Nome do Pai|Nome da Mãe).*$',
+    v = re.sub(r'\s+(IdentificaÃ§Ã£o|CartÃ³rio|MÃ©dico|Nome do Pai|Nome da MÃ£e).*$',
                '', v, flags=re.IGNORECASE)
     v = _collapse_repeats(v).strip()
     low = v.lower()
@@ -862,11 +862,11 @@ def _clean_causa(value: str) -> str:
     v = re.sub(r'^99\s*[-.]?\s*ignorado(\s*99\s*[-.]?\s*ignorado)?', '', v, flags=re.IGNORECASE).strip()
     v = re.sub(r'^hoque\s+septico', 'choque septico', v, flags=re.IGNORECASE).strip()
 
-    v = re.sub(r'^\(?a doença ou estado mórbido que causou diretamente a morte\)?[: ]*',
+    v = re.sub(r'^\(?a doenÃ§a ou estado mÃ³rbido que causou diretamente a morte\)?[: ]*',
                '', v, flags=re.IGNORECASE)
-    v = re.sub(r'^(seqüência|sequencia) de causas[^:]*[: ]*', '', v, flags=re.IGNORECASE)
-    v = re.sub(r'^(devido ou como consequência de)[: ]*', '', v, flags=re.IGNORECASE)
-    v = re.sub(r'^(causa básica|causa basica)[: ]*', '', v, flags=re.IGNORECASE)
+    v = re.sub(r'^(seqÃ¼Ãªncia|sequencia) de causas[^:]*[: ]*', '', v, flags=re.IGNORECASE)
+    v = re.sub(r'^(devido ou como consequÃªncia de)[: ]*', '', v, flags=re.IGNORECASE)
+    v = re.sub(r'^(causa bÃ¡sica|causa basica)[: ]*', '', v, flags=re.IGNORECASE)
     v = v.strip()
     if re.fullmatch(r'\d+\s*(anos?|meses?|dias?|horas?|min\w*)?', v, re.IGNORECASE):
         return ""
@@ -958,8 +958,8 @@ def _normalize_cidade(value: str) -> str:
     if not value:
         return ""
     v = str(value).strip().rstrip("|.,;:")
-    v = re.sub(r'\s*Munic[ií]pio\s*/\s*UF\s*\(se\s+estrangeiro\s+informar\s+Pa[ií]s\)[:.\s]*$', '', v, flags=re.IGNORECASE)
-    v = re.sub(r'^Munic[ií]pio\s*/\s*UF\s*\(se\s+estrangeiro\s+informar\s+Pa[ií]s\)[:.\s]*', '', v, flags=re.IGNORECASE)
+    v = re.sub(r'\s*Munic[iÃ­]pio\s*/\s*UF\s*\(se\s+estrangeiro\s+informar\s+Pa[iÃ­]s\)[:.\s]*$', '', v, flags=re.IGNORECASE)
+    v = re.sub(r'^Munic[iÃ­]pio\s*/\s*UF\s*\(se\s+estrangeiro\s+informar\s+Pa[iÃ­]s\)[:.\s]*', '', v, flags=re.IGNORECASE)
     v = re.sub(r'\s*c.digo(?:\s+\d+)?(?:\s*UF\s*[A-Z]{2})?\s*$', '', v, flags=re.IGNORECASE)
     v = re.sub(r'^[.\-:;,\s]+', '', v)
     v = re.sub(r'\s*c.digo(?:\s+\d+)?(?:\s*UF\s*[A-Z]{2})?\s*$', '', v, flags=re.IGNORECASE)
@@ -969,7 +969,7 @@ def _normalize_cidade(value: str) -> str:
     low = v.lower()
     if low in CITY_OCR_FIX:
         return CITY_OCR_FIX[low]
-    if v.upper() in {"UF", "CEP", "MÃ‰DICO", "MEDICO", "CARTÃ“RIO", "LOCAL DE OCORRÃŠNCIA"}:
+    if v.upper() in {"UF", "CEP", "MÃƒâ€°DICO", "MEDICO", "CARTÃƒâ€œRIO", "LOCAL DE OCORRÃƒÅ NCIA"}:
         return ""
     if re.fullmatch(r'\d+', v) or len(v) < 3:
         return ""
@@ -984,7 +984,7 @@ def _normalize_uf(value: str) -> str:
     uf = {"IC": "SP"}.get(uf, uf)
     return uf if uf in VALID_UFS else ""
 
-# â”€â”€ Parser da DO â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Ã¢â€â‚¬Ã¢â€â‚¬ Parser da DO Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 def _find_block_value(text: str, labels: list, stop_labels: list = None) -> str:
     if stop_labels is None:
@@ -1016,7 +1016,7 @@ def _find_block_value(text: str, labels: list, stop_labels: list = None) -> str:
                 candidate = lines[j].strip()
                 if not candidate or len(candidate) < 2:
                     continue
-                if re.match(r"^\d+\s+[A-ZÁÃ‰ÍÃ“ÃšÃ‚ÃŠÃ”ÃƒÃ•Ã‡]", candidate):
+                if re.match(r"^\d+\s+[A-ZÃÃƒâ€°ÃÃƒâ€œÃƒÅ¡Ãƒâ€šÃƒÅ Ãƒâ€ÃƒÆ’Ãƒâ€¢Ãƒâ€¡]", candidate):
                     continue
                 cand_lower = candidate.lower().strip("|.,;:")
                 if cand_lower in skip_headers:
@@ -1080,7 +1080,7 @@ def _parsed_do_form(lines: list) -> dict:
         line = line.strip()
         if not line:
             continue
-        m = re.match(r"^(\d{1,2})\s+[A-Za-zÃ€-ÿ]", line)
+        m = re.match(r"^(\d{1,2})\s+[A-Za-zÃƒâ‚¬-Ã¿]", line)
         if m:
             if current_field and current_lines:
                 field_values[current_field] = "\n".join(current_lines)
@@ -1115,14 +1115,14 @@ def _parsed_do_form(lines: list) -> dict:
     return result
 
 def _detect_obito_type(text: str) -> str:
-    if re.search(r'X\s*(Nao|Não)\s*fetal', text, re.IGNORECASE):
-        return "Não Fetal"
-    if re.search(r'X\s*Fetal', text) and not re.search(r'X\s*(Nao|Não)\s*fetal', text, re.IGNORECASE):
+    if re.search(r'X\s*(Nao|NÃ£o)\s*fetal', text, re.IGNORECASE):
+        return "NÃ£o Fetal"
+    if re.search(r'X\s*Fetal', text) and not re.search(r'X\s*(Nao|NÃ£o)\s*fetal', text, re.IGNORECASE):
         return "Fetal"
     if re.search(r'\bFatal\b', text, re.IGNORECASE):
-        return "Não Fetal"
-    if re.search(r'\b(Nao|Não)\s*fetal\b', text, re.IGNORECASE):
-        return "Não Fetal"
+        return "NÃ£o Fetal"
+    if re.search(r'\b(Nao|NÃ£o)\s*fetal\b', text, re.IGNORECASE):
+        return "NÃ£o Fetal"
     if re.search(r'\bFetal\b', text, re.IGNORECASE):
         return "Fetal"
     return ""
@@ -1131,14 +1131,14 @@ def _extract_uf_ocorrencia(text: str) -> str:
     if not text:
         return ""
     ocorrencia_match = re.search(
-        r'Local de ocorrência do óbito[:\s]*\n?(.*?)(?:III[\)\.\s]|PREENCHEMENTO|IV[\)\.\s]|$)',
+        r'Local de ocorrÃªncia do Ã³bito[:\s]*\n?(.*?)(?:III[\)\.\s]|PREENCHEMENTO|IV[\)\.\s]|$)',
         text, re.DOTALL | re.IGNORECASE
     )
     if ocorrencia_match:
         uf_match = re.search(r'UF\s*[:\s]*([A-Z]{2})', ocorrencia_match.group(1))
         if uf_match:
             return _normalize_uf(uf_match.group(1))
-    ufs = re.findall(r'(?<!Município\s.*)UF\s*[:\s]*([A-Z]{2})', text)
+    ufs = re.findall(r'(?<!MunicÃ­pio\s.*)UF\s*[:\s]*([A-Z]{2})', text)
     if ufs:
         return _normalize_uf(ufs[-1])
     return ""
@@ -1152,8 +1152,8 @@ def _parse_parte_i(text: str) -> dict:
     )
     if not parte_i_match:
         parte_i_match = re.search(
-            r'Causas?\s+da?\s+morte[:\s]*\n?(.*?)(?:PARTE\s+II|Outras condições|'
-            r'Nome do médico|CRM|$)',
+            r'Causas?\s+da?\s+morte[:\s]*\n?(.*?)(?:PARTE\s+II|Outras condiÃ§Ãµes|'
+            r'Nome do mÃ©dico|CRM|$)',
             text, re.DOTALL | re.IGNORECASE
         )
     if not parte_i_match:
@@ -1162,8 +1162,8 @@ def _parse_parte_i(text: str) -> dict:
     bloco = parte_i_match.group(1)
     marcador = re.compile(r'^(?:\d+[\)\.]\s*|[a-dA-D][\)\.]\s*|[IVXivx]+[\)\.]\s*)(.*)$')
     rotulo = re.compile(
-        r'^\s*(?:tempo aproximado|cid da causa|causa básica|causa basica|'
-        r'data do atestado|ocorr[eê]ncia|assinatura|atestante|m[eé]dico|medico)',
+        r'^\s*(?:tempo aproximado|cid da causa|causa bÃ¡sica|causa basica|'
+        r'data do atestado|ocorr[eÃª]ncia|assinatura|atestante|m[eÃ©]dico|medico)',
         re.IGNORECASE
     )
     causas = []
@@ -1246,7 +1246,7 @@ def _parse_obito_regex(text: str) -> dict:
 
     nome = _sanitize_person_name(_find_block_value(text, [
         "Nome do Falecido", "Nome do falecido", "Falecido", "Nome",
-    ], stop_labels=["Nome do Pai", "Nome da Mãe", "Nome do pai", "Nome da mãe"]))
+    ], stop_labels=["Nome do Pai", "Nome da MÃ£e", "Nome do pai", "Nome da mÃ£e"]))
     if not nome:
         nome = _sanitize_person_name(_parsed_do_form(text.split("\n")).get("NOME", ""))
     if not nome:
@@ -1255,10 +1255,10 @@ def _parse_obito_regex(text: str) -> dict:
     # --- Ponto 1a: limpar nome poluido com labels do formulario ---
     if nome and any(j in nome.lower() for j in FORM_JUNK):
         _labels = re.compile(
-            r'descri[çc][ãa]o sum[áa]ria|endere[çc]o|logradouro|n[uú]mero|bairro|'
-            r'munic[ií]pio|c[oó]digo|registro|complemento|cart[oó]rio|'
-            r'ocupa[çc][ãa]o habitual|situa[çc][ãa]o conjugal|ra[çc]a/cor|'
-            r'naturalidade|escolaridade|meio de contato|identifica[çc][ãa]o', re.IGNORECASE)
+            r'descri[Ã§c][Ã£a]o sum[Ã¡a]ria|endere[Ã§c]o|logradouro|n[uÃº]mero|bairro|'
+            r'munic[iÃ­]pio|c[oÃ³]digo|registro|complemento|cart[oÃ³]rio|'
+            r'ocupa[Ã§c][Ã£a]o habitual|situa[Ã§c][Ã£a]o conjugal|ra[Ã§c]a/cor|'
+            r'naturalidade|escolaridade|meio de contato|identifica[Ã§c][Ã£a]o', re.IGNORECASE)
         _partes = [p.strip().rstrip("|.,;:") for p in _labels.split(nome) if p.strip()]
         _nome_limpo = ""
         for _p in reversed(_partes):
@@ -1269,15 +1269,15 @@ def _parse_obito_regex(text: str) -> dict:
         structured["NOME"] = _sanitize_person_name(_nome_limpo) if _nome_limpo else ""
 
     mae = _sanitize_person_name(_find_block_value(text, [
-        "Nome da Mãe", "Nome da mãe", "Nome da Mae", "Nome da mae",
-    ], stop_labels=["Nome do Pai", "Nome do pai", "Endereço", "Logradouro"]))
+        "Nome da MÃ£e", "Nome da mÃ£e", "Nome da Mae", "Nome da mae",
+    ], stop_labels=["Nome do Pai", "Nome do pai", "EndereÃ§o", "Logradouro"]))
     if not mae:
         mae = _sanitize_person_name(_parsed_do_form(text.split("\n")).get("NOME_MAE", ""))
     structured["NOME_MAE"] = mae
 
     _raw_nasc = _find_block_value(text, [
         "Data de nascimento", "Data de Nascimento", "Nascimento", "Nasc.",
-    ], stop_labels=["Data do óbito", "Data do obito", "Idade"])
+    ], stop_labels=["Data do Ã³bito", "Data do obito", "Idade"])
     structured["NASCIMENTO"] = _normalize_date(_normalize_date_ocr(_raw_nasc))
     if not structured["NASCIMENTO"]:
         _lines_t = text.split("\n")
@@ -1296,7 +1296,7 @@ def _parse_obito_regex(text: str) -> dict:
                 break
 
         _raw_data_obito = ""
-    for label in ["Data do óbito", "Data de óbito", "Data do obito", "Data de obito"]:
+    for label in ["Data do Ã³bito", "Data de Ã³bito", "Data do obito", "Data de obito"]:
         for line in text.split('\n'):
             if label.lower() in line.lower():
                 resto = line[line.lower().index(label.lower()) + len(label):].strip()
@@ -1320,22 +1320,22 @@ def _parse_obito_regex(text: str) -> dict:
                     structured["DATA_OBITO"] = _forcar_ano_obito(f"{_dd}/{_mm}/{_yyyy}")
 
     _raw_hora = _find_block_value(text, [
-        "Hora do óbito", "Hora do obito", "Hora",
-    ], stop_labels=["Data do óbito", "Data do obito", "Local do óbito", "Local do obito"])
+        "Hora do Ã³bito", "Hora do obito", "Hora",
+    ], stop_labels=["Data do Ã³bito", "Data do obito", "Local do Ã³bito", "Local do obito"])
     if _raw_hora:
         hora = _normalize_hora(_raw_hora)
         if hora:
             structured["HORA_OBITO"] = hora
 
     structured["CIDADE_OBITO"] = _normalize_cidade(_find_block_value(text, [
-        "Município de ocorrência", "Municipio de ocorrencia", "Município de Ocorrência",
+        "MunicÃ­pio de ocorrÃªncia", "Municipio de ocorrencia", "MunicÃ­pio de OcorrÃªncia",
     ]))
     structured["UF_OBITO"] = _normalize_uf(_extract_uf_ocorrencia(text))
     if not structured["UF_OBITO"]:
         structured["UF_OBITO"] = _normalize_uf(_find_block_value(text, ["UF"]))
 
     structured["TIPO_OBITO"] = _detect_obito_type(text)
-    if structured["TIPO_OBITO"] not in ("Fetal", "Não Fetal", ""):
+    if structured["TIPO_OBITO"] not in ("Fetal", "NÃ£o Fetal", ""):
         structured["TIPO_OBITO"] = ""
 
     causas = _parse_parte_i(text)
@@ -1348,7 +1348,7 @@ def _parse_obito_regex(text: str) -> dict:
     _causas_seq = []
     for _k in ["CAUSA_MORTE", "CAUSA_MORTE_2", "CAUSA_MORTE_3", "CAUSA_MORTE_4"]:
         _v = _clean_causa(structured.get(_k, ""))
-        _v = re.sub(r'^[a-z]\s+(?=[A-ZÃ€-Ãš])', '', _v, flags=re.IGNORECASE).strip()
+        _v = re.sub(r'^[a-z]\s+(?=[A-ZÃƒâ‚¬-ÃƒÅ¡])', '', _v, flags=re.IGNORECASE).strip()
         if _v:
             _causas_seq.append(_v)
     _causas_dedup = []
@@ -1367,22 +1367,22 @@ def _parse_obito_regex(text: str) -> dict:
     structured["CAUSA_BASICA"] = _clean_causa(structured.get("CAUSA_BASICA", ""))
 
     structured["MEDICO_ATESTANTE"] = _clean_field(_find_block_value(text, [
-        "Médico", "Medico", "Nome do Médico", "Nome do medico",
+        "MÃ©dico", "Medico", "Nome do MÃ©dico", "Nome do medico",
     ], stop_labels=["CRM"]))
     structured["CRM_MEDICO"] = _clean_field(_find_block_value(text, ["CRM"]))
 
-    do_match = re.search(r'Declaração\s+de\s+Ã“bito\s+(\d+(?:-\d+)?)', text, re.IGNORECASE)
+    do_match = re.search(r'DeclaraÃ§Ã£o\s+de\s+Ãƒâ€œbito\s+(\d+(?:-\d+)?)', text, re.IGNORECASE)
     if do_match:
         structured["DO_NUMERO"] = do_match.group(1)
 
     parte_ii_match = re.search(
-        r'PARTE\s+II[:\s]*\n?(.*?)(?:Outros episódios|Nome do médico|CRM|$)',
+        r'PARTE\s+II[:\s]*\n?(.*?)(?:Outros episÃ³dios|Nome do mÃ©dico|CRM|$)',
         text, re.DOTALL | re.IGNORECASE
     )
     if parte_ii_match:
-        p2 = re.sub(r'^que contribuíram para a morte[^:]*[: ]*', '',
+        p2 = re.sub(r'^que contribuÃ­ram para a morte[^:]*[: ]*', '',
                     parte_ii_match.group(1).strip(), flags=re.IGNORECASE)
-        p2 = re.sub(r'^outras condições significativas[^:]*[: ]*', '', p2, flags=re.IGNORECASE)
+        p2 = re.sub(r'^outras condiÃ§Ãµes significativas[^:]*[: ]*', '', p2, flags=re.IGNORECASE)
         p2 = _clean_field(p2[:200])
         if p2 and not any(j in p2.lower() for j in FORM_JUNK):
             structured["PARTE_II"] = p2
@@ -1396,13 +1396,13 @@ def _parse_obito_regex(text: str) -> dict:
 
     return structured
 
-# â”€â”€ Validacao â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Ã¢â€â‚¬Ã¢â€â‚¬ Validacao Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 def validate_obito(structured: dict) -> None:
     # --- Limpeza da causa antes de validar (aumenta aprovados) ---
 
     # --- Deteccao de poluicao em campos criticos ---
-    _padroes_lixo = re.compile(r'(?:data do atestado|descri[cç][aã]o sum[aá]ria|logradouro|n[uú]mero|bairro|munic[ií]pio|c[oó]digo|registro|ocupa[cç][aã]o habitual|tempo aproximado|parte\s*i{1,2}|devido ou como|m[eé]dico|cremesp|crm[- ]?sp|uf[: ]|anos completos|menores de 1 ano|necr[oó]psia|assistente|ocorr[eê]ncia|diagn[oó]stico confirmado|fetal ou menor)', re.IGNORECASE)
+    _padroes_lixo = re.compile(r'(?:data do atestado|descri[cÃ§][aÃ£]o sum[aÃ¡]ria|logradouro|n[uÃº]mero|bairro|munic[iÃ­]pio|c[oÃ³]digo|registro|ocupa[cÃ§][aÃ£]o habitual|tempo aproximado|parte\s*i{1,2}|devido ou como|m[eÃ©]dico|cremesp|crm[- ]?sp|uf[: ]|anos completos|menores de 1 ano|necr[oÃ³]psia|assistente|ocorr[eÃª]ncia|diagn[oÃ³]stico confirmado|fetal ou menor)', re.IGNORECASE)
     _poluido = []
     for _f in ("NOME", "NOME_MAE", "CAUSA_MORTE", "CAUSA_BASICA", "MEDICO_ATESTANTE", "CRM_MEDICO"):
         _v = str(structured.get(_f, "") or "").strip()
@@ -1410,7 +1410,7 @@ def validate_obito(structured: dict) -> None:
             continue
         if _padroes_lixo.search(_v):
             _poluido.append(f"{_f} contem texto do formulario")
-    if structured.get("CAUSA_MORTE") and re.search(r'^\s*(?:[bBaA](?:\)|\.)?|[â€¢])\s*[:.\-]?\s*', str(structured["CAUSA_MORTE"])):
+    if structured.get("CAUSA_MORTE") and re.search(r'^\s*(?:[bBaA](?:\)|\.)?|[Ã¢â‚¬Â¢])\s*[:.\-]?\s*', str(structured["CAUSA_MORTE"])):
         _poluido.append("CAUSA_MORTE com prefixo de marcador")
     if _poluido:
         structured["STATUS"] = "REVISAR"
@@ -1419,8 +1419,8 @@ def validate_obito(structured: dict) -> None:
     _causa = str(structured.get("CAUSA_MORTE", "") or "").strip()
     if _causa:
         _causa = re.sub(r'^\s*(?:[a-dA-D](?:\)|\.)?|[.\-\u2022])\s*[:.\-]?\s*', '', _causa)
-        _causa = re.sub(r'^(?:causa\s+(?:imediata|b[aá]sica|antecedente)|devido\s+ou\s+como\s+consequ[eê]ncia\s+de|tempo\s+aproximado\s+entre\s+o\s+in[ií]cio|parte\s+ii?[:\s]*)[:\s\-]*', '', _causa, flags=re.IGNORECASE).strip()
-        if re.search(r'\b(?:data do atestado|m[eé]dico|ocorr[eê]ncia|assistente|diagn[oó]stico confirmado)\b', _causa, flags=re.IGNORECASE) or re.fullmatch(r'[\d.\s]+', _causa):
+        _causa = re.sub(r'^(?:causa\s+(?:imediata|b[aÃ¡]sica|antecedente)|devido\s+ou\s+como\s+consequ[eÃª]ncia\s+de|tempo\s+aproximado\s+entre\s+o\s+in[iÃ­]cio|parte\s+ii?[:\s]*)[:\s\-]*', '', _causa, flags=re.IGNORECASE).strip()
+        if re.search(r'\b(?:data do atestado|m[eÃ©]dico|ocorr[eÃª]ncia|assistente|diagn[oÃ³]stico confirmado)\b', _causa, flags=re.IGNORECASE) or re.fullmatch(r'[\d.\s]+', _causa):
             _causa = ""
         structured["CAUSA_MORTE"] = _causa
     if not structured.get("CAUSA_MORTE") and structured.get("CAUSA_BASICA"):
@@ -1458,7 +1458,7 @@ def validate_obito(structured: dict) -> None:
         structured["STATUS"] = "OK"
         structured["ERROS"] = ""
 
-# â”€â”€ Processamento individual (com dedup) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Ã¢â€â‚¬Ã¢â€â‚¬ Processamento individual (com dedup) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 def _process_single_image(file_id, file_name, existing):
     logger.info(f"Processando: {file_name} ({file_id})")
@@ -1574,7 +1574,7 @@ def _process_single_image(file_id, file_name, existing):
     structured["NOME_ARQUIVO"] = file_name
     return structured
 
-# â”€â”€ Batch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Ã¢â€â‚¬Ã¢â€â‚¬ Batch Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 STOP_REQUESTED = False
 _BATCH_INFO = {"active": False, "current": "", "processed": 0, "duplicates": 0,
@@ -1775,7 +1775,7 @@ def _run_batch(limit: int, reprocess: bool = False, min_score: float = None, fil
         logger.error(f"Erro no batch: {e}", exc_info=True)
         return {"success": False, "error": str(e), "message": "Erro interno"}
 
-# â”€â”€ Dedupe da aba Auditoria â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Ã¢â€â‚¬Ã¢â€â‚¬ Dedupe da aba Auditoria Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 def _dedupe_auditoria(sheet_id: str = SHEET_ID, destino: str = "Auditoria_LIMPA") -> dict:
     """Remove duplicatas mantendo o melhor registro por NOME_ARQUIVO."""
@@ -1931,7 +1931,7 @@ _HTML_APP = r'''<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OCR DO — Processamento</title>
+<title>OCR DO â€” Processamento</title>
 <style>
   :root{--azul:#0e7490;--azul2:#164e63;--teal:#14b8a6;--ok:#16a34a;--ambar:#d97706;--cinza:#64748b;--borda:#e2e8f0;--fundo:#f1f5f9}
   *{box-sizing:border-box;margin:0;padding:0}
@@ -1961,12 +1961,12 @@ _HTML_APP = r'''<!DOCTYPE html>
 </head>
 <body>
 <div class="wrap">
-  <h1>OCR de Declarações de Óbito</h1>
-  <div class="sub">Processamento em lote · São Caetano do Sul/SP · 22/09/2026</div>
+  <h1>OCR de DeclaraÃ§Ãµes de Ã“bito</h1>
+  <div class="sub">Processamento em lote Â· SÃ£o Caetano do Sul/SP Â· 22/09/2026</div>
 
   <div class="grid">
     <div class="card">
-      <h2>&#128272; Sessão</h2>
+      <h2>&#128272; SessÃ£o</h2>
       <label>Chave da API (Bearer)</label>
       <div class="row">
         <input type="password" id="key" placeholder="Digite a chave..." autocomplete="off">
@@ -1979,15 +1979,15 @@ _HTML_APP = r'''<!DOCTYPE html>
       <h2>&#9889; Processamento em lote</h2>
       <label>Quantidade de arquivos (limite)</label>
       <input type="number" id="limit" value="10" min="1">
-      <label class="row"><input type="checkbox" id="force"> Forçar reprocessamento (ignora já processados)</label>
+      <label class="row"><input type="checkbox" id="force"> ForÃ§ar reprocessamento (ignora jÃ¡ processados)</label>
       <button id="btnBatch" onclick="processaBatch()">Iniciar processamento</button>
       <div id="batchStatus" class="status"></div>
       <pre id="batchRes" style="display:none"></pre>
     </div>
 
     <div class="card">
-      <h2>&#128196; Arquivos específicos</h2>
-      <label>Nomes separados por vírgula</label>
+      <h2>&#128196; Arquivos especÃ­ficos</h2>
+      <label>Nomes separados por vÃ­rgula</label>
       <input type="text" id="files" placeholder="ex.: img53 (1).jpg,img116.jpg">
       <button class="ambar" onclick="reprocessaArquivos()">Reprocessar arquivos</button>
       <div id="filesStatus" class="status"></div>
@@ -2003,13 +2003,13 @@ _HTML_APP = r'''<!DOCTYPE html>
     </div>
 
     <div class="card links">
-      <h2>&#128279; Links rápidos</h2>
+      <h2>&#128279; Links rÃ¡pidos</h2>
       <a href="https://skip-artifacts-snapshots.application.production.adapta.tools/user_346erRS8bnjxCWFUtT0nbfMBoHk/pzit7njtpryt3ukvjewd3pg3ca/revisions/d4b19ccc-c507-4d48-bf50-a751ffb66a5a/index.html" target="_blank" rel="noopener">Abrir dashboard de resultados</a>
       <a href="https://docs.google.com/spreadsheets/d/1ETms0jR61Idqxbfr0nBdTXJGOHeGWFBomQGIZHPUJTM" target="_blank" rel="noopener">Abrir planilha Auditoria_LIMPA</a>
     </div>
   </div>
 
-  <footer>Chave armazenada apenas no seu navegador (sessionStorage). Imagens entram pela pasta do Google Drive. Qualidade da imagem (QUALIDADE_IMAGEM) disponível para arquivos novos.</footer>
+  <footer>Chave armazenada apenas no seu navegador (sessionStorage). Imagens entram pela pasta do Google Drive. Qualidade da imagem (QUALIDADE_IMAGEM) disponÃ­vel para arquivos novos.</footer>
 </div>
 
 <script>
@@ -2031,7 +2031,7 @@ _HTML_APP = r'''<!DOCTYPE html>
             var proc = d.processed || d.total_processados || d.processados || "";
             var tot = d.total || d.total_arquivos || "";
             var fase = d.status || d.etapa || d.message || "";
-            statusEl.textContent = "Processando " + proc + (tot ? " de " + tot : "") + (fase ? " — " + fase : "") + "...";
+            statusEl.textContent = "Processando " + proc + (tot ? " de " + tot : "") + (fase ? " â€” " + fase : "") + "...";
           }
         } catch(e) {}
         if (parado() || Date.now() - ini > 600000) { clearInterval(iv); res(); }
@@ -2158,7 +2158,7 @@ def admin_dedupe(aba: str = "Auditoria_LIMPA"):
 def app_page():
     return HTMLResponse(_HTML_APP)
 
-# ── Patch 25: Dashboard dinamico ───────────────────────────────
+# â”€â”€ Patch 25: Dashboard dinamico â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 import time as _time
 
 _API_KEY = os.getenv("OCR_API_KEY", "scs2026")
@@ -2403,7 +2403,7 @@ function renderTabela(){
   var th = "<thead><tr><th>Arquivo</th><th>Motivo</th><th>Nome</th><th>Data obito</th><th>Medico / CRM</th><th>DO</th><th>Imagem</th></tr></thead>";
   var body = rows.map(function(r){
     var link = r.link ? '<a class="ver" href="' + r.link + '" target="_blank" rel="noopener">Ver imagem</a>' : '<span style="color:var(--cinza)">sem arquivo</span>';
-    return "<tr><td><b>" + r.arquivo + "</b></td><td>" + (r.motivo || "—") + "</td><td>" + (r.nome || "") + "</td><td>" + (r.data_obito || "") + "</td><td>" + (r.medico || "") + (r.crm ? " / " + r.crm : "") + "</td><td>" + (r.do || "") + "</td><td>" + link + "</td></tr>";
+    return "<tr><td><b>" + r.arquivo + "</b></td><td>" + (r.motivo || "â€”") + "</td><td>" + (r.nome || "") + "</td><td>" + (r.data_obito || "") + "</td><td>" + (r.medico || "") + (r.crm ? " / " + r.crm : "") + "</td><td>" + (r.do || "") + "</td><td>" + link + "</td></tr>";
   }).join("");
   t.innerHTML = th + "<tbody>" + (body || '<tr><td colspan="7" style="color:var(--cinza)">Nenhum registro em revisao.</td></tr>') + "</tbody>";
 }
@@ -2558,7 +2558,7 @@ def _central_campo_preenchido(v):
     s = str(v).strip()
     if not s:
         return False
-    if s.lower() in ("nao informado", "n/a", "-", "—"):
+    if s.lower() in ("nao informado", "n/a", "-", "â€”"):
         return False
     return True
 
@@ -2756,7 +2756,7 @@ def api_sanear_nomelixo(authorization: str = _Hdr(default=""), dry_run: bool = F
                 acao.append("DO_NUMERO movido do NOME")
             updates.append((i, header.index("NOME") + 1, ""))
             acao.append("NOME limpo (era numero de DO)")
-            updates.append((i, header.index("ERROS") + 1, "NOME continha numero de DO — movido para DO_NUMERO. Conferir imagem para recuperar o nome real."))
+            updates.append((i, header.index("ERROS") + 1, "NOME continha numero de DO â€” movido para DO_NUMERO. Conferir imagem para recuperar o nome real."))
         elif parsed[0] == "DATA":
             data, hora = parsed[1], parsed[2]
             if not _central_campo_preenchido(d.get("DATA_OBITO")):
@@ -2767,7 +2767,7 @@ def api_sanear_nomelixo(authorization: str = _Hdr(default=""), dry_run: bool = F
                 acao.append("HORA_OBITO preenchida")
             updates.append((i, header.index("NOME") + 1, ""))
             acao.append("NOME limpo (era data/hora)")
-            updates.append((i, header.index("ERROS") + 1, "NOME continha data/hora de obito — movido para DATA_OBITO. Conferir imagem para recuperar o nome real."))
+            updates.append((i, header.index("ERROS") + 1, "NOME continha data/hora de obito â€” movido para DATA_OBITO. Conferir imagem para recuperar o nome real."))
         else:
             updates.append((i, header.index("ERROS") + 1, "NOME contem valor nao-nome (provalvel inversao de leitura). Conferir imagem."))
             acao.append("NOME marcado como nao-nome")
@@ -2808,7 +2808,7 @@ def _central_valor_util(campo, txt):
     if len(txt) > 120:
         return False
     baixo = txt.lower().strip()
-    if baixo in ("lugar", "número", "numero", "anos completos", "do pai", "não informado", "nao informado", "none", "n/a", "-", "—"):
+    if baixo in ("lugar", "nÃºmero", "numero", "anos completos", "do pai", "nÃ£o informado", "nao informado", "none", "n/a", "-", "â€”"):
         return False
     if baixo.startswith("campo critico"):
         return False
@@ -3043,7 +3043,7 @@ def api_diagnostico_ocr(authorization: str = _Hdr(default=""), limite: int = 5, 
             continue
         import re as _re2
         datas = sorted(set(_re2.findall(r"\b\d{1,2}[\/\.]\d{1,2}[\/\.]\d{4}\b", raw)))
-        tem_causas = bool(_re2.search(r"CAUSA|Parte\s*I|Imediata|Doença ou estado|Condi[çc]õe", raw, _re2.IGNORECASE))
+        tem_causas = bool(_re2.search(r"CAUSA|Parte\s*I|Imediata|DoenÃ§a ou estado|Condi[Ã§c]Ãµe", raw, _re2.IGNORECASE))
         tem_nome = bool(_re2.search(r"Nome\s*[:\d]|Falecid|Falecimento", raw, _re2.IGNORECASE))
         detalhes.append({
             "linha": i,
@@ -3912,12 +3912,12 @@ def _proxy_post(payload_bytes, params, mime="application/octet-stream", timeout=
     payload = _json_p.loads(raw)
     if not payload.get("success"):
         raise RuntimeError("Proxy Apps Script: %s" % payload.get("error", "erro desconhecido"))
-    return payload# ─────────────────────────────────────────────────────────────────────────────
-# Patch 52 — Filtro anti-VERSO: verso da DO não é mais registrado como caso
-# Intercepta a gravação na planilha e descarta linhas STATUS = "VERSO".
-# Não altera nenhuma função existente — apenas envolve (wrap) as funções de
-# gravação. Reversível removendo este bloco.
-# ─────────────────────────────────────────────────────────────────────────────
+    return payload# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Patch 52 â€” Filtro anti-VERSO: verso da DO nÃ£o Ã© mais registrado como caso
+# Intercepta a gravaÃ§Ã£o na planilha e descarta linhas STATUS = "VERSO".
+# NÃ£o altera nenhuma funÃ§Ã£o existente â€” apenas envolve (wrap) as funÃ§Ãµes de
+# gravaÃ§Ã£o. ReversÃ­vel removendo este bloco.
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _patch52_filtrar_verso(rows):
     """Remove linhas VERSO de uma lista de linhas (dicts ou listas na ordem HEADER)."""
@@ -3963,28 +3963,28 @@ def _append_rows_to_sheet(*args, **kwargs):
     return _orig_append_rows_to_sheet(*args, **kwargs)
 
 print("[PATCH52] Filtro anti-VERSO ativo: versos nao serao registrados como casos.", flush=True)
-# ───────────────────────────────── fim do Patch 52 ──────────────────────────
-# ─────────────────────────────────────────────────────────────────────────────
-# Patch 53 — Edição de campos da DO pela Central da Auditoria
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ fim do Patch 52 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Patch 53 â€” EdiÃ§Ã£o de campos da DO pela Central da Auditoria
 # Endpoint POST /api/atualizar_campo: atualiza um campo da linha da DO na aba
 # Auditoria_Unica e registra trilha de auditoria (EDITADO_POR, EDITADO_EM,
-# VALOR_ORIGINAL). Campos editáveis controlados por lista fixa.
-# ─────────────────────────────────────────────────────────────────────────────
+# VALOR_ORIGINAL). Campos editÃ¡veis controlados por lista fixa.
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
 import datetime as _dt53
 
 _PATCH53_CAMPOS = {
-    "NOME": ["NOME", "NOME_FALECIDO", "FALECIDO"],
-    "MAE": ["MAE", "NOME_MAE", "MAE_DO_FALECIDO"],
-    "CID": ["CID", "CID10", "CID_10"],
-    "CAUSA_BASICA": ["CAUSA_BASICA", "CAUSA"],
-    "DATA_OBITO": ["DATA_OBITO", "DATA_HORA_OBITO", "DATA_E_HORA_OBITO"],
-    "MEDICO_ATESTANTE": ["MEDICO_ATESTANTE", "ATESTANTE"],
-    "CRM": ["CRM", "CRM_ATESTANTE"],
-    "IDADE": ["IDADE"],
-    "CIDADE": ["CIDADE", "CIDADE_OBITO"],
+    "NOME": ["NOME"],
+    "MAE": ["NOME_MAE"],
+    "CID": ["CID_BASICA", "CID_AUTOMATICO"],
+    "CAUSA_BASICA": ["CAUSA_BASICA", "CAUSA_MORTE"],
+    "DATA_OBITO": ["DATA_OBITO"],
+    "MEDICO_ATESTANTE": ["MEDICO_ATESTANTE"],
+    "CRM": ["CRM_MEDICO"],
+    "IDADE": ["IDADE_ANOS"],
+    "CIDADE": ["CIDADE_OBITO"],
 }
 
 
@@ -4108,4 +4108,5 @@ async def api_atualizar_campo(req: Request):
         return JSONResponse(status_code=500, content={"ok": False, "erro": repr(e)})
 
 print("[PATCH53] Endpoint /api/atualizar_campo ativo: edicao de campos da DO com trilha de auditoria.", flush=True)
-# ───────────────────────────────── fim do Patch 53 ──────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ fim do Patch 53 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
